@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ applies a circular mask. splash_brand_icon is a padded rounded
+     square so the visible splash mark reads as rounded corners, not a circle. -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:gravity="center"
+    android:src="@drawable/splash_brand_icon" />

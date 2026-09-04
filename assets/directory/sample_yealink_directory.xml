@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<YealinkIPPhoneDirectory>
+  <DirectoryEntry>
+    <Name>Example Support</Name>
+    <Telephone type="Internal">100</Telephone>
+  </DirectoryEntry>
+  <DirectoryEntry>
+    <Name>Example Reception</Name>
+    <Telephone type="Internal">101</Telephone>
+  </DirectoryEntry>
+  <DirectoryEntry>
+    <Name>Example Meeting Room</Name>
+    <Telephone type="Internal">102</Telephone>
+  </DirectoryEntry>
+  <DirectoryEntry>
+    <Name>Example Vendor Desk</Name>
+    <Company>Example Telecom</Company>
+    <Telephone type="External">14165550100</Telephone>
+  </DirectoryEntry>
+</YealinkIPPhoneDirectory>

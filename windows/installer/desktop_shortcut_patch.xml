@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CPackWiXPatch>
+  <CPackWiXFragment Id="CM_SHORTCUT_DESKTOP">
+    <Condition>CREATE_DESKTOP_SHORTCUT = "1"</Condition>
+  </CPackWiXFragment>
+</CPackWiXPatch>

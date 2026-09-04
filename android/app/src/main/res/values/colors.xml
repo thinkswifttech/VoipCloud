@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="launch_background">#FFFFFFFF</color>
+    <!-- Matches app icon art so Android never invents a white adaptive plate. -->
+    <color name="ic_launcher_background">#FFD32031</color>
+</resources>
