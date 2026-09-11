@@ -143,7 +143,10 @@ class VoipCloudCoreService : CoreService() {
                 startForeground(
                     notificationId,
                     notification,
-                    foregroundServiceTypes(isVideoCall)
+                    foregroundServiceTypes(
+                        isVideoCall = isVideoCall,
+                        isCapturingAudio = callSnapshot?.state == AndroidCallCoordinator.State.ACTIVE
+                    )
                 )
             } else {
                 @Suppress("DEPRECATION")
@@ -174,8 +177,14 @@ class VoipCloudCoreService : CoreService() {
         }
     }
 
-    private fun foregroundServiceTypes(isVideoCall: Boolean): Int {
+    private fun foregroundServiceTypes(
+        isVideoCall: Boolean,
+        isCapturingAudio: Boolean
+    ): Int {
         var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        if (isCapturingAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
         if (isVideoCall && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
         }
