@@ -40,6 +40,22 @@ void main() {
       findsOneWidget,
     );
 
+    await tester.ensureVisible(find.text('GNU AGPLv3 license'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('GNU AGPLv3 license'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('GNU Affero General Public License v3'), findsOneWidget);
+    expect(
+      find.textContaining('GNU AFFERO GENERAL PUBLIC LICENSE'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Close').last);
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.text('Source code for this version'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Source code for this version'));
     await tester.pump();
 
