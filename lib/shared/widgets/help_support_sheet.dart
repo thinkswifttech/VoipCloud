@@ -74,8 +74,9 @@ class HelpSupportSheet extends ConsumerWidget {
               icon: AppIcons.bellOff,
               title: 'Do not disturb',
               body:
-                  'Immediate DND silently rejects incoming calls. Rejected '
-                  'calls appear as missed.',
+                  'Choose This device to silence only this installation, or '
+                  'All devices to apply PBX DND to the whole extension. '
+                  'Unanswered calls appear as missed.',
             ),
             if (canMessage)
               const _HelpGuideTile(
