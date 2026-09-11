@@ -23,7 +23,9 @@ import 'dialer_controller.dart';
 import 'dialer_input_platform.dart';
 
 class DialerScreen extends ConsumerStatefulWidget {
-  const DialerScreen({super.key});
+  const DialerScreen({this.initialDestination, super.key});
+
+  final String? initialDestination;
 
   static const _keys = [
     _DialKey('1', '', icon: AppIcons.voicemail),
@@ -52,7 +54,16 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
   @override
   void initState() {
     super.initState();
+    _applyInitialDestination(widget.initialDestination);
     HardwareKeyboard.instance.addHandler(_handleDesktopDialKey);
+  }
+
+  @override
+  void didUpdateWidget(covariant DialerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialDestination != oldWidget.initialDestination) {
+      _applyInitialDestination(widget.initialDestination);
+    }
   }
 
   @override
@@ -410,6 +421,13 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
     _pendingCursor = value.length;
     _destinationFocus.requestFocus();
     _syncDestinationController(ref.read(dialerControllerProvider));
+  }
+
+  void _applyInitialDestination(String? value) {
+    final destination = value?.trim() ?? '';
+    if (destination.isEmpty) return;
+    ref.read(dialerControllerProvider.notifier).setDestination(destination);
+    _pendingCursor = ref.read(dialerControllerProvider).length;
   }
 
   Future<void> _showAccountDetail(

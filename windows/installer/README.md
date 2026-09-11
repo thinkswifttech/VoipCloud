@@ -49,6 +49,10 @@ MSI from CMake's complete install graph, signs it when a thumbprint is supplied,
 verifies the signature, and prints its SHA-256 digest. Never distribute an
 unsigned production MSI.
 
+Windows MSI builds always use `config/production.json` through Flutter's
+`--dart-define-from-file` option. Packaging validates `APP_ENV=production` and
+checks every value against Flutter's generated Windows defines before compiling.
+
 Desktop calling cannot receive a Flexisip mobile wake after explicit process
 termination or Windows sign-out. Production deployment should instruct users
 to leave VoipCloud running in the tray and may deploy a separately approved

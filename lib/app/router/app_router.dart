@@ -85,8 +85,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           GoRoute(
             path: RoutePaths.dialer,
             name: RouteNames.dialer,
-            pageBuilder: (context, state) =>
-                _shellPage(context, state, const DialerScreen()),
+            pageBuilder: (context, state) => _shellPage(
+              context,
+              state,
+              DialerScreen(initialDestination: state.uri.queryParameters['to']),
+            ),
           ),
           GoRoute(
             path: RoutePaths.directory,

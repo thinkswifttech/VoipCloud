@@ -55,3 +55,4 @@ windows/third_party/linphone/linphone-sdk/
 *.symbols
 *.map.json
 store_release/
+server_staging/

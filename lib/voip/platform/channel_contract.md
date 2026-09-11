@@ -330,8 +330,10 @@ validates and buffers the destination, then sends:
   includes Default App controls on supported iOS versions
 
 Flutter waits for an authenticated session and for any active call UI to close.
-Call actions populate the app dialer; message actions open the composer. Neither
-operation places a call or sends content without another explicit user action.
+Call actions carry the destination in the dialer route so it survives cold-start
+and navigation timing, then populate the number field; message actions open the
+composer. Neither operation places a call or sends content without another
+explicit user action.
 
 Android exposes separate `ACTION_PROCESS_TEXT` activities labelled **Call with
 VoipCloud** and **Message with VoipCloud**, and handles `ACTION_DIAL` `tel:`

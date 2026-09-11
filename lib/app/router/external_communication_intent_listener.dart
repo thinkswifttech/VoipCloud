@@ -6,7 +6,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../features/dialer/presentation/dialer_controller.dart';
 import '../../features/messages/domain/messaging_platform.dart';
 import '../../features/session/presentation/session_controller.dart';
 import 'route_names.dart';
@@ -135,10 +134,7 @@ class _ExternalCommunicationIntentListenerState
       return;
     }
 
-    ref
-        .read(dialerControllerProvider.notifier)
-        .setDestination(intent.destination);
-    widget.router.go(RoutePaths.dialer);
+    widget.router.go(externalCallDialerLocation(intent.destination));
   }
 
   Future<void> _openSystemMessageFallback(String destination) async {
@@ -150,6 +146,14 @@ class _ExternalCommunicationIntentListenerState
       // The system Messages app may be unavailable or restricted.
     }
   }
+}
+
+@visibleForTesting
+String externalCallDialerLocation(String destination) {
+  return Uri(
+    path: RoutePaths.dialer,
+    queryParameters: {'to': destination},
+  ).toString();
 }
 
 enum _ExternalCommunicationAction { call, message }
