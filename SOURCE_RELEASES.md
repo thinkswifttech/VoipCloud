@@ -22,6 +22,8 @@ including:
 - Android, iOS, macOS, and Windows native bridges that are shipped;
 - build definitions, scripts, interface definitions, and project files;
 - dependency manifests and lock files;
+- the exact corresponding source for linked Liblinphone SDK binaries, or a
+  durable no-charge URL for that exact upstream revision;
 - local modifications or patches applied to third-party components; and
 - copyright, license, and third-party notices.
 
@@ -40,15 +42,19 @@ license path until that licensing/source issue is resolved.
 4. Commit every dependency lock file. In particular, record the exact iOS
    Liblinphone Swift-package revision; a moving branch name alone is not enough
    for a production source release.
-5. Create the version tag from the exact commit used for the store build.
-6. Build the store artifacts from a clean checkout of that tag.
-7. Create a GitHub Release for the tag and record:
+5. Verify that the exact corresponding source for every packaged Liblinphone
+   binary is downloadable at no charge. Record its revision, URL, and checksum
+   in the GitHub Release; preserve a source archive if the upstream URL is not
+   durable.
+6. Create the version tag from the exact commit used for the store build.
+7. Build the store artifacts from a clean checkout of that tag.
+8. Create a GitHub Release for the tag and record:
    - app version and build number;
    - commit SHA;
    - Flutter version;
    - Liblinphone versions and resolved revisions; and
    - SHA-256 checksums of the AAB and IPA.
-8. Keep the tag and its source downloadable at no charge while that binary is
+9. Keep the tag and its source downloadable at no charge while that binary is
    distributed. The app's About screen must continue to link users to the
    public releases and GNU AGPLv3 license.
 
