@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import '../../../shared/icons/app_icons.dart';
@@ -12,9 +13,7 @@ class LiblinphoneAttributionTile extends StatelessWidget {
   static final Uri sourceUri = Uri.parse(
     'https://github.com/thinkswifttech/VoipCloud/releases',
   );
-  static final Uri licenseUri = Uri.parse(
-    'https://github.com/thinkswifttech/VoipCloud/blob/main/LICENSE',
-  );
+  static const String bundledLicenseAsset = 'assets/legal/AGPL-3.0.txt';
   static final Uri liblinphoneUri = Uri.parse(
     'https://www.linphone.org/en/liblinphone-voip-sdk/',
   );
@@ -72,8 +71,8 @@ class LiblinphoneAttributionTile extends StatelessWidget {
               ),
               _AttributionLink(
                 title: 'GNU AGPLv3 license',
-                subtitle: 'Read the distribution license',
-                onTap: () => _openExternal(dialogContext, licenseUri),
+                subtitle: 'Read the bundled distribution license',
+                onTap: () => _showBundledLicense(dialogContext),
               ),
               _AttributionLink(
                 title: 'Liblinphone',
@@ -104,6 +103,32 @@ class LiblinphoneAttributionTile extends StatelessWidget {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Unable to open the link.')));
+    }
+  }
+
+  Future<void> _showBundledLicense(BuildContext context) async {
+    try {
+      final license = await rootBundle.loadString(bundledLicenseAsset);
+      if (!context.mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (licenseContext) => AlertDialog(
+          title: const Text('GNU Affero General Public License v3'),
+          content: SingleChildScrollView(child: SelectableText(license)),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(licenseContext).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to load the bundled license.')),
+        );
+      }
     }
   }
 }
