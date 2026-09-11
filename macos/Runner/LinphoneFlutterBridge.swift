@@ -584,7 +584,78 @@ private final class NativeLinphoneController: LinphoneController {
       )
     }
     let address = try normalizeDestination(trimmed)
-    let params =…681 tokens truncated…izedDescriptionKey: "Linphone core is not initialized."]
+    let params = try currentCore.createCallParams(call: nil)
+    params.videoEnabled = false
+    if featureCodePreviousMicEnabled == nil {
+      featureCodePreviousMicEnabled = currentCore.micEnabled
+      currentCore.micEnabled = false
+    }
+    pendingFeatureCodeDial = true
+    defer { pendingFeatureCodeDial = false }
+    guard let call = currentCore.inviteAddressWithParams(addr: address, params: params)
+      ?? currentCore.inviteAddress(addr: address)
+    else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1011,
+        userInfo: [NSLocalizedDescriptionKey: "Unable to dial feature code."]
+      )
+    }
+    let id = callId(call)
+    featureCodeCalls.insert(ObjectIdentifier(call))
+    calls[id] = call
+    emitCall(call: call, state: call.state, featureCode: true)
+    return id
+  }
+
+  private func maybeTerminateFeatureCodeCall(call: Call, state: Call.State) {
+    guard state == .Connected || state == .StreamsRunning else { return }
+    let key = ObjectIdentifier(call)
+    guard featureCodeTerminateScheduled.insert(key).inserted else { return }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      guard let self, self.featureCodeCalls.contains(key) else { return }
+      guard !self.isTerminalCallState(call.state) else { return }
+      try? call.terminate()
+    }
+  }
+
+  private func clearFeatureCodeCall(call: Call) {
+    let key = ObjectIdentifier(call)
+    featureCodeCalls.remove(key)
+    featureCodeTerminateScheduled.remove(key)
+    if featureCodeCalls.isEmpty {
+      if let previous = featureCodePreviousMicEnabled {
+        core?.micEnabled = previous
+      }
+      featureCodePreviousMicEnabled = nil
+    }
+  }
+
+  private func sendMessage(destination: String, text: String) throws {
+    guard let currentCore = core, !destination.trimmingCharacters(in: .whitespaces).isEmpty else {
+      return
+    }
+    let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedText.isEmpty else { return }
+
+    let peer = try normalizeDestination(destination)
+    let params = try currentCore.createDefaultChatRoomParams()
+    let chatRoom = try currentCore.createChatRoom(
+      params: params,
+      localAddr: account?.params?.identityAddress,
+      participants: [peer]
+    )
+    let message = try chatRoom.createMessageFromUtf8(message: trimmedText)
+    message.send()
+    emitMessage(message: message, direction: "outgoing", fallbackStatus: "sent")
+  }
+
+  private func startPresenceSubscriptions(extensions: [String]) throws {
+    guard let currentCore = core else {
+      throw NSError(
+        domain: "SoftphoneLinphone",
+        code: 1010,
+        userInfo: [NSLocalizedDescriptionKey: "Linphone core is not initialized."]
       )
     }
     stopPresenceSubscriptions()
