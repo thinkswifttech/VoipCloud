@@ -16,7 +16,7 @@ SDK references in this source tree:
 - Android no-video SDK: `5.4.124`
 - macOS Swift package: `5.5.16`
 - Windows SDK documentation: `5.5.16`
-- iOS Swift package: `novideo/stable` branch
+- iOS Swift package: `novideo/stable` development branch; each distributed release must record its exact resolved revision
 
 The Linphone SDK bundles additional open-source components with their own
 licenses and notice requirements. Belledonne publishes the component inventory
