@@ -345,8 +345,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://gitlab.linphone.org/BC/public/linphone-sdk-swift-ios";
 			requirement = {
-				branch = "novideo/stable";
-				kind = branch;
+				kind = revision;
+				revision = 1084b9f1051c94d1997d93fc7f9c89e7ef89e9ef;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
