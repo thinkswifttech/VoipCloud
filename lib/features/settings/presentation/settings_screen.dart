@@ -18,6 +18,7 @@ import '../../../voip/platform/android_background_permissions.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_registration_state.dart';
+import 'liblinphone_attribution.dart';
 import 'settings_controller.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -459,30 +460,36 @@ class _AboutSection extends ConsumerWidget {
         .watch(appVersionLabelProvider)
         .maybeWhen(data: (label) => label, orElse: () => 'Version');
 
-    return Row(
+    return Column(
       children: [
-        const AppBrandIcon(size: 52, circular: false),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'VoipCloud',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                ),
+        Row(
+          children: [
+            const AppBrandIcon(size: 52, circular: false),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'VoipCloud',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    versionLabel,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 4),
-              Text(
-                versionLabel,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
+        const Divider(height: 28),
+        const LiblinphoneAttributionTile(),
       ],
     );
   }
