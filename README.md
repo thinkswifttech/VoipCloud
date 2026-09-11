@@ -64,6 +64,12 @@ Never commit production credentials, signing keys, SIP passwords, TURN
 credentials, service-account keys, or private infrastructure configuration.
 See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
+## Build and source releases
+
+See [BUILDING.md](BUILDING.md) for local build instructions. Every distributed
+binary must map to an exact public source tag using the mandatory process in
+[SOURCE_RELEASES.md](SOURCE_RELEASES.md).
+
 ## Project scope
 
 This repository contains the VoIPCloud client applications. Backend services
