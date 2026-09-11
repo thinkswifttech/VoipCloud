@@ -519,7 +519,10 @@ class _AcceleratingBackspaceButtonState
     _heldFor.start();
     widget.onDelete(1);
     _startTimer = Timer(const Duration(milliseconds: 320), () {
-      _rep…40 tokens truncated…       widget.onClear();
+      _repeatTimer = Timer.periodic(const Duration(milliseconds: 90), (_) {
+        final elapsed = _heldFor.elapsedMilliseconds;
+        if (elapsed >= 1900) {
+          widget.onClear();
           _stopDeleting();
         } else if (elapsed >= 1250) {
           widget.onDelete(4);

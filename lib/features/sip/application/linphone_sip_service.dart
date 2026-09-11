@@ -621,7 +621,107 @@ class LinphoneSipService implements SipService {
       final endpoints = await getAudioRoutes();
       final reportsSelection = endpoints.any((item) => item.selected);
       if (!reportsSelection) return;
-      final confirmed = endpoints.a…787 tokens truncated…: config.authUsername,
+      final confirmed = endpoints.any(
+        (item) =>
+            item.selected &&
+            (endpointId == null
+                ? item.route == route
+                : item.endpointId == endpointId),
+      );
+      if (confirmed) return;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    } while (DateTime.now().isBefore(deadline));
+    throw StateError(
+      'The operating system did not activate the selected audio device.',
+    );
+  }
+
+  @override
+  Future<void> sendDtmf(String value) {
+    return _platformChannel.sendDtmf(value);
+  }
+
+  @override
+  Future<CallQualityInfo> getCallQuality({String? callId}) async {
+    final raw = await _platformChannel.getCallQuality(
+      callId: callId ?? _activeCall?.id,
+    );
+    return CallQualityInfo.fromMap(raw);
+  }
+
+  @override
+  Future<void> transferCall({
+    required String callId,
+    required String destination,
+  }) {
+    final trimmed = destination.trim();
+    if (trimmed.isEmpty) {
+      throw const VoipException(
+        message: 'Missing transfer destination',
+        userMessage: 'Choose a directory extension to transfer to.',
+      );
+    }
+    final call = _activeCall;
+    if (call == null || call.id != callId) {
+      throw const VoipException(
+        message: 'No active call to transfer',
+        userMessage: 'There is no active call to transfer.',
+      );
+    }
+    return _platformChannel.transferCall(callId: callId, destination: trimmed);
+  }
+
+  @override
+  Future<void> sendMessage({
+    required String destination,
+    required String text,
+  }) {
+    final trimmedDestination = destination.trim();
+    final trimmedText = text.trim();
+    if (trimmedDestination.isEmpty || trimmedText.isEmpty) {
+      throw const VoipException(
+        message: 'Missing message destination or body',
+        userMessage: 'Enter a destination and message.',
+      );
+    }
+    return _platformChannel.sendMessage(
+      destination: trimmedDestination,
+      text: trimmedText,
+    );
+  }
+
+  @override
+  Future<void> dispose() async {
+    _disposed = true;
+    _windowsCallReconciliationTimer?.cancel();
+    _windowsCallReconciliationTimer = null;
+    await _registrationSubscription?.cancel();
+    await _callSubscription?.cancel();
+    await _messageSubscription?.cancel();
+    try {
+      // Never stop the native core while a call is live — disposing mid-call
+      // (provider rebuild / hot restart) would tear down the media session.
+      final keepCoreAlive =
+          (_activeCall != null && !_isFinished(_activeCall!.status)) ||
+          await _platformChannel.hasActiveCall();
+      if (!keepCoreAlive) {
+        await _platformChannel.dispose();
+      } else {
+        AppLogger.warning('Skipping native SIP dispose while a call is active');
+      }
+    } catch (_) {
+      // The native bridge may not exist in widget/unit tests.
+    }
+    await _registrationController.close();
+    await _callController.close();
+    await _messageController.close();
+  }
+
+  Future<void> _configureNativeAccount(SipConfig config) {
+    return _platformChannel.configureAccount({
+      'extension': config.extension,
+      'sipUsername': config.sipUsername,
+      'authUsername': config.authUsername,
       'password': config.password,
       'ha1': config.ha1,
       'algorithm': config.algorithm,
