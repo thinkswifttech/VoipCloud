@@ -50,6 +50,7 @@ final sipServiceProvider = Provider<SipService>((ref) {
   // disposes the SIP service mid-call (native dispose stops the Linphone core).
   final service = LinphoneSipService(
     callHistoryRepository: ref.read(callHistoryRepositoryProvider),
+    onCallHistoryChanged: () => ref.invalidate(callHistoryProvider),
     stunServer: config.stunServer,
     turnServer: config.turnServer,
     isDndEnabled: () => ref.read(settingsControllerProvider).dndEnabled,

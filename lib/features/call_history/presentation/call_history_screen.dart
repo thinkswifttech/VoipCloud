@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -52,11 +53,26 @@ class _HistoryParty {
   }
 }
 
-class CallHistoryScreen extends ConsumerWidget {
+class CallHistoryScreen extends ConsumerStatefulWidget {
   const CallHistoryScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CallHistoryScreen> createState() => _CallHistoryScreenState();
+}
+
+class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(ref.read(missedCallCountProvider.notifier).markViewed());
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final history = ref.watch(callHistoryProvider);
     final contacts = ref.watch(contactsProvider).value ?? const <Contact>[];
     final directory =

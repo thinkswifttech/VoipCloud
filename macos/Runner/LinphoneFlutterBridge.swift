@@ -7,6 +7,15 @@ import UserNotifications
 import linphonesw
 #endif
 
+private enum DesktopDndStore {
+  static let key = "device_dnd_enabled"
+
+  static var isEnabled: Bool {
+    get { UserDefaults.standard.bool(forKey: key) }
+    set { UserDefaults.standard.set(newValue, forKey: key) }
+  }
+}
+
 final class LinphoneFlutterBridge {
   private let methodChannelName = "voipcloud/linphone"
   private let registrationEventsName = "voipcloud/linphone/registration"
@@ -112,6 +121,9 @@ private enum LinphoneControllerFactory {
 private final class UnavailableLinphoneController: LinphoneController {
   func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
+    case "setNativeDnd":
+      DesktopDndStore.isEnabled = boolArgument(call, "enabled")
+      result(nil)
     case "initialize",
          "configureAccount",
          "register",
@@ -166,6 +178,8 @@ private final class NativeLinphoneController: LinphoneController {
   private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String)] = [:]
   private var selectedAudioEndpointId: String?
   private var desktopNotificationCallIds = Set<String>()
+  private var dndDeclinedCalls = Set<ObjectIdentifier>()
+  private var deviceDndEnabled = DesktopDndStore.isEnabled
   private var notificationObservers: [NSObjectProtocol] = []
 
   init(
@@ -219,6 +233,9 @@ private final class NativeLinphoneController: LinphoneController {
         result(nil)
       case "hasActiveCall":
         result(findCurrentCall() != nil)
+      case "setNativeDnd":
+        setNativeDnd(enabled: boolArgument(call, "enabled"))
+        result(nil)
       case "enterBackground":
         result(nil)
       case "enterForeground":
@@ -513,6 +530,20 @@ private final class NativeLinphoneController: LinphoneController {
       currentAccount.params = params
     }
     account = currentCore.defaultAccount ?? accounts.first
+  }
+
+  private func setNativeDnd(enabled: Bool) {
+    DesktopDndStore.isEnabled = enabled
+    deviceDndEnabled = enabled
+    guard enabled, let call = findCurrentCall(), isIncomingRinging(call) else { return }
+    let key = ObjectIdentifier(call)
+    guard dndDeclinedCalls.insert(key).inserted else { return }
+    clearDesktopCallNotification(callId: callId(call))
+    do {
+      try call.decline(reason: .Declined)
+    } catch {
+      NSLog("VoIPCloud/macOS device DND decline failed: %@", error.localizedDescription)
+    }
   }
 
   private func purgeAccount() {
@@ -963,6 +994,7 @@ private final class NativeLinphoneController: LinphoneController {
     let id = callId(call)
     if isTerminalCallState(state) {
       calls.removeValue(forKey: id)
+      dndDeclinedCalls.remove(ObjectIdentifier(call))
     } else {
       calls[id] = call
     }
@@ -988,7 +1020,27 @@ private final class NativeLinphoneController: LinphoneController {
       "availableEndpoints": endpoints,
       "featureCode": isFeatureCode
     ])
+    if deviceDndEnabled && call.dir == .Incoming && isIncomingRinging(call) {
+      clearDesktopCallNotification(callId: id)
+      let key = ObjectIdentifier(call)
+      if dndDeclinedCalls.insert(key).inserted {
+        do {
+          try call.decline(reason: .Declined)
+        } catch {
+          NSLog("VoIPCloud/macOS device DND decline failed: %@", error.localizedDescription)
+        }
+      }
+      return
+    }
     updateDesktopCallNotification(call: call, state: state, callId: id)
+  }
+
+  private func clearDesktopCallNotification(callId: String) {
+    let notificationId = "voipcloud.call.\(callId)"
+    desktopNotificationCallIds.remove(callId)
+    let center = UNUserNotificationCenter.current()
+    center.removePendingNotificationRequests(withIdentifiers: [notificationId])
+    center.removeDeliveredNotifications(withIdentifiers: [notificationId])
   }
 
   private func updateDesktopCallNotification(

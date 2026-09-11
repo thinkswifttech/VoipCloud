@@ -29,10 +29,38 @@ namespace {
 constexpr UINT kLinphoneBridgeEventMessage = WM_APP + 0x5C1;
 constexpr UINT kLinphoneIterateMessage = WM_APP + 0x5C2;
 constexpr UINT kVoipCloudTrayIconId = 1;
+constexpr wchar_t kVoipCloudRegistryPath[] =
+    L"Software\\ThinkSwift\\VoipCloud";
+constexpr wchar_t kDeviceDndRegistryValue[] = L"DeviceDndEnabled";
 constexpr char kVoipCloudVersion[] =
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MAJOR) "."
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MINOR) "."
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_PATCH);
+
+bool LoadDeviceDndEnabled() {
+  DWORD enabled = 0;
+  DWORD size = sizeof(enabled);
+  const LSTATUS status = RegGetValueW(
+      HKEY_CURRENT_USER, kVoipCloudRegistryPath, kDeviceDndRegistryValue,
+      RRF_RT_REG_DWORD, nullptr, &enabled, &size);
+  return status == ERROR_SUCCESS && enabled != 0;
+}
+
+bool SaveDeviceDndEnabled(bool enabled) {
+  HKEY key = nullptr;
+  const LSTATUS create_status = RegCreateKeyExW(
+      HKEY_CURRENT_USER, kVoipCloudRegistryPath, 0, nullptr,
+      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
+  if (create_status != ERROR_SUCCESS || key == nullptr) {
+    return false;
+  }
+  const DWORD value = enabled ? 1 : 0;
+  const LSTATUS write_status = RegSetValueExW(
+      key, kDeviceDndRegistryValue, 0, REG_DWORD,
+      reinterpret_cast<const BYTE*>(&value), sizeof(value));
+  RegCloseKey(key);
+  return write_status == ERROR_SUCCESS;
+}
 
 std::wstring Utf8ToWide(const std::string& value) {
   if (value.empty()) {
@@ -840,7 +868,7 @@ class LinphoneApi {
 class LinphoneWindowsBridge::Impl {
  public:
   Impl(flutter::BinaryMessenger* messenger, LinphoneWindowsBridge* owner)
-      : owner_(owner) {
+      : owner_(owner), device_dnd_enabled_(LoadDeviceDndEnabled()) {
     auto codec = &flutter::StandardMethodCodec::GetInstance();
 
     method_channel_ =
@@ -921,6 +949,8 @@ class LinphoneWindowsBridge::Impl {
       SyncCurrentCall(std::move(result));
     } else if (method == "hasActiveCall") {
       HasActiveCall(std::move(result));
+    } else if (method == "setNativeDnd") {
+      SetNativeDnd(BoolArg(ArgsMap(call), "enabled"), std::move(result));
     } else if (method == "enterBackground" || method == "enterForeground") {
       result->Success();
     } else if (method == "unregister") {
@@ -1297,6 +1327,33 @@ class LinphoneWindowsBridge::Impl {
       auto payload = BuildCallPayload(call, state);
       result->Success(EncodableValue(payload));
     }
+  }
+
+  void SetNativeDnd(bool enabled, std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!SaveDeviceDndEnabled(enabled)) {
+      result->Error("DND_PERSISTENCE_ERROR",
+                    "Unable to persist the device DND setting.");
+      return;
+    }
+    device_dnd_enabled_ = enabled;
+    if (enabled) {
+      LinphoneCall* call = CurrentCall();
+      const int state = call != nullptr && api_.linphone_call_get_state != nullptr
+                            ? api_.linphone_call_get_state(call)
+                            : -1;
+      const bool incoming =
+          call != nullptr && api_.linphone_call_get_dir != nullptr &&
+          api_.linphone_call_get_dir(call) == 1;
+      if (incoming && CallStatus(state) == "ringing" &&
+          api_.linphone_call_decline != nullptr) {
+        dnd_declined_incoming_call_ = call;
+        api_.linphone_call_decline(call, 3);
+        notified_incoming_call_ = nullptr;
+        owner_->ClearIncomingCallNotification();
+      }
+    }
+    result->Success();
   }
 
   void AcceptCall(std::unique_ptr<MethodResult> result) {
@@ -2193,13 +2250,24 @@ class LinphoneWindowsBridge::Impl {
                 " direction=" + direction +
                 " state=" + std::to_string(state) +
                 " status=" + call_status);
-    if (direction == "incoming" && call_status == "ringing" &&
-        notified_incoming_call_ != call) {
-      notified_incoming_call_ = call;
-      owner_->ShowIncomingCallNotification(
-          remote_name.empty() ? remote_uri : remote_name);
+    if (direction == "incoming" && call_status == "ringing") {
+      if (device_dnd_enabled_) {
+        owner_->ClearIncomingCallNotification();
+        if (dnd_declined_incoming_call_ != call &&
+            api_.linphone_call_decline != nullptr) {
+          dnd_declined_incoming_call_ = call;
+          TraceNative("Declining incoming call for device DND id=" +
+                      PointerId(call));
+          api_.linphone_call_decline(call, 3);
+        }
+      } else if (notified_incoming_call_ != call) {
+        notified_incoming_call_ = call;
+        owner_->ShowIncomingCallNotification(
+            remote_name.empty() ? remote_uri : remote_name);
+      }
     } else if (terminal || call_status == "active") {
       notified_incoming_call_ = nullptr;
+      dnd_declined_incoming_call_ = nullptr;
       owner_->ClearIncomingCallNotification();
     }
     return EncodableMap{{EncodableValue("id"), EncodableValue(PointerId(call))},
@@ -2236,12 +2304,14 @@ class LinphoneWindowsBridge::Impl {
   LinphoneAccount* account_ = nullptr;
   LinphoneCall* active_call_ = nullptr;
   LinphoneCall* notified_incoming_call_ = nullptr;
+  LinphoneCall* dnd_declined_incoming_call_ = nullptr;
   std::unordered_map<LinphoneEvent*,
                      std::pair<std::string, std::string>>
       presence_subscriptions_;
   std::string sip_domain_;
   std::mutex core_mutex_;
   bool first_iterate_completed_ = false;
+  bool device_dnd_enabled_ = false;
   std::atomic<bool> iterate_running_{false};
   std::thread iterate_thread_;
   std::unique_ptr<flutter::MethodChannel<EncodableValue>> method_channel_;

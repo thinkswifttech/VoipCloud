@@ -44,6 +44,8 @@ macos/Runner/GoogleService-Info.plist
 .env
 .env.*
 !.env.example
+/config/dev.json
+/config/production.json
 
 # Locally supplied Linphone SDK binaries
 windows/third_party/linphone/linphone-sdk/

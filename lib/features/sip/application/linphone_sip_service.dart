@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../../../core/logging/app_logger.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
+import '../../call_history/domain/call_history_classification.dart';
 import '../../call_history/domain/call_history_repository.dart';
 import '../../calls/domain/audio_output_route.dart';
 import '../../calls/domain/call_direction.dart';
@@ -22,12 +23,14 @@ import 'sip_service.dart';
 class LinphoneSipService implements SipService {
   LinphoneSipService({
     CallHistoryRepository? callHistoryRepository,
+    void Function()? onCallHistoryChanged,
     VoipPlatformChannel? platformChannel,
     String stunServer = '',
     String turnServer = '',
     this.isDndEnabled,
     SipLogStore? sipLogStore,
   }) : _callHistoryRepository = callHistoryRepository,
+       _onCallHistoryChanged = onCallHistoryChanged,
        _platformChannel = platformChannel ?? const VoipPlatformChannel(),
        _stunServer = stunServer.trim(),
        _turnServer = turnServer.trim(),
@@ -40,6 +43,7 @@ class LinphoneSipService implements SipService {
   bool Function()? isDndEnabled;
 
   final CallHistoryRepository? _callHistoryRepository;
+  final void Function()? _onCallHistoryChanged;
   final VoipPlatformChannel _platformChannel;
   final SipLogStore? _sipLogStore;
   final String _stunServer;
@@ -59,6 +63,9 @@ class LinphoneSipService implements SipService {
   VoipCall? _activeCall;
   final Map<String, VoipCall> _knownCalls = {};
   final Set<String> _dndRejectedCallIds = {};
+  bool _disposed = false;
+  final Set<String> _ringingIncomingCallIds = {};
+  final Set<String> _answeredIncomingCallIds = {};
   final Set<String> _featureCodeCallIds = {};
   bool _pendingPbxDndToggle = false;
   bool _featureCodeDialInFlight = false;
@@ -377,19 +384,20 @@ class LinphoneSipService implements SipService {
   @override
   Future<void> syncPbxDndToggle() async {
     if (!_registrationState.isRegistered) {
-      _sipLog('warn', 'PBX DND toggle skipped — SIP not registered');
+      _pendingPbxDndToggle = !_pendingPbxDndToggle;
+      _sipLog('warn', 'PBX DND toggle queued until SIP is registered');
       return;
     }
     if (_activeCall != null) {
-      _pendingPbxDndToggle = true;
+      _pendingPbxDndToggle = !_pendingPbxDndToggle;
       _sipLog('info', 'PBX DND toggle queued until active call ends');
       return;
     }
     if (_featureCodeDialInFlight) {
-      _pendingPbxDndToggle = true;
+      _pendingPbxDndToggle = !_pendingPbxDndToggle;
       _sipLog(
         'info',
-        'PBX DND toggle coalesced while feature-code dial in flight',
+        'PBX DND toggle queued while feature-code dial is in flight',
       );
       return;
     }
@@ -398,7 +406,7 @@ class LinphoneSipService implements SipService {
 
   Future<void> _dialPbxDndToggle() async {
     if (_featureCodeDialInFlight) {
-      _pendingPbxDndToggle = true;
+      _pendingPbxDndToggle = !_pendingPbxDndToggle;
       return;
     }
     _featureCodeDialInFlight = true;
@@ -441,7 +449,9 @@ class LinphoneSipService implements SipService {
     if (!_pendingPbxDndToggle) {
       return;
     }
-    if (_activeCall != null || _featureCodeDialInFlight) {
+    if (!_registrationState.isRegistered ||
+        _activeCall != null ||
+        _featureCodeDialInFlight) {
       return;
     }
     unawaited(_dialPbxDndToggle());
@@ -464,6 +474,9 @@ class LinphoneSipService implements SipService {
       callId,
       () => _platformChannel.acceptCall(callId),
     );
+    // An accepted answer that subsequently fails to establish is not a missed
+    // call—the user acted on it. Native active state reinforces this marker.
+    _answeredIncomingCallIds.add(callId);
   }
 
   @override
@@ -679,6 +692,7 @@ class LinphoneSipService implements SipService {
 
   @override
   Future<void> dispose() async {
+    _disposed = true;
     _windowsCallReconciliationTimer?.cancel();
     _windowsCallReconciliationTimer = null;
     await _registrationSubscription?.cancel();
@@ -739,6 +753,9 @@ class LinphoneSipService implements SipService {
               '${state.message == null || state.message!.isEmpty ? '' : ' · ${state.message}'}',
         );
         _emitRegistration(state);
+        if (state.isRegistered) {
+          _flushPendingPbxDndToggleIfIdle();
+        }
       },
       onError: (Object error) {
         _sipLog(
@@ -794,6 +811,7 @@ class LinphoneSipService implements SipService {
       return;
     }
     final call = _callFromEvent(event);
+    _trackIncomingCallState(call);
     _traceCall(
       'call_state_applied',
       identity: call.id,
@@ -1025,6 +1043,12 @@ class LinphoneSipService implements SipService {
     if (_dndRejectedCallIds.remove(candidate.id)) {
       _dndRejectedCallIds.add(newId);
     }
+    if (_ringingIncomingCallIds.remove(candidate.id)) {
+      _ringingIncomingCallIds.add(newId);
+    }
+    if (_answeredIncomingCallIds.remove(candidate.id)) {
+      _answeredIncomingCallIds.add(newId);
+    }
     AppLogger.info(
       'Promoted active native call identity ${candidate.id} -> $newId',
     );
@@ -1049,6 +1073,18 @@ class LinphoneSipService implements SipService {
     }
     return isDndEnabled?.call() == true ||
         _dndRejectedCallIds.contains(call.id);
+  }
+
+  void _trackIncomingCallState(VoipCall call) {
+    if (call.direction != CallDirection.incoming) {
+      return;
+    }
+    if (call.status == CallStatus.ringing) {
+      _ringingIncomingCallIds.add(call.id);
+    }
+    if (call.status == CallStatus.active || call.status == CallStatus.held) {
+      _answeredIncomingCallIds.add(call.id);
+    }
   }
 
   /// Silent PBX feature-code dials (*76 DND, etc.) must never drive in-call UI
@@ -1099,15 +1135,26 @@ class LinphoneSipService implements SipService {
       return;
     }
     final wasDndReject = _dndRejectedCallIds.remove(call.id);
+    final classification = classifyCompletedCall(
+      direction: call.direction,
+      status: call.status,
+      wasRinging: _ringingIncomingCallIds.remove(call.id),
+      wasAnswered: _answeredIncomingCallIds.remove(call.id),
+      wasDndRejected: wasDndReject,
+    );
     unawaited(
-      repository.syncCallLog(
-        remoteNumber: _displayNumber(call.remoteUri),
-        direction: wasDndReject ? CallDirection.missed : call.direction,
-        status: wasDndReject ? CallStatus.missed : call.status,
-        startedAt: call.startedAt,
-        endedAt: call.endedAt ?? DateTime.now(),
-        sipCallId: call.id,
-      ),
+      repository
+          .syncCallLog(
+            remoteNumber: _displayNumber(call.remoteUri),
+            direction: classification.direction,
+            status: classification.status,
+            startedAt: call.startedAt,
+            endedAt: call.endedAt ?? DateTime.now(),
+            sipCallId: call.id,
+          )
+          .whenComplete(() {
+            if (!_disposed) _onCallHistoryChanged?.call();
+          }),
     );
   }
 

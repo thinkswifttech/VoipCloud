@@ -719,6 +719,14 @@ final class VoipPushRegistry: NSObject, PKPushRegistryDelegate {
       )
       return
     }
+    if SipCredentialStore.isDndEnabled() {
+      SoftphoneCallKitController.shared.reportDndPushCall(
+        payload: details,
+        completion: completion
+      )
+      LinphoneFlutterBridge.wakeFromPushPayload(details)
+      return
+    }
     SoftphoneCallKitController.shared.reportIncomingPushCall(payload: details) { error in
       if let error {
         NSLog(
@@ -801,6 +809,7 @@ final class VoipPushRegistry: NSObject, PKPushRegistryDelegate {
 private enum SipCredentialStore {
   private static let payloadKey = "account_payload"
   private static let sipInstanceUuidKey = "sip_instance_uuid"
+  private static let dndEnabledKey = "device_dnd_enabled"
 
   static func sipInstanceUuid() -> String {
     if let existing = UserDefaults.standard.string(forKey: sipInstanceUuidKey),
@@ -839,6 +848,15 @@ private enum SipCredentialStore {
 
   static func clear() {
     UserDefaults.standard.removeObject(forKey: payloadKey)
+    UserDefaults.standard.removeObject(forKey: dndEnabledKey)
+  }
+
+  static func setDndEnabled(_ enabled: Bool) {
+    UserDefaults.standard.set(enabled, forKey: dndEnabledKey)
+  }
+
+  static func isDndEnabled() -> Bool {
+    UserDefaults.standard.bool(forKey: dndEnabledKey)
   }
 
   static func mergePushToken(_ payload: [String: String]) {
@@ -1342,6 +1360,55 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     }
   }
 
+  func reportDndPushCall(
+    payload: [AnyHashable: Any],
+    completion: @escaping () -> Void
+  ) {
+    let incomingCallId = pushCallId(from: payload)
+    if let incomingCallId {
+      if rejectedPushCallIds.contains(incomingCallId) {
+        NSLog("Softphone/CallKit suppressed duplicate device-DND push")
+        completion()
+        return
+      }
+      rejectedPushCallIds.insert(incomingCallId)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+        self?.rejectedPushCallIds.remove(incomingCallId)
+      }
+    } else {
+      rejectNextIncomingSipCall = true
+      DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+        self?.rejectNextIncomingSipCall = false
+      }
+    }
+    NSLog("Softphone/CallKit suppressing incoming push for device DND")
+    let caller = callerValue(from: payload)
+    let trustedDisplayName = displayName(from: payload)
+    let resolvedDisplayName = callerNamePreservingDialPrefix(
+      IOSCallerIdentityStore.shared.cachedName(for: caller) ?? trustedDisplayName,
+      remoteHandle: caller,
+      sourceDisplayName: trustedDisplayName
+    )
+    let uuid = UUID()
+    reportIncomingCall(
+      uuid: uuid,
+      remoteHandle: caller,
+      displayName: resolvedDisplayName,
+      linphoneId: nil,
+      completion: { [weak self] error in
+        if error == nil {
+          self?.reportCallEnded(uuid: uuid, reason: .unanswered)
+        } else {
+          NSLog(
+            "Softphone/CallKit device-DND call report failed: %@",
+            error?.localizedDescription ?? "unknown"
+          )
+        }
+        completion()
+      }
+    )
+  }
+
   func handleCallStateChanged(call: Call, state: Call.State) {
     guard let linphoneIdForCall else { return }
     let linphoneId = linphoneIdForCall(call)
@@ -1361,6 +1428,11 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
 
     switch state {
     case .PushIncomingReceived:
+      if rejectedPushCallIds.contains(linphoneId) || rejectNextIncomingSipCall {
+        end(call: call)
+        endCallKitCall(linphoneId: linphoneId)
+        return
+      }
       NSLog("Softphone/CallKit PushIncomingReceived id=%@", linphoneId)
       presentIncomingCall(call: call, linphoneId: linphoneId)
       drivePendingAnswerIfNeeded(linphoneId: linphoneId)
@@ -2591,6 +2663,10 @@ private final class NativeLinphoneController: LinphoneController {
         IOSCallerIdentityStore.shared.updateDirectory(
           arguments: call.arguments as? [String: Any] ?? [:]
         )
+        result(nil)
+      case "setNativeDnd":
+        let arguments = call.arguments as? [String: Any]
+        SipCredentialStore.setDndEnabled(arguments?["enabled"] as? Bool ?? false)
         result(nil)
       case "unregister":
         stopPresenceSubscriptions()

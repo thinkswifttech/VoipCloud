@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../features/calls/presentation/call_session_providers.dart';
 import '../../features/calls/presentation/return_to_call_bar.dart';
+import '../../features/call_history/presentation/call_history_providers.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/messages/domain/messaging_platform.dart';
 import '../../features/messages/presentation/messages_providers.dart';
@@ -45,11 +46,13 @@ class HomeShell extends ConsumerWidget {
           (total, count) => total + count,
         ) ??
         0;
+    final missedCalls = ref.watch(missedCallCountProvider).value ?? 0;
     final isDialer =
         location.startsWith(RoutePaths.dialer) ||
         location.startsWith(RoutePaths.home);
     final isSettings = location.startsWith(RoutePaths.settings);
     final isDirectory = location.startsWith(RoutePaths.directory);
+    final desktopPlatform = isSupportedDesktopPlatform();
     final transferMode = ref.watch(callTransferModeProvider);
     final showTransferChrome = transferMode && isDirectory;
     final liveCall = ref.watch(activeCallProvider).value;
@@ -75,7 +78,7 @@ class HomeShell extends ConsumerWidget {
         }
 
         final scaffold = Scaffold(
-          appBar: isDialer
+          appBar: isDialer && !desktopPlatform
               ? null
               : AppBar(
                   leading: showTransferChrome
@@ -143,6 +146,7 @@ class HomeShell extends ConsumerWidget {
                             showDirectory: showDirectory,
                             showCarrierMessaging: showCarrierMessaging,
                             unreadMessages: unreadMessages,
+                            missedCalls: missedCalls,
                             onDestinationSelected: selectDestination,
                           ),
                         ),
@@ -177,9 +181,9 @@ class HomeShell extends ConsumerWidget {
                         selectedIcon: Icon(AppIcons.navDirectory),
                         label: 'Directory',
                       ),
-                    const NavigationDestination(
-                      icon: Icon(AppIcons.navHistory),
-                      selectedIcon: Icon(AppIcons.navHistory),
+                    NavigationDestination(
+                      icon: _HistoryNavIcon(unread: missedCalls),
+                      selectedIcon: _HistoryNavIcon(unread: missedCalls),
                       label: 'History',
                     ),
                     const NavigationDestination(
@@ -197,7 +201,7 @@ class HomeShell extends ConsumerWidget {
                 ),
         );
 
-        if (!isSupportedDesktopPlatform()) return scaffold;
+        if (!desktopPlatform) return scaffold;
         final bindings = <ShortcutActivator, VoidCallback>{
           const SingleActivator(LogicalKeyboardKey.comma, control: true): () =>
               context.push(RoutePaths.settings),
@@ -255,6 +259,7 @@ class _AppNavigationRail extends StatelessWidget {
     required this.showDirectory,
     required this.showCarrierMessaging,
     required this.unreadMessages,
+    required this.missedCalls,
   });
 
   final int selectedIndex;
@@ -263,6 +268,7 @@ class _AppNavigationRail extends StatelessWidget {
   final bool showDirectory;
   final bool showCarrierMessaging;
   final int unreadMessages;
+  final int missedCalls;
 
   @override
   Widget build(BuildContext context) {
@@ -290,10 +296,10 @@ class _AppNavigationRail extends StatelessWidget {
             selectedIcon: Icon(AppIcons.navDirectory),
             label: Text('Directory'),
           ),
-        const NavigationRailDestination(
-          icon: Icon(AppIcons.navHistory),
-          selectedIcon: Icon(AppIcons.navHistory),
-          label: Text('History'),
+        NavigationRailDestination(
+          icon: _HistoryNavIcon(unread: missedCalls),
+          selectedIcon: _HistoryNavIcon(unread: missedCalls),
+          label: const Text('History'),
         ),
         const NavigationRailDestination(
           icon: Icon(AppIcons.navContacts),
@@ -323,6 +329,22 @@ class _MessageNavIcon extends StatelessWidget {
       isLabelVisible: unread > 0,
       label: Text(label),
       child: const Icon(AppIcons.messages),
+    );
+  }
+}
+
+class _HistoryNavIcon extends StatelessWidget {
+  const _HistoryNavIcon({required this.unread});
+
+  final int unread;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = unread > 99 ? '99+' : '$unread';
+    return Badge(
+      isLabelVisible: unread > 0,
+      label: Text(label),
+      child: const Icon(AppIcons.navHistory),
     );
   }
 }

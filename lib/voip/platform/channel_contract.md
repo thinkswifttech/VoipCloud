@@ -178,8 +178,11 @@ select the exact Linphone device and pair its input/capture side when available.
 ### `updateDirectoryCache` / `setNativeDnd`
 
 Flutter supplies a bounded number-to-name directory projection and current DND
-state for Android cold starts. Android encrypts the cache with Android Keystore
-AES-GCM and clears it with `purgeAccount`.
+state to the native call layer. Device DND is enforced on Android, iOS, macOS,
+and Windows before native incoming-call UI is presented. Android encrypts its
+cold-start cache with Android Keystore AES-GCM and clears it with
+`purgeAccount`; Apple platforms persist DND in platform preferences, while
+Windows persists it in the current user's VoipCloud registry settings.
 
 ### `sendDtmf`
 
