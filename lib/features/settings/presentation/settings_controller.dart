@@ -13,11 +13,13 @@ class SettingsState {
   const SettingsState({
     this.voipDebugLogsEnabled = false,
     this.dndEnabled = false,
+    this.dndScope = DndScope.thisDevice,
     this.themeMode = AppThemeMode.system,
   });
 
   final bool voipDebugLogsEnabled;
   final bool dndEnabled;
+  final DndScope dndScope;
   final AppThemeMode themeMode;
 
   ThemeMode get materialThemeMode {
@@ -31,15 +33,43 @@ class SettingsState {
   SettingsState copyWith({
     bool? voipDebugLogsEnabled,
     bool? dndEnabled,
+    DndScope? dndScope,
     AppThemeMode? themeMode,
   }) {
     return SettingsState(
       voipDebugLogsEnabled: voipDebugLogsEnabled ?? this.voipDebugLogsEnabled,
       dndEnabled: dndEnabled ?? this.dndEnabled,
+      dndScope: dndScope ?? this.dndScope,
       themeMode: themeMode ?? this.themeMode,
     );
   }
 }
+
+enum DndScope { thisDevice, allDevices }
+
+extension DndScopeDetails on DndScope {
+  String get label => switch (this) {
+    DndScope.thisDevice => 'This device',
+    DndScope.allDevices => 'All devices',
+  };
+
+  static DndScope parse(String? value, {required bool legacyDndEnabled}) {
+    return switch (value) {
+      'allDevices' => DndScope.allDevices,
+      'thisDevice' => DndScope.thisDevice,
+      // Before scope existed, enabling DND always toggled FreePBX. Preserve
+      // that effective state so upgrading cannot strand PBX-wide DND on.
+      _ when legacyDndEnabled => DndScope.allDevices,
+      _ => DndScope.thisDevice,
+    };
+  }
+}
+
+bool isPbxDndEnabled(SettingsState value) =>
+    value.dndEnabled && value.dndScope == DndScope.allDevices;
+
+bool shouldTogglePbxDnd(SettingsState previous, SettingsState next) =>
+    isPbxDndEnabled(previous) != isPbxDndEnabled(next);
 
 enum AppThemeMode { system, light, dark }
 
@@ -77,15 +107,29 @@ class SettingsController extends Notifier<SettingsState> {
   }
 
   void setDndEnabled({required bool enabled}) {
+    final previous = state;
     state = state.copyWith(dndEnabled: enabled);
     unawaited(
       ref
           .read(secureStorageProvider)
           .write(StorageKeys.appDndEnabled, enabled ? 'true' : 'false'),
     );
-    // FreePBX *76 toggles DND server-side (same code for on and off).
-    unawaited(ref.read(sipServiceProvider).syncPbxDndToggle());
+    _syncPbxDndIfChanged(previous);
     unawaited(_syncNativeDnd(enabled));
+  }
+
+  void setDndScope(DndScope scope) {
+    if (scope == state.dndScope) {
+      return;
+    }
+    final previous = state;
+    state = state.copyWith(dndScope: scope);
+    unawaited(
+      ref
+          .read(secureStorageProvider)
+          .write(StorageKeys.appDndScope, scope.name),
+    );
+    _syncPbxDndIfChanged(previous);
   }
 
   void setThemeMode(AppThemeMode themeMode) {
@@ -102,27 +146,41 @@ class SettingsController extends Notifier<SettingsState> {
       final storage = ref.read(secureStorageProvider);
       final theme = await storage.read(StorageKeys.appThemeMode);
       final dnd = await storage.read(StorageKeys.appDndEnabled);
+      final dndEnabled = dnd == 'true';
+      final dndScope = DndScopeDetails.parse(
+        await storage.read(StorageKeys.appDndScope),
+        legacyDndEnabled: dndEnabled,
+      );
       final voipLogs = await storage.read(StorageKeys.appVoipDebugLogsEnabled);
       final enabledLogs = voipLogs == 'true';
       state = state.copyWith(
         themeMode: AppThemeModeCodec.parse(theme),
-        dndEnabled: dnd == 'true',
+        dndEnabled: dndEnabled,
+        dndScope: dndScope,
         voipDebugLogsEnabled: enabledLogs,
       );
       if (enabledLogs) {
         await ref.read(sipLogStoreProvider).setEnabled(true);
       }
-      await _syncNativeDnd(dnd == 'true');
+      await _syncNativeDnd(dndEnabled);
     } catch (_) {
       // Keep defaults when secure storage is unavailable.
     }
+  }
+
+  void _syncPbxDndIfChanged(SettingsState previous) {
+    if (!shouldTogglePbxDnd(previous, state)) {
+      return;
+    }
+    // FreePBX *76 toggles extension-wide DND (same code for on and off).
+    unawaited(ref.read(sipServiceProvider).syncPbxDndToggle());
   }
 
   Future<void> _syncNativeDnd(bool enabled) async {
     try {
       await const VoipPlatformChannel().setNativeDnd(enabled);
     } catch (_) {
-      // Native cold-start DND is Android-only.
+      // Unsupported platforms still enforce DND while Flutter is running.
     }
   }
 }
