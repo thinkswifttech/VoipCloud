@@ -3,6 +3,7 @@ class StorageKeys {
 
   static const appThemeMode = 'app.theme_mode';
   static const appDndEnabled = 'app.dnd_enabled';
+  static const appDndScope = 'app.dnd_scope';
   static const appVoipDebugLogsEnabled = 'app.voip_debug_logs_enabled';
 
   static const appAccessToken = 'app.access_token';
@@ -18,6 +19,7 @@ class StorageKeys {
   static const appDeviceId = 'app.device_id';
   static const appPushTokenStatus = 'app.push_token_status';
   static const appCallHistory = 'app.call_history';
+  static const appCallHistoryLastViewedAt = 'app.call_history_last_viewed_at';
   static const appQuickDial = 'app.quick_dial';
   static const appContacts = 'app.contacts';
 
