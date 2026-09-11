@@ -50,10 +50,50 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
   int? _pendingCursor;
 
   @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_handleDesktopDialKey);
+  }
+
+  @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleDesktopDialKey);
     _destinationFocus.dispose();
     _destinationController.dispose();
     super.dispose();
+  }
+
+  bool _handleDesktopDialKey(KeyEvent event) {
+    if (!mounted || !supportsDesktopDialerKeyboard()) return false;
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
+    if (ModalRoute.of(context)?.isCurrent != true) return false;
+    if (_destinationFocus.hasFocus) return false;
+    if (isInCallUiCall(ref.read(activeCallProvider).value)) return false;
+
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed) {
+      return false;
+    }
+
+    final character = dtmfCharacterFromKeyboard(event.character);
+    if (character != null) {
+      _insertDialText(character);
+      return true;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.backspace) {
+      _deleteBackward(1);
+      return true;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      if (ref.read(dialerControllerProvider).isNotEmpty) {
+        unawaited(_placeCall(context, ref));
+      }
+      return true;
+    }
+    return false;
   }
 
   @override
@@ -80,7 +120,8 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
         SipRegistrationState.initial();
     final session = ref.watch(sessionControllerProvider).value;
     final authUser = ref.watch(currentUserProvider).value;
-    final dndEnabled = ref.watch(settingsControllerProvider).dndEnabled;
+    final settings = ref.watch(settingsControllerProvider);
+    final dndEnabled = settings.dndEnabled;
     final scheme = Theme.of(context).colorScheme;
     final identity =
         [
@@ -114,6 +155,8 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
                 registration: registration,
                 identity: identity,
                 dndEnabled: dndEnabled,
+                dndScope: settings.dndScope,
+                showActions: !acceptsKeyboardInput,
                 onOpenSettings: () => context.push(RoutePaths.settings),
                 onOpenHelp: () => showHelpSupportSheet(context),
                 onOpenAccountDetail: () =>
@@ -476,10 +519,7 @@ class _AcceleratingBackspaceButtonState
     _heldFor.start();
     widget.onDelete(1);
     _startTimer = Timer(const Duration(milliseconds: 320), () {
-      _repeatTimer = Timer.periodic(const Duration(milliseconds: 90), (_) {
-        final elapsed = _heldFor.elapsedMilliseconds;
-        if (elapsed >= 1900) {
-          widget.onClear();
+      _rep…40 tokens truncated…       widget.onClear();
           _stopDeleting();
         } else if (elapsed >= 1250) {
           widget.onDelete(4);
@@ -513,6 +553,8 @@ class _RegistrationHeader extends StatelessWidget {
     required this.registration,
     required this.identity,
     required this.dndEnabled,
+    required this.dndScope,
+    required this.showActions,
     required this.onOpenSettings,
     required this.onOpenHelp,
     required this.onOpenAccountDetail,
@@ -521,6 +563,8 @@ class _RegistrationHeader extends StatelessWidget {
   final SipRegistrationState registration;
   final String identity;
   final bool dndEnabled;
+  final DndScope dndScope;
+  final bool showActions;
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenHelp;
   final VoidCallback onOpenAccountDetail;
@@ -566,22 +610,32 @@ class _RegistrationHeader extends StatelessWidget {
                       letterSpacing: 0.4,
                     ),
                   ),
+                  const SizedBox(width: 4),
+                  Text(
+                    dndScope == DndScope.allDevices ? 'All' : 'Device',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ],
               ],
             ),
           ),
         ),
-        const SizedBox(width: 10),
-        IconButton(
-          tooltip: 'Help & support',
-          onPressed: onOpenHelp,
-          icon: const Icon(AppIcons.help),
-        ),
-        IconButton.outlined(
-          tooltip: 'Settings',
-          onPressed: onOpenSettings,
-          icon: const Icon(AppIcons.navSettings),
-        ),
+        if (showActions) ...[
+          const SizedBox(width: 10),
+          IconButton(
+            tooltip: 'Help & support',
+            onPressed: onOpenHelp,
+            icon: const Icon(AppIcons.help),
+          ),
+          IconButton.outlined(
+            tooltip: 'Settings',
+            onPressed: onOpenSettings,
+            icon: const Icon(AppIcons.navSettings),
+          ),
+        ],
       ],
     );
   }
@@ -695,7 +749,9 @@ class _AccountDetailSheet extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
-    final dndEnabled = ref.watch(settingsControllerProvider).dndEnabled;
+    final settings = ref.watch(settingsControllerProvider);
+    final dndEnabled = settings.dndEnabled;
+    final dndScope = settings.dndScope;
     final registration =
         ref.watch(sipRegistrationStateProvider).value ??
         SipRegistrationState.initial();
@@ -789,7 +845,7 @@ class _AccountDetailSheet extends ConsumerWidget {
             children: [
               Expanded(
                 child: Text(
-                  'Immediate DND',
+                  'Do not disturb',
                   style: theme.textTheme.titleMedium,
                 ),
               ),
@@ -817,10 +873,39 @@ class _AccountDetailSheet extends ConsumerWidget {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<DndScope>(
+              segments: const [
+                ButtonSegment(
+                  value: DndScope.thisDevice,
+                  icon: Icon(AppIcons.call),
+                  label: Text('This device'),
+                ),
+                ButtonSegment(
+                  value: DndScope.allDevices,
+                  icon: Icon(AppIcons.cloud),
+                  label: Text('All devices'),
+                ),
+              ],
+              selected: {dndScope},
+              showSelectedIcon: false,
+              expandedInsets: EdgeInsets.zero,
+              onSelectionChanged: (selection) {
+                ref
+                    .read(settingsControllerProvider.notifier)
+                    .setDndScope(selection.single);
+              },
+            ),
+          ),
+          const SizedBox(height: 10),
           Text(
-            'If you enable Do not disturb, all incoming calls will be '
-            'silently rejected and will appear as missed in your history.',
+            dndScope == DndScope.thisDevice
+                ? 'Only this device silently declines incoming calls. Your '
+                      'other signed-in devices keep ringing.'
+                : 'Turns on PBX DND for this extension, so incoming calls '
+                      'stop on every signed-in device.',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
               height: 1.45,
