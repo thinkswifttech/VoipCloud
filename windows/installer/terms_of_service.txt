@@ -1,0 +1,461 @@
+ThinkSwift Master Services Agreement
+Last Updated / Version: 2026-08-11
+Service Provider: Think Swift Technology Corp. (“ThinkSwift”, “Service Provider”)
+Customer: The entity identified in an executed Order (“Customer”)
+
+This Master Services Agreement (“MSA”) governs Customer’s purchase and use of Services from ThinkSwift. By executing an Order that references this MSA (including via electronic signature), the Parties agree to be bound by this MSA.
+
+If the person accepting an Order does so on behalf of an entity, they represent they have authority to bind that entity.
+
+1. Definitions
+1.1 Affiliate means an entity that directly or indirectly controls, is controlled by, or is under common control with a Party.
+
+1.2 Agreement means this MSA, all applicable Schedules, and all Orders.
+
+1.3 Order means any proposal, quote, statement of work, order form, service order, change order, or similar document executed by the Parties (including via e-signature) that references this MSA and describes the Services, scope, quantities, fees, and term. Each Order is incorporated into and forms part of the Agreement.
+
+1.4 Services means the services and deliverables described in an Order, including professional services, managed services, hosted and SaaS services, and any resale or procurement of third-party services and any hardware or equipment if included in an Order.
+
+1.5 Customer Data means data submitted to, collected by, processed by, or made available to ThinkSwift by or on behalf of Customer (including by Customer’s end users) in connection with the Services, including Personal Data, identity documents, selfies or video, biometric outputs, verification and screening results, audit logs, and related metadata, to the extent processed on Customer’s behalf.
+
+1.6 Personal Data means any information relating to an identified or identifiable individual.
+
+1.7 Sensitive Data means Personal Data treated as sensitive under applicable law, including government identifiers, financial account data, health data, precise geolocation, and similar categories.
+
+1.8 Biometric Data means biometric identifiers or biometric information, including scans of face geometry and any templates or embeddings derived from photos, selfies, or video used for liveness detection or face matching.
+
+1.9 ThinkSwift Technology means ThinkSwift’s services, platform, software, tooling, workflows, templates, documentation, models, and improvements, excluding Customer Data.
+
+1.10 Security Incident means a confirmed unauthorized access to or acquisition of Customer Data in ThinkSwift’s possession or control, resulting from a breach of ThinkSwift’s security.
+
+ 
+
+2. Structure, Updates, Version Lock, and Precedence
+2.1 Structure. The Agreement consists of this MSA, applicable Schedules, and Orders.
+
+2.2 Updates to posted MSA (future Orders only). ThinkSwift may update this posted MSA from time to time. Updated terms apply to new Orders executed after the effective date of the updated MSA.
+
+2.3 Version lock for existing Orders. For each executed Order, the version of this MSA and Schedules governing that Order is the version in effect as of the Order effective date (the “Order Version”), identified by the Last Updated / Version date above (or a version date stated in the Order). Later updates to the posted MSA do not apply to an existing Order unless the Parties expressly agree in writing, including by executing a subsequent Order that adopts the newer version.
+
+2.4 Order of precedence. If there is a conflict, the following order controls to the extent of the conflict:
+
+(a) the executed Order, but only for scope, quantities, pricing, service dates, and commercial terms expressly stated in the Order
+(b) Schedule 2 (Data Processing Addendum), but only for Customer Data processing, security, incident notification, retention, subprocessors, and privacy-related obligations
+(c) any Applicable service Schedule(s) for service-specific obligations
+(d) this Core MSA for all other terms
+ 
+
+3. Automatic Schedule Applicability
+3.1 Schedules apply only if applicable. Schedules attached to this MSA apply only to the extent they are applicable to the Services in an Order.
+
+3.2 When a Schedule is applicable. A Schedule is applicable if:
+
+(a) the Order expressly references it, or
+(b) the Services described in the Order include activities within that Schedule’s scope as defined by the triggers below.
+3.3 Automatic Schedule triggers. The following Schedules apply automatically when the Order includes the corresponding activities:
+
+Schedule 1: Order Mechanics and Change Control. Applies to all Orders.
+Schedule 2: Data Processing Addendum (DPA). Applies whenever ThinkSwift processes, stores, accesses, transmits, or otherwise handles Customer Data on Customer’s behalf.
+Schedule 3: Identity Verification and AML/KYC Services. Applies if the Order includes identity verification, document verification, liveness, face matching, biometric processing, AML screening, KYC, KYB, sanctions screening, PEP screening, adverse media screening, fraud checks, identity risk scoring, or similar verification or compliance checks (“IDV Services”).
+Schedule 4: Cybersecurity Services. Applies if the Order includes penetration testing, vulnerability scanning, security assessments, incident response, forensic analysis, managed detection and response, SIEM/XDR/SOAR, security awareness training or simulations, or security monitoring/testing/access to Customer environments.
+Schedule 5: Managed IT and Support Services. Applies if the Order includes managed services, helpdesk, device and endpoint management, patching, monitoring, backups, M365 or Google Workspace administration, network administration, or similar managed IT operations.
+Schedule 6: Marketing and Growth Services. Applies if the Order includes paid media management, SEO, SEM, analytics, content creation, copywriting, branding, design, website marketing, lead generation, conversion optimization, social media management, reputation management, or marketing automation.
+Schedule 7: Application Development and Emerging Technology Services. Applies if the Order includes custom software or application development, integrations, API development, DevOps, cloud architecture, modernization, AI or ML development or integration, automation, conversational AI, data pipelines, or similar engineering services.
+Schedule 8: Hosting, SaaS, and Service Levels. Applies if the Order includes hosting, SaaS, uptime or availability commitments, support SLAs, or service credits.
+Schedule 9: Unified Communications and Telecom. Applies if the Order includes VoIP, PBX, SIP, telephony, call recording, SMS, phone numbers, porting, softphones, or telecom-related services or equipment.
+Schedule 10: Resale, Hardware, and Third-Party Services. Applies if ThinkSwift provides, resells, procures, licenses, or passes through third-party software, subscriptions, cloud services, telecom services, equipment, devices, or hardware, including where fees are pass-through or usage-based.
+Schedule 11: Cyber Warranty, Protection, and Third-Party Coverage Programs. Applies if the Order includes any warranty, protection, coverage, or reimbursement program related to cyber incidents, incident recovery costs, business interruption, ransomware, or similar coverage features that involve third-party administrators or coverage partners.
+3.4 Mixed Services. If an Order includes multiple service categories, each Applicable Schedule applies only to the portion of the Services to which it relates.
+
+ 
+
+4. Services; Subcontractors
+4.1 Performance. ThinkSwift will perform the Services described in the applicable Order in a professional and workmanlike manner consistent with generally accepted industry practices.
+
+4.2 Subcontractors. ThinkSwift may use subcontractors and consultants to perform Services. If Schedule 2 applies, any subprocessors are governed by Schedule 2.
+
+ 
+
+5. Fees, Invoicing, and Payment
+5.1 Fees. Customer will pay the fees in the Order. Unless otherwise stated in the Order, invoices are issued monthly and are due upon receipt.
+
+5.2 Late interest. Past-due undisputed amounts accrue interest at the lesser of 18% per annum or the maximum allowed by law.
+
+5.3 Suspension for non-payment. ThinkSwift may suspend affected Services for undisputed amounts that are past due, after providing notice and an opportunity to cure as described in Schedule 1. Suspension is not a breach by ThinkSwift.
+
+5.4 Taxes. Fees exclude applicable taxes. Customer is responsible for taxes other than taxes on ThinkSwift’s net income.
+
+ 
+
+6. Customer Responsibilities
+6.1 Access and cooperation. Customer will provide timely access to systems, personnel, and information reasonably necessary to perform the Services.
+
+6.2 Compliance with law. Customer is responsible for compliance with laws applicable to its business and its use of the Services, unless an Order states otherwise.
+
+6.3 Account and system security. Customer is responsible for maintaining secure credentials and access controls for Customer-managed accounts, systems, and devices.
+
+ 
+
+7. Acceptable Use
+Customer will not use the Services to violate law, infringe rights, distribute malware, perform unauthorized intrusion, or send unsolicited bulk communications. Additional service-specific acceptable use terms may apply under applicable Schedules.
+
+ 
+
+8. Intellectual Property; Customer Data Ownership
+8.1 Customer Data. Customer retains all right, title, and interest in Customer Data. Verification outputs, screening outputs, reports, and logs are Customer Data to the extent they relate to Customer or Customer’s end users and are generated for Customer under an Order.
+
+8.2 ThinkSwift Technology. ThinkSwift retains all right, title, and interest in ThinkSwift Technology and any improvements.
+
+8.3 Project deliverables. Ownership and licensing of custom deliverables (including software code, creative assets, configurations, or reports) will be specified in the Order. If not specified, ThinkSwift grants Customer a non-exclusive, worldwide, non-transferable license to use the deliverables for Customer’s internal business purposes.
+
+8.4 Third-party and open source. Third-party materials are subject to their terms. ThinkSwift may use open-source consistent with industry practice and will not knowingly include open-source requiring public disclosure of Customer proprietary source code unless expressly agreed in the Order.
+
+ 
+
+9. Confidentiality
+9.1 Confidential Information. “Confidential Information” means non-public information disclosed by a Party that is identified as confidential or should reasonably be understood to be confidential.
+
+9.2 Protection and use. The receiving Party will protect the disclosing Party’s Confidential Information using at least reasonable care and will use it only to perform obligations and exercise rights under the Agreement.
+
+9.3 Customer Data restrictions. Notwithstanding anything else in the Agreement, ThinkSwift will not retain, use, disclose, or otherwise process Customer Data except as necessary to provide the Services under the applicable Order, to maintain and improve the security and integrity of the Services, to prevent fraud or abuse, to comply with applicable law, or as otherwise instructed by Customer in writing. ThinkSwift will not use Customer Data for product development or product improvement except to the extent such use is strictly necessary to provide the Services to Customer or the data has been de-identified and aggregated such that it cannot reasonably identify any individual or Customer.
+
+9.4 Exclusions. Confidential Information excludes information that is public through no fault of the receiving Party, was rightfully known to the receiving Party without obligation, is independently developed without use of Confidential Information, or is rightfully received from a third party without restriction.
+
+9.5 Return or destruction. Upon request or termination, the receiving Party will return or destroy Confidential Information within 30 days, subject to legal retention and routine backups.
+
+ 
+
+10. Security Incidents; Safe-Stop
+10.1 Security incident notice. If ThinkSwift becomes aware of a Security Incident involving Customer Data, ThinkSwift will notify Customer without undue delay and take reasonable steps to contain, investigate, and remediate. If Schedule 2 applies, incident obligations are governed by Schedule 2.
+
+10.2 Cybersecurity safe-stop. If, during Cybersecurity Services, ThinkSwift reasonably believes continued activity could materially increase risk to Customer systems or data, ThinkSwift may immediately pause or stop affected activities and disconnect from Customer systems and will notify Customer. A safe-stop does not automatically terminate the Agreement or any Order.
+
+ 
+
+11. Warranties; Disclaimers
+11.1 Limited warranty. ThinkSwift warrants Services will be performed by qualified personnel in a professional and workmanlike manner.
+
+11.2 Disclaimer. Except as expressly stated, Services and deliverables are provided “as is” and ThinkSwift disclaims implied warranties to the extent permitted by law.
+
+11.3 Third-party services. ThinkSwift is not responsible for third-party services or systems not under ThinkSwift’s control. Additional pass-through terms apply under Schedule 10 when applicable.
+
+11.4 Remedy. Customer’s exclusive remedy for breach of the Services warranty is re-performance, or if not possible, a refund of fees for the non-conforming Services as stated in the Order.
+
+ 
+
+12. Indemnification
+12.1 Mutual indemnity. Each Party will indemnify the other from third-party claims arising from the indemnifying Party’s negligence, gross negligence, willful misconduct, or material breach.
+
+12.2 Procedure. The indemnified Party will promptly notify the indemnifying Party. The indemnifying Party will control the defense and settlement, provided settlement cannot admit fault or impose obligations on the indemnified Party without the indemnified Party’s prior written consent (not to be unreasonably withheld). The indemnified Party will reasonably cooperate.
+
+ 
+
+13. Limitation of Liability
+13.1 Exclusion of certain damages. To the maximum extent permitted by law, neither Party will be liable for indirect, incidental, consequential, special, exemplary, or punitive damages, or for loss of profits, revenue, goodwill, or business interruption, even if advised of the possibility.
+
+13.2 Liability cap (per Order). To the maximum extent permitted by law, each Party’s aggregate liability arising out of or relating to an Order will not exceed the fees paid or payable by Customer under the applicable Order in the twelve (12) months immediately preceding the event giving rise to the claim.
+
+13.3 Increased cap for confidentiality and data protection. Notwithstanding Section 13.2, each Party’s aggregate liability for breaches of Section 9 (Confidentiality) and Schedule 2 (DPA) will not exceed two (2) times the cap set forth in Section 13.2.
+
+13.4 Exceptions. Sections 13.1, 13.2, and 13.3 do not apply to: (a) Customer’s payment obligations, (b) either Party’s indemnification obligations, or (c) either Party’s gross negligence or willful misconduct.
+
+13.5 Claims period. No action may be brought more than one (1) year after the cause of action accrues, except claims for unpaid fees.
+
+ 
+
+14. Term and Termination
+14.1 Term. This Agreement begins on the effective date of the first executed Order and continues until all Orders have expired or been terminated.
+
+14.2 Termination for cause. Either Party may terminate an Order for material breach if the breach is not cured within (a) 10 days for monetary breach, or (b) 30 days for non-monetary breach, after written notice.
+
+14.3 Termination for insolvency. Either Party may terminate an Order immediately upon the other Party’s insolvency, assignment for the benefit of creditors, or similar proceedings.
+
+14.4 Termination for convenience (ThinkSwift-only). ThinkSwift may terminate an Order for convenience upon 30 days written notice. Customer does not have a termination for convenience right unless explicitly granted in the applicable Order.
+
+14.5 Commitments and early termination. If an Order includes a minimum term, non-cancellable subscription, or other commitment, Customer remains responsible for fees due for the committed term, unless the Order expressly provides an early termination option and fee.
+
+14.6 Effect of termination. Customer will pay fees for Services performed through the termination effective date and any non-cancellable commitments stated in the Order. Return or destruction of Confidential Information and Customer Data is governed by Section 9 and Schedule 2 as applicable.
+
+ 
+
+15. Non-Solicitation
+During the term of an Order and for one year after, Customer will not knowingly solicit for employment ThinkSwift personnel who materially performed Services for Customer, except via general solicitations not targeted at ThinkSwift.
+
+ 
+
+16. Independent Contractors
+The Parties are independent contractors.
+
+ 
+
+17. Force Majeure
+Neither Party is liable for failure to perform due to events beyond its reasonable control, including failures of telecommunications or internet service providers not under the Party’s control.
+
+ 
+
+18. Governing Law; Venue
+Ontario law governs, and courts located in Toronto, Ontario have exclusive jurisdiction, unless an Order states otherwise.
+
+ 
+
+19. Assignment
+Neither Party may assign the Agreement without the other Party’s consent, except to an Affiliate or in connection with a merger or sale of substantially all assets, provided the assignee agrees in writing to be bound.
+
+ 
+
+20. Export Compliance
+Customer will comply with applicable export and sanctions laws.
+
+ 
+
+21. No Third-Party Beneficiaries
+This Agreement does not confer any rights or remedies on any person other than the Parties, except as expressly stated.
+
+ 
+
+22. Entire Agreement; Amendments
+This Agreement is the entire agreement regarding the Services and supersedes prior discussions and agreements on the subject matter. Any amendment must be in writing and executed by both Parties, except as permitted by Section 2 for updates applicable to future Orders.
+
+ 
+
+SCHEDULE 1: ORDER MECHANICS AND CHANGE CONTROL (All Orders)
+1. Order acceptance. A signed proposal, quote, or statement of work is an Order under the MSA when it references this MSA.
+
+2. Change control. Any change to scope, timeline, or fees must be documented in a change order executed by both Parties.
+
+3. Suspension process. ThinkSwift may suspend affected Services for undisputed past-due fees after providing at least 10 days written notice and an opportunity to cure.
+
+4. Commitments. Minimum terms, non-cancellable subscriptions, and early termination fees (if any) are governed by the Order.
+
+5. Renewals. If the Order includes renewal language, it governs. If the Order is silent, subscriptions renew month-to-month after the initial term at then-current rates unless either Party provides 30 days notice of non-renewal.
+
+ 
+
+SCHEDULE 2: DATA PROCESSING ADDENDUM (DPA)
+This DPA applies when triggered under Section 3.
+
+1. Roles
+1.1 Controller and Processor. Customer is the Controller of Customer Data. ThinkSwift acts as a Processor (and, where applicable under US state privacy laws, a “service provider” or equivalent).
+
+1.2 Subprocessors. Customer authorizes ThinkSwift to engage subprocessors to process Customer Data solely to provide the Services, subject to this DPA.
+
+2. Processing Instructions
+2.1 ThinkSwift will process Customer Data only on Customer’s documented instructions as set out in the Agreement, the applicable Order, and Customer’s configuration and use of the Services.
+
+2.2 ThinkSwift will notify Customer if it believes a Customer instruction violates applicable law, unless prohibited by law.
+
+3. Confidentiality
+ThinkSwift will ensure personnel authorized to process Customer Data are bound by confidentiality obligations.
+
+4. Security Measures
+ThinkSwift will implement appropriate technical and organizational measures designed to protect Customer Data, including as appropriate:
+
+access controls and least privilege
+encryption in transit, and encryption at rest where feasible for stored Customer Data
+logging and monitoring
+vulnerability management and secure development practices
+incident response processes and internal escalation procedures
+5. Security Incidents
+5.1 Notice. ThinkSwift will notify Customer without undue delay after confirming a Security Incident involving Customer Data.
+
+5.2 Cooperation. ThinkSwift will provide information reasonably necessary for Customer to meet legal obligations, including the nature of the incident, categories of data affected, mitigation steps, and status updates as reasonably requested.
+
+5.3 Remediation. ThinkSwift will take reasonable steps to contain, investigate, and remediate the Security Incident.
+
+6. Subprocessors
+6.1 Flow-down. ThinkSwift will impose written obligations on subprocessors that are no less protective than this DPA for Customer Data processing, including confidentiality, security, incident notification, and deletion or return obligations.
+
+6.2 Responsibility. ThinkSwift remains responsible for its subprocessors’ performance of subprocessing obligations under this DPA.
+
+6.3 Subprocessor list; updates; notice. ThinkSwift will maintain a list of subprocessors below and may update it. ThinkSwift will provide Customer reasonable notice of material additions or replacements of subprocessors.
+
+6.4 Objection. If Customer reasonably objects to a new subprocessor on data protection grounds within 30 days of notice, the Parties will work in good faith to resolve the objection. If the Parties cannot resolve it, ThinkSwift may, as Customer’s sole remedy, terminate the affected Services upon 30 days notice and refund prepaid fees for the unused portion of the terminated Services.
+
+Subprocessor List (initial)
+
+Ondato UAB (IDV and AML/KYC platform services for IDV Services)
+7. Data Retention and Deletion
+7.1 Retention. ThinkSwift will retain Customer Data only as necessary to provide the Services and as specified in the applicable Schedule or the Order.
+
+7.2 Deletion or return at end of Services. Upon termination or expiration of the applicable Order, ThinkSwift will delete or return Customer Data within thirty (30) days, unless (a) the Order states a longer retention, or (b) retention is required by law.
+
+IDV deletion trigger. Where Schedule 3 (IDV) applies, Customer acknowledges that deletion is initiated following Customer’s Termination Instruction as described in Schedule 3, and Customer is responsible for exporting required IDV data prior to providing such instruction.
+
+7.3 Backups. Customer Data may persist in routine backups for a limited period, provided such backups are protected and not actively processed except for restoration or security purposes.
+
+8. Assistance
+8.1 Data subject requests. ThinkSwift will provide reasonable assistance to Customer to respond to requests from individuals to the extent required by law and to the extent Customer cannot access the relevant Customer Data through the Services.
+
+8.2 Regulator and legal requests. ThinkSwift will notify Customer of legally binding requests for disclosure of Customer Data unless prohibited by law.
+
+9. Cross-border Processing
+Customer authorizes ThinkSwift and its subprocessors to process Customer Data in jurisdictions necessary to provide the Services, subject to this DPA and applicable safeguards.
+
+ 
+
+SCHEDULE 3: IDENTITY VERIFICATION AND AML/KYC SERVICES (IDV)
+This Schedule applies when triggered under Section 3.
+
+1. Scope
+IDV Services may include document capture and verification, liveness detection, face matching, identity verification, AML screening, KYC and KYB, sanctions and PEP screening, adverse media screening, and related fraud checks, as described in the Order.
+
+2. Roles and Responsibilities
+2.1 Customer role. Customer is responsible for determining the lawful basis for collecting and submitting Customer Data for IDV Services, and for providing required end-user notices and obtaining required consents, including biometric consents where required by law.
+
+2.2 ThinkSwift role. ThinkSwift provides IDV Services as a technology provider and processes Customer Data only on Customer’s instructions as set out in the Agreement and Order.
+
+2.3 No legal advice. ThinkSwift does not provide legal advice or compliance determinations. Customer remains responsible for AML/KYC program decisions and reliance on outputs.
+
+3. Biometrics
+3.1 Purpose limitation. Biometric Data is processed only to provide liveness detection and face matching and to prevent fraud and abuse as part of the IDV Services.
+
+3.2 Default biometric retention. Biometric templates, embeddings, and face geometry outputs are not retained by default (0 days) unless the Order expressly states otherwise.
+
+4. IDV Data Access, Export, and Deletion on Termination
+1. System of Record.
+Customer acknowledges that IDV artifacts and records (including identity document images, selfie/video captures, biometric outputs, and associated verification records) are stored and protected within the IDV platform operated by ThinkSwift’s authorized subprocessor (Ondato) (“IDV Platform”).
+
+2. Retention During Term.
+Unless the Order states otherwise, IDV data will be retained during the term of the applicable Order to support Customer’s compliance, audit, and operational needs.
+
+3. Customer Export Requirement Prior to Termination Instructions.
+Customer is solely responsible for exporting or otherwise retaining any IDV data, verification outputs, and audit records required to meet Customer’s legal, regulatory, or business obligations. Customer must complete any required exports prior to submitting any termination, cancellation, or non-renewal instruction for IDV Services (a “Termination Instruction”). Customer acknowledges that following a Termination Instruction, access to the IDV Platform may be restricted or removed and data may be deleted as set out below.
+
+4. Deactivation and Deletion Following Termination Instruction.
+Upon receipt of a Termination Instruction, ThinkSwift will, within thirty (30) days or less, as determined by ThinkSwift in its discretion:
+(a) deactivate Customer’s access to the IDV Services and/or IDV Platform portal, and
+(b) instruct the IDV Platform to delete IDV data relating to Customer, and remove or deactivate the Customer portal instance,
+except to the extent retention is required by applicable law.
+
+5. No Liability for Failure to Export.
+Customer acknowledges that deletion under this Section may be irreversible. ThinkSwift has no liability for Customer’s inability to access, retrieve, or reconstruct IDV data after a Termination Instruction, including where Customer failed to export or retain such data prior to providing the Termination Instruction.
+
+6. Extended Retention Only by Written Agreement.
+Any retention beyond the period in Section 4 must be expressly agreed in writing in the Order or a written amendment and may be subject to additional fees.
+
+5. Subprocessor
+ThinkSwift may use Ondato UAB as an authorized subprocessor for IDV functions as described in the DPA Subprocessor List.
+
+ 
+
+SCHEDULE 4: CYBERSECURITY SERVICES
+This Schedule applies when triggered under Section 3.
+
+1. Authorization. Customer represents it has authorization to request and permit the Cybersecurity Services on the systems, networks, applications, and environments in scope.
+
+2. Rules of engagement. The Order will specify scope, testing windows, targets, and exclusions. If the Order is silent, ThinkSwift will use commercially reasonable rules of engagement and avoid actions that would be reasonably likely to cause material disruption, unless Customer requests otherwise in writing.
+
+3. Safe-stop. ThinkSwift may safe-stop as described in Section 10.2 if continuing could materially increase risk.
+
+4. Findings and reports. Deliverables may include reports, recommendations, and remediation guidance. Customer remains responsible for implementing remediation unless the Order includes remediation services.
+
+5. Third-party systems. Customer is responsible for obtaining third-party approvals required for testing or monitoring third-party hosted systems, unless the Order states ThinkSwift will obtain such approvals.
+
+ 
+
+SCHEDULE 5: MANAGED IT AND SUPPORT SERVICES
+This Schedule applies when triggered under Section 3.
+
+1. Support scope. Managed IT Services may include helpdesk, endpoint management, patching, monitoring, backups, identity and access administration, and network administration as described in the Order.
+
+2. Customer responsibilities. Customer will (a) maintain appropriate physical security and environmental controls, (b) provide access to sites and systems as required, and (c) maintain required licenses for third-party software unless the Order includes them.
+
+3. Remote tools and agents. Customer authorizes ThinkSwift to deploy reasonable remote management tools, monitoring agents, and backup agents necessary to deliver the Managed IT Services.
+
+4. Backups and restores. If backup services are included, the Order will define backup scope and retention. Restore success may depend on factors outside ThinkSwift’s control (hardware failure, malware, corruption, third-party outages). ThinkSwift will use commercially reasonable efforts to restore from available backups.
+
+5. Customer Election Not to Purchase Backup or Disaster Recovery Services Unless an Order expressly includes backup, disaster recovery, business continuity, data replication, image-based backup, cloud backup, server backup, workstation backup, Microsoft 365 backup, Google Workspace backup, or other data protection services, ThinkSwift has no obligation to back up, preserve, restore, reconstruct, recover, or maintain any Customer systems, applications, files, email, SaaS data, databases, configurations, images, snapshots, logs, or other Customer Data. Customer acknowledges that backup and disaster recovery services are optional services that must be expressly purchased and scoped in an Order. If Customer declines, excludes, cancels, fails to renew, or elects not to purchase such services, Customer is solely responsible for maintaining adequate backups, retention, restoration procedures, disaster recovery plans, business continuity plans, and verification/testing of those backups and procedures. To the maximum extent permitted by law, Customer releases, indemnifies, defends, and holds harmless ThinkSwift, its Affiliates, officers, directors, employees, contractors, subcontractors, and agents from and against any and all claims, demands, losses, damages, liabilities, costs, expenses, business interruption, loss of revenue, loss of profits, loss of goodwill, data loss, data corruption, ransomware impact, system downtime, restoration costs, reconstruction costs, regulatory claims, third-party claims, and reasonable legal fees arising out of or relating to Customer’s decision not to purchase, maintain, renew, or authorize backup, disaster recovery, or business continuity services from ThinkSwift, or arising from any backup scope, system, application, device, data source, retention period, or recovery objective that is not expressly included in an Order.
+
+6. Service levels. If service levels apply, they must be stated in the Order. If not stated, ThinkSwift provides commercially reasonable response times.
+
+ 
+
+SCHEDULE 6: MARKETING AND GROWTH SERVICES
+This Schedule applies when triggered under Section 3.
+
+1. No guaranteed outcomes. Marketing results vary and are not guaranteed. ThinkSwift does not guarantee specific rankings, leads, conversions, or revenue.
+
+2. Approvals. Customer is responsible for timely approvals of creatives, copy, landing pages, and campaigns. Delays in approvals can delay performance.
+
+3. Ad spend and third-party platforms. Unless included in the Order, media spend and third-party platform fees are paid by Customer and are separate from ThinkSwift fees. Customer’s use of ad platforms is subject to those platforms’ terms.
+
+4. Customer materials. Customer represents it owns or has rights to use the logos, trademarks, content, and data it provides for marketing.
+
+5. Compliance. Customer is responsible for compliance with industry-specific advertising rules applicable to Customer (including legal services advertising rules), unless the Order states otherwise.
+
+ 
+
+SCHEDULE 7: APPLICATION DEVELOPMENT AND EMERGING TECHNOLOGY SERVICES
+This Schedule applies when triggered under Section 3.
+
+1. Delivery model. The Order may specify milestones, sprints, acceptance criteria, and delivery dates. If not specified, delivery is on a time and materials basis with reasonable progress updates.
+
+2. Change control. Scope changes must be handled via change order (Schedule 1).
+
+3. Acceptance. If the Order includes acceptance, Customer will test within the acceptance period stated in the Order. If not stated, acceptance is deemed upon delivery unless Customer reports material non-conformities within 10 business days.
+
+4. Third-party dependencies. Customer acknowledges that third-party APIs, cloud services, app stores, and model providers may change or impose limitations that impact functionality.
+
+5. AI/ML limitations. If Services include AI or ML features, outputs may be probabilistic and may contain errors. Customer is responsible for appropriate human review and for using outputs in a manner consistent with applicable law and Customer policies.
+
+ 
+
+SCHEDULE 8: HOSTING, SAAS, AND SERVICE LEVELS
+This Schedule applies when triggered under Section 3.
+
+1. Availability. If the Order states an uptime commitment, it applies only to the hosted service component identified in the Order.
+
+2. Exclusions. Availability commitments do not apply to outages caused by: (a) factors outside ThinkSwift’s control (internet backbone, DDoS beyond reasonable mitigations, third-party cloud outages), (b) Customer systems or configuration, (c) Customer misuse, or (d) scheduled maintenance with reasonable notice when feasible.
+
+3. Maintenance. ThinkSwift may perform maintenance that may impact availability. When feasible, ThinkSwift will provide advance notice.
+
+4. Service credits. If service credits apply, they must be stated in the Order. Service credits, if any, are Customer’s sole and exclusive remedy for availability failures.
+
+ 
+
+SCHEDULE 9: UNIFIED COMMUNICATIONS AND TELECOM
+This Schedule applies when triggered under Section 3.
+
+1. Emergency Calling / 9-1-1 and E911
+
+Important emergency-calling notice. Services that enable calls to the public telephone network, including VoIP, PBX, SIP, softphone, and related voice services (“Voice Services”), may provide access to 9-1-1/E911 emergency calling. Emergency calling through Voice Services may differ from traditional wireline 9-1-1 service and may be unavailable, delayed, misrouted, or limited in certain circumstances.
+
+Customer acknowledges that emergency calling may be affected by, among other things: loss of electrical power; failure, congestion, suspension, or interruption of internet, broadband, network, equipment, software, or Voice Services; an incorrect, incomplete, or outdated registered service address or dispatchable location; relocation or use of a device or Voice Service from a location other than its registered location; use of a non-native telephone number; and delays in making location information available to emergency authorities. Emergency personnel may not automatically receive Customer’s current location, callback number, or other information.
+
+Customer must provide and keep current the physical service address or dispatchable location for each Voice Service and must promptly update that information before using the Voice Service from a new location, where the Service permits or requires an update. When placing a 9-1-1/E911 call, the caller should be prepared to provide the emergency dispatcher with the caller’s current physical location, callback number, and the nature of the emergency. The caller must not disconnect until instructed by the dispatcher; if disconnected, the caller should call back immediately.
+
+Customer is responsible for informing all authorized users, guests, and other persons who may use the Voice Services of these emergency-calling limitations and for placing any emergency-calling warning labels supplied by ThinkSwift on or near the applicable equipment. Customer must maintain an alternative means of contacting emergency services, such as a mobile telephone, where emergency calling through Voice Services may be unavailable or unsuitable.
+
+Before activation, and whenever required by law or by ThinkSwift, Customer must affirmatively acknowledge receipt and understanding of this emergency-calling notice. ThinkSwift may retain records of that acknowledgement. For Canadian services, ThinkSwift will provide required customer notifications concerning the nature and limitations of VoIP 9-1-1/E9-1-1 service. For United States interconnected VoIP services, ThinkSwift will provide the required E911 advisory and conspicuous warning notice or labels.
+
+Nothing in this Section limits any non-waivable obligation of ThinkSwift or an underlying emergency-service provider under applicable law. Service-specific emergency-calling capabilities, location-update methods, and any additional instructions will be made available in the applicable Order, customer portal, or emergency-calling notice.
+
+2. Call recording and compliance. Customer is responsible for complying with laws regarding call recording, monitoring, and notice to call participants.
+
+3. Number porting. Number porting depends on third parties and may take time. ThinkSwift does not guarantee port dates and is not liable for porting delays outside its control.
+
+4. Devices and provisioning. If devices are provided, Schedule 10 applies to hardware terms. Customer is responsible for local network readiness and power/internet availability.
+
+ 
+
+SCHEDULE 10: RESALE, HARDWARE, AND THIRD-PARTY SERVICES
+This Schedule applies when triggered under Section 3.
+
+1. Pass-through terms. Third-party software, subscriptions, cloud services, and telecom services are subject to the third party’s terms. Customer agrees to comply with such terms. Where applicable, ThinkSwift may provide Customer with links or references to such terms.
+
+2. Third-party outages. ThinkSwift is not responsible for third-party outages or changes that impact Services, except to the extent ThinkSwift fails to use commercially reasonable efforts to manage vendors where ThinkSwift is responsible for vendor management under the Order.
+
+3. Hardware warranty and returns. Hardware may be subject to manufacturer warranties. Unless otherwise stated in the Order, returns and RMAs are governed by manufacturer policies. Shipping, taxes, and duties may apply.
+
+4. Usage-based fees. If fees are based on usage metrics (minutes, seats, transactions), Customer is responsible for such fees as incurred and as stated in the Order.
+
+ 
+
+SCHEDULE 11: CYBER WARRANTY, PROTECTION, AND THIRD-PARTY COVERAGE PROGRAMS
+This Schedule applies when triggered under Section 3.
+
+1. Program nature. Any warranty, protection, or coverage program is governed by the Order and any applicable third-party administrator or partner terms, if any. It is not insurance unless explicitly stated as insurance and provided by a licensed insurer.
+
+2. Conditions and exclusions. Coverage, if any, may be conditioned on Customer maintaining specified security controls and complying with program requirements. Exclusions may apply as stated in the Order or third-party program terms.
+
+3. Claims process. Customer must promptly notify ThinkSwift (and any program administrator, if applicable) of incidents and cooperate with investigation and mitigation as required by the program.

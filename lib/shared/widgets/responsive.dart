@@ -18,3 +18,13 @@ class ResponsiveBreakpoints {
     return 32;
   }
 }
+
+class ResponsiveContentWidths {
+  const ResponsiveContentWidths._();
+
+  /// Comfortable reading width used by compact list-oriented pages.
+  static const double list = 680;
+
+  /// Uses more of a desktop window while keeping rows easy to scan.
+  static const double desktopList = 1120;
+}

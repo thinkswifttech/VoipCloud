@@ -9,6 +9,7 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_card.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
+import '../../../shared/widgets/responsive.dart';
 import '../domain/contact.dart';
 import 'contacts_providers.dart';
 
@@ -20,7 +21,8 @@ class ContactsScreen extends ConsumerWidget {
     final contacts = ref.watch(contactsProvider);
 
     return PageContent(
-      maxWidth: 680,
+      maxWidth: ResponsiveContentWidths.list,
+      desktopMaxWidth: ResponsiveContentWidths.desktopList,
       scrollable: false,
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
       child: contacts.when(

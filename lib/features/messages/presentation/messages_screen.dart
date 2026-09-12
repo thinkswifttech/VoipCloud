@@ -18,6 +18,7 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/platform/desktop_platform.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
+import '../../../shared/widgets/responsive.dart';
 import 'message_thread_screen.dart';
 import 'messages_providers.dart';
 
@@ -139,7 +140,8 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     return Theme(
       data: messagesTheme,
       child: PageContent(
-        maxWidth: 680,
+        maxWidth: ResponsiveContentWidths.list,
+        desktopMaxWidth: ResponsiveContentWidths.desktopList,
         scrollable: false,
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
         child: messaging.isLoading

@@ -18,6 +18,7 @@ import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
+import '../../../shared/widgets/responsive.dart';
 import '../domain/call_history_item.dart';
 import 'call_history_providers.dart';
 
@@ -79,7 +80,8 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
         ref.watch(directoryProvider).value ?? const <DirectoryEntry>[];
 
     return PageContent(
-      maxWidth: 680,
+      maxWidth: ResponsiveContentWidths.list,
+      desktopMaxWidth: ResponsiveContentWidths.desktopList,
       scrollable: false,
       safeAreaBottom: false,
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),

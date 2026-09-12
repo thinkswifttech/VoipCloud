@@ -59,6 +59,10 @@ TaskbarPinBridge::TaskbarPinBridge(flutter::BinaryMessenger* messenger) {
 
 TaskbarPinBridge::~TaskbarPinBridge() = default;
 
+void TaskbarPinBridge::OfferPin() {
+  method_channel_->InvokeMethod("offerPin", nullptr);
+}
+
 bool TaskbarPinBridge::CanRequestPin() const {
   try {
     if (!HasDesktopTaskbarSupport()) return false;

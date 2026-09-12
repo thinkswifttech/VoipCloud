@@ -21,7 +21,16 @@ selected by default:
 - launch VoipCloud after installation; and
 - offer to pin VoipCloud to the taskbar after launch.
 
-The pin option launches VoipCloud with a one-time, dismissible in-app banner.
+The preceding license page contains the complete, offline ThinkSwift Master
+Services Agreement from `windows/installer/terms_of_service.txt`, currently
+versioned 2026-08-11. The Windows build fails if the agreement is missing,
+does not contain its expected final schedules, or is omitted from CPack's
+generated configuration. Legal wording must be updated only from an approved
+authoritative source.
+
+The pin option launches or activates VoipCloud with a one-time, dismissible
+in-app banner, including when an existing tray instance receives the installer
+handoff.
 Only clicking **Pin to taskbar** in that banner calls `TaskbarManager`, which
 then shows Windows' native confirmation. The app hides the banner when the API
 is unavailable or disabled by policy. Windows does not permit an installer to
@@ -52,6 +61,38 @@ unsigned production MSI.
 Windows MSI builds always use `config/production.json` through Flutter's
 `--dart-define-from-file` option. Packaging validates `APP_ENV=production` and
 checks every value against Flutter's generated Windows defines before compiling.
+
+## Publishing desktop updates
+
+The production config points the desktop app at
+the deployment-specific HTTPS update manifest. Settings > About exposes a
+manual **Check for updates** action. A newer build presents a download button
+that opens the versioned MSI through the user's browser, preserving Windows'
+normal Authenticode and SmartScreen checks.
+
+Windows and macOS also perform one quiet update check when the app opens. When
+a newer desktop build is available, the Settings icon displays a badge and the
+About section presents the release and download action. Network failures never
+block startup and can be retried manually from About.
+
+After building the MSI, publish it with:
+
+```powershell
+.\tool\publish_windows_update.ps1 `
+  -MsiPath .\build\windows\msi\VoipCloud-1.0.1-win64.msi `
+  -Version 1.0.1 `
+  -Build 26 `
+  -OutputDirectory .\build\desktop-update `
+  -ReleaseNotes 'Reliability and desktop usability improvements.' `
+  -AllowUnsigned
+```
+
+The publisher refuses an MSI without a valid Authenticode signature by default
+and emits the versioned MSI plus `stable.json`. For a deployment that accepts
+Windows' **Unknown publisher** warning, add `-AllowUnsigned`. Upload the MSI
+first and the manifest last. Host these files from the HTTPS web server on the
+Flexisip host, not from the SIP process. The nginx example and deployment notes
+are in `server_staging/desktop_updates/`.
 
 Desktop calling cannot receive a Flexisip mobile wake after explicit process
 termination or Windows sign-out. Production deployment should instruct users

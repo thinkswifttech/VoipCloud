@@ -41,10 +41,23 @@ class _WindowsTaskbarPinOfferState extends State<WindowsTaskbarPinOffer> {
   @override
   void initState() {
     super.initState();
+    _channel.setMethodCallHandler(_handleNativeMethod);
     if (shouldOfferWindowsTaskbarPin(
       commandLineArguments: widget.commandLineArguments,
     )) {
       unawaited(_checkAvailability());
+    }
+  }
+
+  @override
+  void dispose() {
+    _channel.setMethodCallHandler(null);
+    super.dispose();
+  }
+
+  Future<void> _handleNativeMethod(MethodCall call) async {
+    if (call.method == 'offerPin') {
+      await _checkAvailability();
     }
   }
 

@@ -96,16 +96,6 @@
           CheckBoxValue="1"
           Text="Offer to pin VoipCloud to the taskbar after launch" />
         <Control
-          Id="PinExplanation"
-          Type="Text"
-          X="48"
-          Y="157"
-          Width="292"
-          Height="30"
-          Transparent="yes"
-          NoPrefix="yes"
-          Text="Windows will ask for confirmation from inside VoipCloud. Selecting this option also launches the app." />
-        <Control
           Id="Back"
           Type="PushButton"
           X="180"
@@ -142,8 +132,8 @@
       <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath" Order="3">1</Publish>
       <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
 
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloudWithPinOffer" Order="1"><![CDATA[NOT Installed AND OFFER_TASKBAR_PIN = "1"]]></Publish>
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloud" Order="2"><![CDATA[NOT Installed AND OFFER_TASKBAR_PIN <> "1" AND LAUNCH_VOIPCLOUD = "1"]]></Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloudWithPinOffer" Order="1"><![CDATA[REMOVE <> "ALL" AND OFFER_TASKBAR_PIN = "1"]]></Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloud" Order="2"><![CDATA[REMOVE <> "ALL" AND OFFER_TASKBAR_PIN <> "1" AND LAUNCH_VOIPCLOUD = "1"]]></Publish>
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
 
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="LicenseAgreementDlg">NOT Installed</Publish>

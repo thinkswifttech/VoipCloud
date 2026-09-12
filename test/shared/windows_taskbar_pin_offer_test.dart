@@ -82,4 +82,51 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  testWidgets('an existing instance can receive a native pin offer', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      const channel = MethodChannel('voipcloud/windows_taskbar');
+      final calls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        call,
+      ) async {
+        calls.add(call.method);
+        return true;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          channel,
+          null,
+        ),
+      );
+
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: WindowsTaskbarPinOffer(
+            commandLineArguments: [],
+            child: Scaffold(body: Text('VoipCloud ready')),
+          ),
+        ),
+      );
+      expect(find.text('Pin to taskbar'), findsNothing);
+
+      final message = const StandardMethodCodec().encodeMethodCall(
+        const MethodCall('offerPin'),
+      );
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'voipcloud/windows_taskbar',
+        message,
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(calls, ['canRequestPin']);
+      expect(find.text('Pin to taskbar'), findsOneWidget);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

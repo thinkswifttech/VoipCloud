@@ -12,6 +12,7 @@ import '../../features/messages/presentation/messages_providers.dart';
 import '../../shared/icons/app_icons.dart';
 import '../../shared/platform/desktop_platform.dart';
 import '../../shared/widgets/help_support_sheet.dart';
+import '../../shared/widgets/desktop_update_badge.dart';
 import '../../shared/widgets/responsive.dart';
 import 'app_navigation.dart';
 import 'route_names.dart';
@@ -119,7 +120,9 @@ class HomeShell extends ConsumerWidget {
                           IconButton.outlined(
                             tooltip: 'Settings',
                             onPressed: () => context.push(RoutePaths.settings),
-                            icon: const Icon(AppIcons.navSettings),
+                            icon: const DesktopUpdateBadge(
+                              child: Icon(AppIcons.navSettings),
+                            ),
                           ),
                           const SizedBox(width: 8),
                         ],

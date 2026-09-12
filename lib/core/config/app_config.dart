@@ -15,6 +15,7 @@ class AppConfig {
     required this.stunServer,
     required this.turnServer,
     required this.enableVoipDebugLogs,
+    required this.desktopUpdateManifestUrl,
   });
 
   factory AppConfig.fromEnvironment() {
@@ -40,6 +41,9 @@ class AppConfig {
       stunServer: const String.fromEnvironment('STUN_SERVER'),
       turnServer: const String.fromEnvironment('TURN_SERVER'),
       enableVoipDebugLogs: const bool.fromEnvironment('ENABLE_VOIP_DEBUG_LOGS'),
+      desktopUpdateManifestUrl: const String.fromEnvironment(
+        'DESKTOP_UPDATE_MANIFEST_URL',
+      ),
     );
   }
 
@@ -56,6 +60,7 @@ class AppConfig {
       turnServer: values['TURN_SERVER'] ?? '',
       enableVoipDebugLogs:
           (values['ENABLE_VOIP_DEBUG_LOGS'] ?? '').toLowerCase() == 'true',
+      desktopUpdateManifestUrl: values['DESKTOP_UPDATE_MANIFEST_URL'] ?? '',
     );
   }
 
@@ -69,6 +74,7 @@ class AppConfig {
   final String stunServer;
   final String turnServer;
   final bool enableVoipDebugLogs;
+  final String desktopUpdateManifestUrl;
 
   bool get isProduction => environment == AppEnvironment.production;
 
@@ -93,5 +99,13 @@ class AppConfig {
       return null;
     }
     return Uri.tryParse(apiBaseUrl);
+  }
+
+  Uri? get desktopUpdateManifestUri {
+    final uri = Uri.tryParse(desktopUpdateManifestUrl.trim());
+    if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
+      return null;
+    }
+    return uri;
   }
 }

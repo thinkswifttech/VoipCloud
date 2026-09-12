@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/app_version_provider.dart';
+import '../../../core/updates/desktop_update.dart';
 import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../shared/icons/app_icons.dart';
@@ -450,12 +451,43 @@ class _AndroidFullScreenCallTileState extends State<_AndroidFullScreenCallTile>
   }
 }
 
-class _AboutSection extends ConsumerWidget {
+class _AboutSection extends ConsumerStatefulWidget {
   const _AboutSection();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_AboutSection> createState() => _AboutSectionState();
+}
+
+class _AboutSectionState extends ConsumerState<_AboutSection> {
+  Future<void> _checkForUpdates() async {
+    await ref.read(desktopUpdateProvider.notifier).check();
+    if (!mounted) return;
+    if (ref.read(desktopUpdateProvider).hasError) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Unable to check for updates. Check your connection and try again.',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _downloadUpdate(DesktopRelease release) async {
+    final launched = await ref.read(desktopUpdateLauncherProvider)(
+      release.downloadUri,
+    );
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open the update download.')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final update = ref.watch(desktopUpdateProvider);
     final versionLabel = ref
         .watch(appVersionLabelProvider)
         .maybeWhen(data: (label) => label, orElse: () => 'Version');
@@ -489,8 +521,70 @@ class _AboutSection extends ConsumerWidget {
           ],
         ),
         const Divider(height: 28),
+        if (Platform.isWindows || Platform.isMacOS) ...[
+          _DesktopUpdateTile(
+            checking: update.isLoading,
+            failed: update.hasError,
+            result: update.value,
+            onCheck: _checkForUpdates,
+            onDownload: _downloadUpdate,
+          ),
+          const Divider(height: 28),
+        ],
         const LiblinphoneAttributionTile(),
       ],
+    );
+  }
+}
+
+class _DesktopUpdateTile extends StatelessWidget {
+  const _DesktopUpdateTile({
+    required this.checking,
+    required this.failed,
+    required this.result,
+    required this.onCheck,
+    required this.onDownload,
+  });
+
+  final bool checking;
+  final bool failed;
+  final DesktopUpdateResult? result;
+  final VoidCallback onCheck;
+  final Future<void> Function(DesktopRelease release) onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    final release = result?.release;
+    final available = result?.status == DesktopUpdateStatus.available;
+    final subtitle = switch (result?.status) {
+      DesktopUpdateStatus.available =>
+        'Version ${release!.version} (build ${release.build}) is available',
+      DesktopUpdateStatus.upToDate => 'You have the latest version',
+      DesktopUpdateStatus.notConfigured => 'Update service is not configured',
+      DesktopUpdateStatus.unsupported =>
+        'Updates are unavailable on this device',
+      null =>
+        failed
+            ? 'Unable to check for updates'
+            : 'Check the secure VoipCloud release channel',
+    };
+
+    return AppInfoTile(
+      icon: AppIcons.importFile,
+      title: available ? 'Update available' : 'Desktop updates',
+      subtitle: checking ? 'Checking for updates…' : subtitle,
+      trailing: checking
+          ? const SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : available
+          ? FilledButton(
+              onPressed: () => onDownload(release!),
+              child: const Text('Download'),
+            )
+          : TextButton(onPressed: onCheck, child: const Text('Check')),
+      onTap: checking || available ? null : onCheck,
     );
   }
 }

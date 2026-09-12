@@ -78,6 +78,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               LPARAM const lparam) noexcept {
   if (message == ActivateExistingMessage()) {
     ShowAndActivate();
+    if (wparam != 0 && taskbar_pin_bridge_) {
+      taskbar_pin_bridge_->OfferPin();
+    }
     return 1;
   }
 

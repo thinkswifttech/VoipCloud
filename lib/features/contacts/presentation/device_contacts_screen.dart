@@ -13,6 +13,7 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_card.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
+import '../../../shared/widgets/responsive.dart';
 import '../data/device_contacts_repository.dart';
 import '../domain/contact.dart';
 import '../domain/contact_number_eligibility.dart';
@@ -74,7 +75,8 @@ class _DeviceContactsScreenState extends ConsumerState<DeviceContactsScreen> {
   Widget build(BuildContext context) {
     if (!isDeviceContactsSupported()) {
       return const PageContent(
-        maxWidth: 680,
+        maxWidth: ResponsiveContentWidths.list,
+        desktopMaxWidth: ResponsiveContentWidths.desktopList,
         scrollable: false,
         safeAreaBottom: false,
         padding: EdgeInsets.fromLTRB(20, 12, 8, 0),
@@ -86,7 +88,8 @@ class _DeviceContactsScreenState extends ConsumerState<DeviceContactsScreen> {
     final theme = Theme.of(context);
 
     return PageContent(
-      maxWidth: 680,
+      maxWidth: ResponsiveContentWidths.list,
+      desktopMaxWidth: ResponsiveContentWidths.desktopList,
       scrollable: false,
       safeAreaBottom: false,
       padding: const EdgeInsets.fromLTRB(20, 12, 8, 0),

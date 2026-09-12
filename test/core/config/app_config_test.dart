@@ -16,6 +16,8 @@ void main() {
       'STUN_SERVER': 'stun:stun.example.test',
       'TURN_SERVER': 'turn:turn.example.test',
       'ENABLE_VOIP_DEBUG_LOGS': 'true',
+      'DESKTOP_UPDATE_MANIFEST_URL':
+          'https://updates.example.test/desktop/stable.json',
     });
 
     expect(config.environment, AppEnvironment.staging);
@@ -25,6 +27,7 @@ void main() {
     expect(config.devSipAccountDomain, 'tenant.example.test');
     expect(config.sipTransport, SipTransport.tls);
     expect(config.enableVoipDebugLogs, isTrue);
+    expect(config.desktopUpdateManifestUri?.host, 'updates.example.test');
     expect(config.hasBackend, isTrue);
     expect(config.hasSipProxy, isTrue);
   });
@@ -36,5 +39,15 @@ void main() {
     expect(config.hasBackend, isFalse);
     expect(config.hasSipProxy, isFalse);
     expect(config.messagingBaseUri, isNull);
+    expect(config.desktopUpdateManifestUri, isNull);
+  });
+
+  test('rejects an insecure desktop update manifest', () {
+    final config = AppConfig.fromMap({
+      'DESKTOP_UPDATE_MANIFEST_URL':
+          'http://updates.example.test/desktop/stable.json',
+    });
+
+    expect(config.desktopUpdateManifestUri, isNull);
   });
 }

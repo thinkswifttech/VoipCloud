@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../platform/desktop_platform.dart';
 import 'responsive.dart';
 
 class PageContent extends StatelessWidget {
@@ -7,6 +8,7 @@ class PageContent extends StatelessWidget {
     required this.child,
     this.header,
     this.maxWidth = 920,
+    this.desktopMaxWidth,
     this.padding = const EdgeInsets.all(20),
     this.scrollable = true,
     this.safeAreaBottom = true,
@@ -16,6 +18,7 @@ class PageContent extends StatelessWidget {
   final Widget child;
   final Widget? header;
   final double maxWidth;
+  final double? desktopMaxWidth;
   final EdgeInsetsGeometry padding;
   final bool scrollable;
   final bool safeAreaBottom;
@@ -27,6 +30,12 @@ class PageContent extends StatelessWidget {
         final horizontalPadding = ResponsiveBreakpoints.horizontalPadding(
           constraints.maxWidth,
         );
+        final effectiveMaxWidth =
+            desktopMaxWidth != null &&
+                isSupportedDesktopPlatform() &&
+                ResponsiveBreakpoints.isExpanded(constraints.maxWidth)
+            ? desktopMaxWidth!
+            : maxWidth;
         final effectivePadding = padding == const EdgeInsets.all(20)
             ? EdgeInsets.fromLTRB(horizontalPadding, 20, horizontalPadding, 28)
             : padding;
@@ -49,7 +58,7 @@ class PageContent extends StatelessWidget {
                 alignment: Alignment.topCenter,
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
-                    maxWidth: maxWidth,
+                    maxWidth: effectiveMaxWidth,
                     maxHeight: childMaxHeight,
                   ),
                   child: Column(
@@ -77,7 +86,7 @@ class PageContent extends StatelessWidget {
               child: Align(
                 alignment: Alignment.topCenter,
                 child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: maxWidth),
+                  constraints: BoxConstraints(maxWidth: effectiveMaxWidth),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [

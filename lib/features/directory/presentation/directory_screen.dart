@@ -13,6 +13,7 @@ import '../../../features/session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
+import '../../../shared/widgets/responsive.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
 import '../data/dialog_presence_parser.dart';
 import '../data/directory_presence.dart';
@@ -105,7 +106,8 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     });
 
     return PageContent(
-      maxWidth: 680,
+      maxWidth: ResponsiveContentWidths.list,
+      desktopMaxWidth: ResponsiveContentWidths.desktopList,
       scrollable: false,
       safeAreaBottom: false,
       padding: const EdgeInsets.fromLTRB(20, 12, 8, 0),

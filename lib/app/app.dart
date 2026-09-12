@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/updates/desktop_update.dart';
 import '../features/settings/presentation/settings_controller.dart';
 import '../shared/platform/windows_taskbar_pin_offer.dart';
 import 'router/app_router.dart';
@@ -33,6 +34,9 @@ class _SoftphoneAppState extends ConsumerState<SoftphoneApp> {
 
   @override
   Widget build(BuildContext context) {
+    // Keep a single application-wide desktop update check alive from startup.
+    // Its result drives the Settings badge and the About panel.
+    ref.watch(desktopUpdateProvider);
     final router = ref.watch(appRouterProvider);
     final settings = ref.watch(settingsControllerProvider);
     if (!identical(_routerIdentity, router)) {

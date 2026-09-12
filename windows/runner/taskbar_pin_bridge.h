@@ -12,6 +12,8 @@ class TaskbarPinBridge {
   explicit TaskbarPinBridge(flutter::BinaryMessenger* messenger);
   ~TaskbarPinBridge();
 
+  void OfferPin();
+
   TaskbarPinBridge(const TaskbarPinBridge&) = delete;
   TaskbarPinBridge& operator=(const TaskbarPinBridge&) = delete;
 

@@ -9,6 +9,8 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $productionConfig = Join-Path $projectRoot "config\production.json"
+$termsOfService = Join-Path $projectRoot `
+  "windows\installer\terms_of_service.txt"
 $linphoneDll = Join-Path $projectRoot `
   "windows\third_party\linphone\linphone-sdk\win64\bin\liblinphone.dll"
 
@@ -17,6 +19,20 @@ if (-not (Test-Path -LiteralPath $linphoneDll)) {
 }
 if (-not (Test-Path -LiteralPath $productionConfig)) {
   throw "The required Windows production configuration is missing: $productionConfig"
+}
+if (-not (Test-Path -LiteralPath $termsOfService)) {
+  throw "The required MSI Terms of Service agreement is missing: $termsOfService"
+}
+$termsText = Get-Content -LiteralPath $termsOfService -Raw
+foreach ($requiredTerm in @(
+    "ThinkSwift Master Services Agreement",
+    "Last Updated / Version: 2026-08-11",
+    "SCHEDULE 9: UNIFIED COMMUNICATIONS AND TELECOM",
+    "SCHEDULE 11: CYBER WARRANTY, PROTECTION, AND THIRD-PARTY COVERAGE PROGRAMS"
+  )) {
+  if (-not $termsText.Contains($requiredTerm)) {
+    throw "The MSI Terms of Service agreement is incomplete or unexpected: missing '$requiredTerm'."
+  }
 }
 $productionValues = Get-Content -LiteralPath $productionConfig -Raw |
   ConvertFrom-Json -AsHashtable
@@ -41,7 +57,24 @@ function Resolve-Executable {
   return $null
 }
 
-$vswhere = Join-Path ${env:ProgramFiles(x86)} `
+$programFilesX86 = ${env:ProgramFiles(x86)}
+if ([string]::IsNullOrWhiteSpace($programFilesX86)) {
+  $programFilesX86 = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::ProgramFilesX86
+  )
+}
+if ([string]::IsNullOrWhiteSpace($programFilesX86) -and
+    (Test-Path -LiteralPath "C:\Program Files (x86)")) {
+  $programFilesX86 = "C:\Program Files (x86)"
+}
+if ([string]::IsNullOrWhiteSpace($programFilesX86)) {
+  throw "Unable to locate the 32-bit Program Files directory."
+}
+if ([string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+  Set-Item -Path 'Env:ProgramFiles(x86)' -Value $programFilesX86
+}
+
+$vswhere = Join-Path $programFilesX86 `
   "Microsoft Visual Studio\Installer\vswhere.exe"
 $visualStudio = $null
 if (Test-Path -LiteralPath $vswhere) {
@@ -77,7 +110,7 @@ foreach ($tool in @{
   }
 }
 
-$windowsKitBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+$windowsKitBin = Join-Path $programFilesX86 "Windows Kits\10\bin"
 $signToolCandidates = @()
 if (Test-Path -LiteralPath $windowsKitBin) {
   $signToolCandidates = Get-ChildItem -LiteralPath $windowsKitBin `
@@ -88,8 +121,8 @@ if (Test-Path -LiteralPath $windowsKitBin) {
 $signTool = Resolve-Executable "signtool" $signToolCandidates
 
 $wixRoots = @(
-  "${env:ProgramFiles(x86)}\WiX Toolset v3.14",
-  "${env:ProgramFiles(x86)}\WiX Toolset v3.11",
+  "$programFilesX86\WiX Toolset v3.14",
+  "$programFilesX86\WiX Toolset v3.11",
   "$env:ProgramFiles\WiX Toolset v3.14",
   "$env:ProgramFiles\WiX Toolset v3.11"
 )
@@ -119,14 +152,38 @@ if ($projectRoot.Length -gt 100) {
     "$ShortBuildDrive\" (Split-Path -Leaf $projectRoot)
 
   # MSVC still applies a 260-character limit to some generated object paths.
-  # Reconfigure only the generated Windows tree against the short root.
-  $windowsBuild = Join-Path $projectRoot "build\windows"
-  if (-not $windowsBuild.StartsWith(
-      $projectRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Refusing to clean a build directory outside the project."
-  }
-  if (Test-Path -LiteralPath $windowsBuild) {
-    Remove-Item -LiteralPath $windowsBuild -Recurse -Force
+  # Flutter also records the temporary drive letter in its generated state.
+  # Clear only known generated locations before configuring against the new
+  # mapping so a previous W:/V: build cannot poison this release.
+  $generatedPaths = @(
+    (Join-Path $projectRoot "build\windows"),
+    (Join-Path $projectRoot ".dart_tool\flutter_build"),
+    (Join-Path $projectRoot ".dart_tool\hooks_runner"),
+    (Join-Path $projectParent "VoipCloud\windows")
+  )
+  $allowedRoots = @(
+    ([IO.Path]::GetFullPath($projectRoot).TrimEnd('\') + '\'),
+    ([IO.Path]::GetFullPath(
+        (Join-Path $projectParent "VoipCloud")
+      ).TrimEnd('\') + '\')
+  )
+  foreach ($generatedPath in $generatedPaths) {
+    $resolvedGeneratedPath = [IO.Path]::GetFullPath($generatedPath)
+    $allowed = $false
+    foreach ($allowedRoot in $allowedRoots) {
+      if ($resolvedGeneratedPath.StartsWith(
+          $allowedRoot,
+          [System.StringComparison]::OrdinalIgnoreCase)) {
+        $allowed = $true
+        break
+      }
+    }
+    if (-not $allowed) {
+      throw "Refusing to clean generated path outside approved roots: $resolvedGeneratedPath"
+    }
+    if (Test-Path -LiteralPath $resolvedGeneratedPath) {
+      Remove-Item -LiteralPath $resolvedGeneratedPath -Recurse -Force
+    }
   }
 }
 
@@ -198,6 +255,10 @@ try {
     -B $cmakeBuildDirectory -DVOIPCLOUD_CPACK_INSTALL=ON
   if ($LASTEXITCODE -ne 0) {
     throw "Unable to configure the relative CPack install graph."
+  }
+  $cpackConfigText = Get-Content -LiteralPath $cpackConfig.FullName -Raw
+  if (-not $cpackConfigText.Contains("terms_of_service.txt")) {
+    throw "CPack omitted the ThinkSwift Terms of Service agreement."
   }
   try {
     & $cpack -G WIX -C $Configuration --config $cpackConfig.FullName `

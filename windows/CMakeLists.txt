@@ -189,6 +189,8 @@ set(CPACK_PACKAGE_VERSION_MINOR "${FLUTTER_VERSION_MINOR}")
 set(CPACK_PACKAGE_VERSION_PATCH "${FLUTTER_VERSION_PATCH}")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "VoipCloud")
 set(CPACK_PACKAGE_EXECUTABLES "VoipCloud" "VoipCloud")
+set(CPACK_RESOURCE_FILE_LICENSE
+  "${CMAKE_CURRENT_SOURCE_DIR}/installer/terms_of_service.txt")
 # The desktop shortcut remains selected by default but is conditioned by the
 # custom WiX options page. Taskbar pinning itself is never performed by MSI;
 # the selected option launches VoipCloud with an in-app pin offer instead.
