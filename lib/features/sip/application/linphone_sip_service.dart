@@ -236,12 +236,13 @@ class LinphoneSipService implements SipService {
   Future<void> unregister() async {
     Completer<void>? nativeUnregistered;
     StreamSubscription<SipRegistrationState>? unregisterSubscription;
-    if (_initialized &&
-        _registrationState.status != SipRegistrationStatus.unregistered &&
-        _registrationState.status != SipRegistrationStatus.uninitialized) {
+    if (_initialized) {
       // Subscribe before invoking native code so a fast Cleared callback cannot
-      // race past us. The bounded wait gives Flexisip a chance to remove the
-      // contact before reset erases the local SIP configuration.
+      // race past us. Always wait when the native bridge is initialized:
+      // Flutter's cached registration state can lag a restored native account,
+      // and purging that account immediately would leave its registrar contact
+      // alive until expiry. Native emits an immediate unregistered event when
+      // no account exists, so the idempotent case does not incur this timeout.
       nativeUnregistered = Completer<void>();
       unregisterSubscription = registrationStateStream.listen(
         (state) {

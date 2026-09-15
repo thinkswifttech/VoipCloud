@@ -2416,6 +2416,7 @@ private final class NativeLinphoneController: LinphoneController {
   private var core: Core?
   private var account: Account?
   private var isReplacingAccount = false
+  private var explicitUnregisterRequested = false
   private var delegate: CoreDelegateStub?
   private var calls: [String: Call] = [:]
   private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String)] = [:]
@@ -2634,6 +2635,23 @@ private final class NativeLinphoneController: LinphoneController {
             state: .Progress,
             message: "Registration in progress"
           )
+          // Adding a newly provisioned account starts REGISTER automatically.
+          // If that first transaction stalls, a later Flutter retry used to
+          // keep joining the same Progress state forever. Give the transaction
+          // a short chance to finish, then force one refresh only if this is
+          // still the active, enabled account and it is still in Progress.
+          DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self,
+                  let activeAccount = self.account ?? self.core?.defaultAccount,
+                  ObjectIdentifier(activeAccount) == ObjectIdentifier(currentAccount),
+                  activeAccount.params?.registerEnabled == true,
+                  activeAccount.state == .Progress,
+                  !self.hasActiveCall() else {
+              return
+            }
+            activeAccount.refreshRegister()
+            NSLog("Softphone/Linphone recovered stalled initial SIP registration")
+          }
           result(nil)
           return
         }
@@ -2670,6 +2688,20 @@ private final class NativeLinphoneController: LinphoneController {
         result(nil)
       case "unregister":
         stopPresenceSubscriptions()
+        explicitUnregisterRequested = true
+        account = account ?? core?.defaultAccount
+        guard account != nil else {
+          explicitUnregisterRequested = false
+          registrationEvents.send(["status": "unregistered", "message": nil])
+          result(nil)
+          return
+        }
+        if account?.state == .Cleared {
+          explicitUnregisterRequested = false
+          registrationEvents.send(["status": "unregistered", "message": nil])
+          result(nil)
+          return
+        }
         try updateRegistration(enabled: false)
         account?.refreshRegister()
         result(nil)
@@ -3132,6 +3164,15 @@ private final class NativeLinphoneController: LinphoneController {
             guard let activeAccount = self.account ?? self.core?.defaultAccount,
                   ObjectIdentifier(activeAccount) == ObjectIdentifier(changedAccount) else {
               NSLog("Softphone/Linphone ignored registration callback from stale account")
+              return
+            }
+            if self.explicitUnregisterRequested && state == .Cleared {
+              self.explicitUnregisterRequested = false
+              NSLog("Softphone/Linphone explicit unregister completed")
+              self.registrationEvents.send([
+                "status": "unregistered",
+                "message": message.isEmpty ? nil : message
+              ])
               return
             }
             self.emitRegistration(state: state, message: message)
@@ -3604,6 +3645,7 @@ private final class NativeLinphoneController: LinphoneController {
 
   private func purgeAccount() {
     stopPresenceSubscriptions()
+    explicitUnregisterRequested = false
     core?.clearAccounts()
     core?.clearAllAuthInfo()
     account = nil

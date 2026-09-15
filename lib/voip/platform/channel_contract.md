@@ -47,8 +47,11 @@ and does not invoke it periodically.
 ### `unregister`
 
 Stops SIP registration. For a real logout/reset, Flutter waits for the native
-unregistered state and then calls `purgeAccount`. Temporary unregister actions
-do not purge the configured identity.
+unregistered state and then calls `purgeAccount`, even when Flutter's cached
+state has not yet observed a restored native account. Native implementations
+must emit `unregistered` immediately when no account exists and only after the
+explicit unregister transaction clears an existing account. Temporary
+unregister actions do not purge the configured identity.
 
 ### `purgeAccount`
 

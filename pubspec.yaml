@@ -1,7 +1,7 @@
 name: phone_app
 description: "ThinkSwift VoipCloud softphone app."
 publish_to: "none"
-version: 1.0.1+26
+version: 1.0.1+27
 
 environment:
   sdk: ^3.11.5
