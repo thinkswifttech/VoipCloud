@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../features/dialer/presentation/dialer_controller.dart';
 import '../../features/messages/domain/messaging_platform.dart';
 import '../../features/session/presentation/session_controller.dart';
 import 'route_names.dart';
@@ -114,6 +115,7 @@ class _ExternalCommunicationIntentListenerState
     final session = ref.read(sessionControllerProvider).value;
     if (session == null ||
         path == RoutePaths.splash ||
+        path == RoutePaths.termsAgreement ||
         path.startsWith('/calls/')) {
       return;
     }
@@ -134,6 +136,13 @@ class _ExternalCommunicationIntentListenerState
       return;
     }
 
+    // Update the source of truth before navigating. GoRouter can retain the
+    // current DialerScreen when a second system call intent only changes its
+    // query string, so relying solely on the route constructor can leave the
+    // visible number unchanged.
+    ref
+        .read(dialerControllerProvider.notifier)
+        .setDestination(intent.destination);
     widget.router.go(externalCallDialerLocation(intent.destination));
   }
 

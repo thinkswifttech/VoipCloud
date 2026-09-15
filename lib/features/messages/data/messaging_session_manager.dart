@@ -84,7 +84,7 @@ class MessagingSessionManager {
             },
           ),
         );
-        return _accept(response.data, expectedInboxId);
+        return await _accept(response.data, expectedInboxId);
       } on DioException catch (error) {
         if (error.response?.statusCode != 401 &&
             error.response?.statusCode != 403) {
@@ -108,7 +108,7 @@ class MessagingSessionManager {
           },
         ),
       );
-      return _accept(response.data, expectedInboxId);
+      return await _accept(response.data, expectedInboxId);
     } on DioException catch (error) {
       throw _networkException(error);
     }

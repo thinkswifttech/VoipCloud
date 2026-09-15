@@ -11,6 +11,7 @@ import '../../features/dialer/presentation/dialer_screen.dart';
 import '../../features/directory/presentation/directory_screen.dart';
 import '../../features/messages/presentation/messages_screen.dart';
 import '../../features/messages/domain/messaging_platform.dart';
+import '../../features/legal/presentation/terms_agreement_screen.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/provisioning/presentation/provisioning_screen.dart';
 import '../../features/provisioning/presentation/provisioning_scanner_screen.dart';
@@ -65,6 +66,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: RoutePaths.provisioningScanner,
         name: RouteNames.provisioningScanner,
         builder: (context, state) => const ProvisioningScannerScreen(),
+      ),
+      GoRoute(
+        path: RoutePaths.termsAgreement,
+        name: RouteNames.termsAgreement,
+        builder: (context, state) => const TermsAgreementScreen(),
       ),
       GoRoute(
         path: RoutePaths.accountStatus,

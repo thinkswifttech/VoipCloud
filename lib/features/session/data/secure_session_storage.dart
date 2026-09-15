@@ -167,6 +167,7 @@ class SecureSessionStorage {
     await _storage.delete(StorageKeys.appDeviceCredential);
     await _storage.delete(StorageKeys.appCarrierMessaging);
     await _storage.delete(StorageKeys.appPushTokenStatus);
+    await _storage.delete(StorageKeys.appTermsAcceptance);
     await _clearMessagingSession();
     await _clearLegacyAuth();
   }

@@ -50,6 +50,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
   final _destinationController = TextEditingController();
   final _destinationFocus = FocusNode();
   int? _pendingCursor;
+  int _initialDestinationRevision = 0;
 
   @override
   void initState() {
@@ -424,10 +425,26 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
   }
 
   void _applyInitialDestination(String? value) {
-    final destination = value?.trim() ?? '';
+    final destination = normalizeDialDestination(value?.trim() ?? '');
     if (destination.isEmpty) return;
-    ref.read(dialerControllerProvider.notifier).setDestination(destination);
-    _pendingCursor = ref.read(dialerControllerProvider).length;
+
+    final revision = ++_initialDestinationRevision;
+    final current = ref.read(dialerControllerProvider);
+    if (current == destination) {
+      _pendingCursor = destination.length;
+      _syncDestinationController(destination);
+      return;
+    }
+
+    // A route query can update this existing screen through didUpdateWidget.
+    // Riverpod correctly rejects provider mutations during that build phase,
+    // so defer a genuinely new destination until the frame has completed.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || revision != _initialDestinationRevision) return;
+      ref.read(dialerControllerProvider.notifier).setDestination(destination);
+      _pendingCursor = destination.length;
+      _syncDestinationController(destination);
+    });
   }
 
   Future<void> _showAccountDetail(

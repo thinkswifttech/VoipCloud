@@ -22,6 +22,7 @@ class StorageKeys {
   static const appCallHistoryLastViewedAt = 'app.call_history_last_viewed_at';
   static const appQuickDial = 'app.quick_dial';
   static const appContacts = 'app.contacts';
+  static const appTermsAcceptance = 'app.terms_acceptance';
 
   static const messagingAccessToken = 'messaging.access_token';
   static const messagingRefreshToken = 'messaging.refresh_token';

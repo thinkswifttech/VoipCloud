@@ -51,7 +51,7 @@ class ProvisioningController extends Notifier<ProvisioningState> {
           .activate(input: provisioningInput, device: device);
       await ref
           .read(sessionControllerProvider.notifier)
-          .setProvisionedSession(session);
+          .stageProvisionedSession(session);
       return session;
     });
 

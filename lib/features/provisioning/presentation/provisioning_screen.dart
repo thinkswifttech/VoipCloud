@@ -10,7 +10,6 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/platform/desktop_platform.dart';
 import '../../../shared/widgets/app_brand_icon.dart';
 import '../../../shared/widgets/responsive.dart';
-import '../../session/presentation/session_controller.dart';
 import 'provisioning_controller.dart';
 
 class ProvisioningScreen extends ConsumerStatefulWidget {
@@ -74,11 +73,7 @@ class _ProvisioningScreenState extends ConsumerState<ProvisioningScreen> {
     if (!ok || !context.mounted) {
       return;
     }
-    final session = ref.read(sessionControllerProvider).value;
-    final path = session?.service.isActive == true
-        ? RoutePaths.dialer
-        : RoutePaths.accountStatus;
-    context.go(path);
+    context.go(RoutePaths.termsAgreement);
   }
 
   Future<void> _scan(BuildContext context) async {

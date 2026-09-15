@@ -12,6 +12,7 @@ import '../../../core/storage/storage_providers.dart';
 import '../../call_history/presentation/call_history_providers.dart';
 import '../../calls/domain/voip_call.dart';
 import '../../contacts/presentation/quick_dial_providers.dart';
+import '../../legal/data/terms_acceptance_repository.dart';
 import '../../settings/presentation/settings_controller.dart';
 import '../../messages/data/messaging_providers.dart';
 import '../../messages/domain/carrier_messaging_config.dart';
@@ -131,6 +132,14 @@ class SessionController extends AsyncNotifier<AppSession?> {
       return null;
     }
 
+    // A newly provisioned identity is persisted before the agreement screen
+    // so declining can revoke it cleanly. Do not initialize or register SIP,
+    // refresh protected configuration, or expose the app until acceptance.
+    if (await ref.read(termsAcceptanceRepositoryProvider).isPending()) {
+      state = AsyncData(stored);
+      return stored;
+    }
+
     // Bring SIP up from the cached session before any backend round-trip so an
     // already-ringing native call can route while config refresh continues.
     await _syncSip(stored);
@@ -235,10 +244,19 @@ class SessionController extends AsyncNotifier<AppSession?> {
         previousSip.outboundProxy != nextSip.outboundProxy;
   }
 
-  Future<void> setProvisionedSession(AppSession session) async {
+  Future<void> stageProvisionedSession(AppSession session) async {
+    await ref.read(termsAcceptanceRepositoryProvider).markPending();
     await ref.read(secureSessionStorageProvider).writeSession(session);
-    await _syncSip(session);
     state = AsyncData(session);
+  }
+
+  Future<void> acceptProvisionedTerms() async {
+    final session = state.value;
+    if (session == null) {
+      throw StateError('No provisioned session is awaiting acceptance.');
+    }
+    await ref.read(termsAcceptanceRepositoryProvider).accept();
+    await _syncSip(session);
   }
 
   Future<void> setCarrierMessagingConfig(CarrierMessagingConfig config) async {

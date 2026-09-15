@@ -55,6 +55,11 @@
 	<string>VoipCloud needs microphone access for calls.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>VoipCloud uses your photo library so you can set an optional Quick Dial profile photo.</string>
+	<key>NSUserActivityTypes</key>
+	<array>
+		<string>INStartCallIntent</string>
+		<string>INStartAudioCallIntent</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

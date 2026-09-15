@@ -7,16 +7,26 @@ class SceneDelegate: FlutterSceneDelegate {
     willConnectTo session: UISceneSession,
     options connectionOptions: UIScene.ConnectionOptions
   ) {
+    // Capture a cold-start system action before Flutter processes the scene.
+    // The bridge buffers it until the Dart method channel is attached.
+    var handledExternalIntent = false
+    for context in connectionOptions.urlContexts where !handledExternalIntent {
+      handledExternalIntent = ExternalCommunicationIntentBridge.shared.handle(
+        url: context.url
+      )
+    }
+    for userActivity in connectionOptions.userActivities
+      where !handledExternalIntent {
+      handledExternalIntent = ExternalCommunicationIntentBridge.shared.handle(
+        userActivity: userActivity
+      )
+    }
+
     super.scene(
       scene,
       willConnectTo: session,
       options: connectionOptions
     )
-    for context in connectionOptions.urlContexts {
-      if ExternalCommunicationIntentBridge.shared.handle(url: context.url) {
-        break
-      }
-    }
   }
 
   override func scene(
@@ -29,6 +39,18 @@ class SceneDelegate: FlutterSceneDelegate {
       return
     }
     super.scene(scene, openURLContexts: URLContexts)
+  }
+
+  override func scene(
+    _ scene: UIScene,
+    continue userActivity: NSUserActivity
+  ) {
+    if ExternalCommunicationIntentBridge.shared.handle(
+      userActivity: userActivity
+    ) {
+      return
+    }
+    super.scene(scene, continue: userActivity)
   }
 
   override func sceneWillResignActive(_ scene: UIScene) {

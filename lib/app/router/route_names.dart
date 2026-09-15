@@ -4,6 +4,7 @@ class RouteNames {
   static const splash = 'splash';
   static const provisioning = 'provisioning';
   static const provisioningScanner = 'provisioning-scanner';
+  static const termsAgreement = 'terms-agreement';
   static const accountStatus = 'account-status';
   static const home = 'home';
   static const dialer = 'dialer';
@@ -25,6 +26,7 @@ class RoutePaths {
   static const splash = '/';
   static const provisioning = '/provisioning';
   static const provisioningScanner = '/provisioning/scan';
+  static const termsAgreement = '/provisioning/terms';
   static const accountStatus = '/account-status';
   static const home = '/home';
   static const dialer = '/dialer';

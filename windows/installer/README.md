@@ -22,7 +22,7 @@ selected by default:
 - offer to pin VoipCloud to the taskbar after launch.
 
 The preceding license page contains the complete, offline ThinkSwift Master
-Services Agreement from `windows/installer/terms_of_service.txt`, currently
+Services Agreement from `assets/legal/terms_of_service.txt`, currently
 versioned 2026-08-11. The Windows build fails if the agreement is missing,
 does not contain its expected final schedules, or is omitted from CPack's
 generated configuration. Legal wording must be updated only from an approved

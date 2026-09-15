@@ -4,6 +4,7 @@ import Flutter
 import CallKit
 import Contacts
 import Foundation
+import Intents
 import PushKit
 import UIKit
 import UniformTypeIdentifiers
@@ -110,6 +111,23 @@ import linphonesw
     return super.application(app, open: url, options: options)
   }
 
+  override func application(
+    _ application: UIApplication,
+    continue userActivity: NSUserActivity,
+    restorationHandler: @escaping ([UIUserActivityRestoring]?) -> Void
+  ) -> Bool {
+    if ExternalCommunicationIntentBridge.shared.handle(
+      userActivity: userActivity
+    ) {
+      return true
+    }
+    return super.application(
+      application,
+      continue: userActivity,
+      restorationHandler: restorationHandler
+    )
+  }
+
   private func requestNotificationAuthorization(_ application: UIApplication) {
     UNUserNotificationCenter.current().requestAuthorization(
       options: [.alert, .sound, .badge]
@@ -190,6 +208,117 @@ final class ExternalCommunicationIntentBridge {
       return false
     }
 
+    return publish(action: action, destination: destination)
+  }
+
+  /// Handles the CallKit/SiriKit continuation used by system calling
+  /// surfaces. In particular, the Default Calling App handoff can arrive as
+  /// an NSUserActivity instead of an open-URL callback.
+  @discardableResult
+  func handle(userActivity: NSUserActivity) -> Bool {
+    guard let rawDestination = Self.startCallHandle(from: userActivity),
+          let destination = Self.validatedDestination(
+            fromSystemHandle: rawDestination
+          )
+    else {
+      return false
+    }
+    return publish(action: "call", destination: destination)
+  }
+
+  /// Extracts the destination from the SiriKit interaction carried by a call
+  /// continuation. Apple's default-calling documentation uses a
+  /// `userActivity.startCallHandle` accessor that older Xcode SDK overlays do
+  /// not expose. Keep the compatibility extraction here so those SDKs compile
+  /// while newer iOS runtimes can still provide the native accessor.
+  static func startCallHandle(from userActivity: NSUserActivity) -> String? {
+    // iOS 18.2's Default Calling App handoff exposes `startCallHandle` on the
+    // activity supplied by CallKit. The accessor is absent from older Xcode
+    // SDK overlays even though it is present on supported iOS runtimes. Ask
+    // Objective-C dynamically so builds made with those SDKs still receive
+    // the number without referencing an unavailable Swift member.
+    let selector = NSSelectorFromString("startCallHandle")
+    if userActivity.responds(to: selector),
+       let result = userActivity.perform(selector)?.takeUnretainedValue(),
+       let value = stringValue(fromDefaultCallingHandle: result) {
+      return value
+    }
+
+    if let intent = userActivity.interaction?.intent as? INStartCallIntent {
+      if let value = firstCallDestination(in: intent.contacts) {
+        return value
+      }
+    }
+
+    // CallKit recents and older Siri integrations can still deliver the
+    // pre-iOS 13 intent classes even when INStartCallIntent is registered.
+    if let intent = userActivity.interaction?.intent as? INStartAudioCallIntent {
+      if let value = firstCallDestination(in: intent.contacts) {
+        return value
+      }
+    }
+    if let intent = userActivity.interaction?.intent as? INStartVideoCallIntent {
+      if let value = firstCallDestination(in: intent.contacts) {
+        return value
+      }
+    }
+
+    // Retain narrow compatibility fallbacks for producers that serialize the
+    // documented handle into userInfo or another standard activity carrier.
+    // Every value still passes the same telephone-character validation before
+    // it can be published to Flutter.
+    for key in ["startCallHandle", "phoneNumber", "callHandle"] {
+      if let value = userActivity.userInfo?[key] as? String,
+         validatedDestination(fromSystemHandle: value) != nil {
+        return value
+      }
+    }
+    if let value = userActivity.targetContentIdentifier,
+       validatedDestination(fromSystemHandle: value) != nil {
+      return value
+    }
+    if let url = userActivity.webpageURL,
+       url.scheme?.lowercased() == "tel",
+       let value = validatedDestination(from: url) {
+      return value
+    }
+
+    return nil
+  }
+
+  private static func stringValue(fromDefaultCallingHandle value: Any) -> String? {
+    if let string = value as? String {
+      return string
+    }
+    if let url = value as? URL, url.scheme?.lowercased() == "tel" {
+      return url.absoluteString
+    }
+    if let handle = value as? CXHandle {
+      return handle.value
+    }
+    return nil
+  }
+
+  private static func firstCallDestination(in contacts: [INPerson]?) -> String? {
+    guard let contacts else { return nil }
+    for person in contacts {
+      var candidates: [String?] = [person.personHandle?.value]
+      candidates.append(contentsOf: (person.aliases ?? []).map(\.value))
+      candidates.append(contentsOf: [
+        person.customIdentifier,
+        person.displayName,
+        person.spokenPhrase,
+      ])
+      if let value = candidates.compactMap({ $0 }).first(where: {
+        validatedDestination(fromSystemHandle: $0) != nil
+      }) {
+        return value
+      }
+    }
+    return nil
+  }
+
+  private func publish(action: String, destination: String) -> Bool {
     let payload = [
       "id": UUID().uuidString,
       "action": action,
@@ -242,6 +371,21 @@ final class ExternalCommunicationIntentBridge {
     }
 
     guard let destination = raw.removingPercentEncoding?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    else { return nil }
+    return isSafeDestination(destination) ? destination : nil
+  }
+
+  /// Validates a phone number supplied by `NSUserActivity.startCallHandle`.
+  /// Older CallKit/SiriKit producers normally provide a plain handle, while
+  /// other producers may preserve its `tel:` URL representation.
+  static func validatedDestination(fromSystemHandle rawValue: String) -> String? {
+    let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    if value.lowercased().hasPrefix("tel:"),
+       let url = URL(string: value) {
+      return validatedDestination(from: url)
+    }
+    guard let destination = value.removingPercentEncoding?
       .trimmingCharacters(in: .whitespacesAndNewlines)
     else { return nil }
     return isSafeDestination(destination) ? destination : nil

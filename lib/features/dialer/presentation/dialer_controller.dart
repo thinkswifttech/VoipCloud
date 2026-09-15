@@ -15,13 +15,15 @@ class DialerController extends Notifier<String> {
   }
 
   void setDestination(String value) {
-    state = _dialCharacters(value);
+    final destination = normalizeDialDestination(value);
+    if (state == destination) return;
+    state = destination;
   }
 
   /// Replaces `[start, end)` with dial characters from [value].
   /// Returns the cursor offset after the inserted text.
   int replaceRange(int start, int end, String value) {
-    final dialChars = _dialCharacters(value);
+    final dialChars = normalizeDialDestination(value);
     final from = start.clamp(0, state.length);
     final to = end.clamp(0, state.length);
     final low = from < to ? from : to;
@@ -75,7 +77,7 @@ class DialerController extends Notifier<String> {
   }
 }
 
-String _dialCharacters(String value) {
+String normalizeDialDestination(String value) {
   return value
       .split('')
       .where((char) => RegExp(r'[0-9*#+,;]').hasMatch(char))

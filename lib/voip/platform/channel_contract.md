@@ -322,8 +322,16 @@ Allowed call statuses:
 Channel: `voipcloud/external_communication_intents`
 
 Apple's Default Calling App and Default Messaging App integrations deliver
-`tel:` and `im:` URLs to the native scene/application delegates. Native code
-validates and buffers the destination, then sends:
+`tel:` and `im:` URLs to the native scene/application delegates. A system call
+action may instead arrive as an `NSUserActivity`; the iOS scene/application
+continuation handlers first read Apple's Default Calling App
+`startCallHandle` accessor dynamically (for compatibility with Xcode SDKs that
+do not expose it to Swift), then fall back to the activity's `INStartCallIntent`
+contact handle, legacy audio/video call intents, and validated standard
+activity carriers. Cold-start URL and activity payloads are captured before
+Flutter scene initialization and buffered until the method channel attaches.
+Native code validates and
+buffers either representation, then sends:
 
 - `externalCommunicationIntent`: `{id, action: call|message, destination}`
 - `consumePendingIntent`: returns the buffered payload after a cold start
@@ -333,10 +341,10 @@ validates and buffers the destination, then sends:
   includes Default App controls on supported iOS versions
 
 Flutter waits for an authenticated session and for any active call UI to close.
-Call actions carry the destination in the dialer route so it survives cold-start
-and navigation timing, then populate the number field; message actions open the
-composer. Neither operation places a call or sends content without another
-explicit user action.
+Call actions update the dialer controller before navigating and also carry the
+destination in the route, so the number survives cold-start, same-screen, and
+navigation timing; message actions open the composer. Neither operation places
+a call or sends content without another explicit user action.
 
 Android exposes separate `ACTION_PROCESS_TEXT` activities labelled **Call with
 VoipCloud** and **Message with VoipCloud**, and handles `ACTION_DIAL` `tel:`

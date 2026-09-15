@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $productionConfig = Join-Path $projectRoot "config\production.json"
 $termsOfService = Join-Path $projectRoot `
-  "windows\installer\terms_of_service.txt"
+  "assets\legal\terms_of_service.txt"
 $linphoneDll = Join-Path $projectRoot `
   "windows\third_party\linphone\linphone-sdk\win64\bin\liblinphone.dll"
 

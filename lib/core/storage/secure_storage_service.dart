@@ -21,7 +21,7 @@ class FlutterSecureStorageService implements SecureStorageService {
   @override
   Future<String?> read(String key) async {
     try {
-      return _storage.read(key: key);
+      return await _storage.read(key: key);
     } catch (error) {
       throw StorageException(message: 'Failed to read secure key "$key"');
     }

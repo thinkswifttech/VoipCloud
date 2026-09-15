@@ -8,6 +8,7 @@ import '../../../shared/widgets/startup_brand_intro.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 import '../../calls/domain/voip_call.dart';
+import '../../legal/data/terms_acceptance_repository.dart';
 import '../../session/domain/service_account.dart';
 import '../../session/presentation/session_controller.dart';
 import 'app_startup_controller.dart';
@@ -36,7 +37,15 @@ class _StartupScreenState extends ConsumerState<StartupScreen> {
       if (!mounted || _isRouting) {
         return;
       }
-      if (session == null ||
+      final termsPending = await ref
+          .read(termsAcceptanceRepositoryProvider)
+          .isPending();
+      if (!mounted || _isRouting) {
+        return;
+      }
+      if (session != null && termsPending) {
+        _go(RoutePaths.termsAgreement);
+      } else if (session == null ||
           session.provisioning.requiresProvisioning ||
           session.sipConfig == null) {
         _go(RoutePaths.provisioning);

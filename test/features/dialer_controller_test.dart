@@ -57,4 +57,8 @@ void main() {
 
     expect(container.read(dialerControllerProvider), '+14165550123,45;6#');
   });
+
+  test('normalizes a route destination before applying it', () {
+    expect(normalizeDialDestination('+1 (416) 555-0123'), '+14165550123');
+  });
 }
