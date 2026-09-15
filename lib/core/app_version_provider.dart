@@ -1,7 +1,22 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
-final appVersionLabelProvider = FutureProvider<String>((ref) async {
+class AppVersionInfo {
+  const AppVersionInfo({required this.version, required this.buildNumber});
+
+  final String version;
+  final String buildNumber;
+}
+
+final appVersionInfoProvider = FutureProvider<AppVersionInfo>((ref) async {
   final info = await PackageInfo.fromPlatform();
-  return 'Version ${info.version} (build ${info.buildNumber})';
+  return AppVersionInfo(
+    version: info.version,
+    buildNumber: info.buildNumber,
+  );
+});
+
+final appVersionLabelProvider = FutureProvider<String>((ref) async {
+  final info = await ref.watch(appVersionInfoProvider.future);
+  return 'Version ${info.version}';
 });

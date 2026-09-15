@@ -558,7 +558,7 @@ class _DesktopUpdateTile extends StatelessWidget {
     final available = result?.status == DesktopUpdateStatus.available;
     final subtitle = switch (result?.status) {
       DesktopUpdateStatus.available =>
-        'Version ${release!.version} (build ${release.build}) is available',
+        'Version ${release!.version} is available',
       DesktopUpdateStatus.upToDate => 'You have the latest version',
       DesktopUpdateStatus.notConfigured => 'Update service is not configured',
       DesktopUpdateStatus.unsupported =>

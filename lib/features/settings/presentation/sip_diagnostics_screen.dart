@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../app/router/route_names.dart';
+import '../../../core/app_version_provider.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_card.dart';
 import '../../../shared/widgets/page_content.dart';
@@ -22,6 +23,7 @@ class SipDiagnosticsScreen extends ConsumerWidget {
     final sip = runtimeSip ?? session?.sipConfig;
     final device = session?.device;
     final registration = ref.watch(sipRegistrationStateProvider);
+    final appVersion = ref.watch(appVersionInfoProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -142,6 +144,23 @@ class SipDiagnosticsScreen extends ConsumerWidget {
                     device?.sipIdentity ?? sip?.sipIdentity ?? 'Not set',
                   ),
                 ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            AppCard(
+              title: 'Application',
+              subtitle: 'Build details for administrator support',
+              child: appVersion.when(
+                data: (info) => _DiagnosticList(
+                  items: [
+                    _DiagnosticEntry('Version', info.version),
+                    _DiagnosticEntry('Build number', info.buildNumber),
+                  ],
+                ),
+                loading: () => const Text('Loading application details...'),
+                error: (_, _) => const Text(
+                  'Application build details are unavailable.',
+                ),
               ),
             ),
             if (sip != null) ...[
