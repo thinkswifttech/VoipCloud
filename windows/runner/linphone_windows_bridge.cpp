@@ -1734,12 +1734,27 @@ class LinphoneWindowsBridge::Impl {
     if (!EnsureReady(result.get())) {
       return;
     }
-    if (api_.linphone_core_set_mic_enabled != nullptr) {
-      api_.linphone_core_set_mic_enabled(core_, enabled ? 0 : 1);
-    } else if (api_.linphone_core_enable_mic != nullptr) {
-      api_.linphone_core_enable_mic(core_, enabled ? 0 : 1);
+    if (!ApplyMicrophoneMuted(enabled)) {
+      result->Error("LINPHONE_ERROR",
+                    "Microphone mute control is unavailable.");
+      return;
     }
     result->Success();
+  }
+
+  bool ApplyMicrophoneMuted(bool muted) {
+    if (core_ == nullptr) {
+      return false;
+    }
+    if (api_.linphone_core_set_mic_enabled != nullptr) {
+      api_.linphone_core_set_mic_enabled(core_, muted ? 0 : 1);
+    } else if (api_.linphone_core_enable_mic != nullptr) {
+      api_.linphone_core_enable_mic(core_, muted ? 0 : 1);
+    } else {
+      return false;
+    }
+    microphone_muted_ = muted;
+    return true;
   }
 
   static std::string AudioRouteForDevice(const std::string& device) {
@@ -2565,6 +2580,7 @@ class LinphoneWindowsBridge::Impl {
     account_ = nullptr;
     active_call_ = nullptr;
     live_calls_.clear();
+    microphone_muted_ = false;
     if (active_impl_ == this) {
       active_impl_ = nullptr;
     }
@@ -2776,6 +2792,12 @@ class LinphoneWindowsBridge::Impl {
     if (terminal) {
       live_calls_.erase(call_id);
       if (active_call_ == call) active_call_ = FirstLiveCall();
+      // Linphone's microphone flag belongs to the core, not an individual
+      // call. Restore it after the final call so a later call never inherits
+      // mute from a completed session.
+      if (live_calls_.empty() && microphone_muted_) {
+        ApplyMicrophoneMuted(false);
+      }
     } else {
       live_calls_[call_id] = call;
       active_call_ = call;
@@ -2874,7 +2896,8 @@ class LinphoneWindowsBridge::Impl {
                      {EncodableValue("status"), EncodableValue(call_status)},
                      {EncodableValue("stateMessage"),
                       EncodableValue(termination_message)},
-                     {EncodableValue("isMuted"), EncodableValue(false)},
+                     {EncodableValue("isMuted"),
+                      EncodableValue(microphone_muted_)},
                      {EncodableValue("isSpeakerEnabled"),
                       EncodableValue(audio_route == "speaker")},
                      {EncodableValue("audioRoute"),
@@ -2916,6 +2939,7 @@ class LinphoneWindowsBridge::Impl {
   ComPtr<IAudioMeterInformation> audio_test_meter_;
   bool first_iterate_completed_ = false;
   bool device_dnd_enabled_ = false;
+  bool microphone_muted_ = false;
   std::atomic<bool> iterate_running_{false};
   std::thread iterate_thread_;
   std::unique_ptr<flutter::MethodChannel<EncodableValue>> method_channel_;

@@ -4,6 +4,7 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../shared/icons/app_icons.dart';
@@ -97,39 +98,72 @@ class _ProvisioningScannerScreenState extends State<ProvisioningScannerScreen> {
                 left: 20,
                 right: 20,
                 bottom: 28,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.68),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.white24),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(14),
-                    child: Row(
-                      children: [
-                        Icon(
-                          _statusText == null
-                              ? AppIcons.scan
-                              : AppIcons.warning,
-                          color: _statusText == null
-                              ? Colors.white
-                              : theme.colorScheme.error,
-                          size: AppIconSize.md,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            _statusText ??
-                                'Position the activation QR in frame.',
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.68),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white24),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Row(
+                          children: [
+                            if (_isReadingFile)
+                              const SizedBox.square(
+                                dimension: AppIconSize.md,
+                                child: CircularProgressIndicator(
+                                  color: Colors.white,
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            else
+                              Icon(
+                                _statusText == null
+                                    ? AppIcons.scan
+                                    : AppIcons.warning,
+                                color: _statusText == null
+                                    ? Colors.white
+                                    : theme.colorScheme.error,
+                                size: AppIconSize.md,
+                              ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                _isReadingFile
+                                    ? 'Reading QR code…'
+                                    : _statusText ??
+                                          'Position the activation QR in frame.',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                             ),
-                          ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: _isReadingFile
+                            ? null
+                            : _chooseMobileGalleryImage,
+                        style: OutlinedButton.styleFrom(
+                          backgroundColor: Colors.black.withValues(alpha: 0.68),
+                          foregroundColor: Colors.white,
+                          disabledForegroundColor: Colors.white54,
+                          side: const BorderSide(color: Colors.white54),
+                        ),
+                        icon: const Icon(AppIcons.gallery),
+                        label: const Text('Choose from gallery'),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -160,7 +194,7 @@ class _ProvisioningScannerScreenState extends State<ProvisioningScannerScreen> {
   }
 
   Future<void> _handleScan(BarcodeCapture capture) async {
-    if (_didReturn) {
+    if (_didReturn || _isReadingFile) {
       return;
     }
 
@@ -303,6 +337,51 @@ class _ProvisioningScannerScreenState extends State<ProvisioningScannerScreen> {
     final file = await openFile(acceptedTypeGroups: const [typeGroup]);
     if (file != null) {
       await _readQrFile(file);
+    }
+  }
+
+  Future<void> _chooseMobileGalleryImage() async {
+    if (_isReadingFile || _didReturn) return;
+
+    setState(() {
+      _isReadingFile = true;
+      _statusText = null;
+    });
+
+    try {
+      final image = await ImagePicker().pickImage(source: ImageSource.gallery);
+      if (image == null || _didReturn) return;
+
+      final length = await image.length();
+      if (length <= 0 || length > maximumProvisioningQrFileBytes) {
+        _showStatus('Choose an image smaller than 12 MB.');
+        return;
+      }
+
+      // Prefer the native analyzer so Android and iOS can read image formats
+      // supplied by their photo pickers, including HEIC on iOS.
+      String? rawValue;
+      try {
+        final capture = await _scannerController?.analyzeImage(image.path);
+        rawValue = capture == null ? null : _firstValue(capture);
+      } catch (error) {
+        debugPrint('Native provisioning QR analysis failed: $error');
+      }
+      // The local decoder is a useful fallback for screenshots that a native
+      // analyzer cannot recognize.
+      rawValue ??= await decodeProvisioningQrImage(await image.readAsBytes());
+      if (rawValue == null) {
+        _showStatus('No readable QR code was found in this image.');
+        return;
+      }
+      await _acceptPayload(rawValue, stopCamera: true);
+    } catch (error, stackTrace) {
+      debugPrint('Provisioning gallery QR import failed: $error\n$stackTrace');
+      _showStatus('This image could not be read. Try another image.');
+    } finally {
+      if (mounted && !_didReturn) {
+        setState(() => _isReadingFile = false);
+      }
     }
   }
 
