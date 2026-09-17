@@ -1429,6 +1429,13 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     )
   }
 
+  /// Returns true only after a real Linphone call has been linked to CallKit.
+  /// A push-only placeholder is deliberately excluded: the first push still
+  /// needs to wake the SIP core so the corresponding INVITE can arrive.
+  func hasLinkedLinphoneCall(id: String) -> Bool {
+    callKitUuidByLinphoneId[id] != nil
+  }
+
   func reportIncomingPushCall(
     payload: [AnyHashable: Any],
     completion: @escaping (Error?) -> Void
@@ -3754,7 +3761,7 @@ private final class NativeLinphoneController: LinphoneController {
       // different Call-ID while another call is active is legitimate call
       // waiting and must still wake the SIP core.
       if let pushedCallId = pushCallId(from: payload),
-         callKitUuidByLinphoneId[pushedCallId] != nil {
+         SoftphoneCallKitController.shared.hasLinkedLinphoneCall(id: pushedCallId) {
         NSLog("Softphone/Linphone VoIP push matched an existing call; skipping SIP wake")
         syncCurrentCall(reason: "voip-push-existing-call")
         endBackgroundTaskIfNeeded()
