@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -678,7 +679,10 @@ class _PhoneContactsPanelState extends State<_PhoneContactsPanel> {
                                           controller: _scrollController,
                                           physics:
                                               const AlwaysScrollableScrollPhysics(),
-                                          cacheExtent: 960,
+                                          scrollCacheExtent:
+                                              const ScrollCacheExtent.pixels(
+                                                960,
+                                              ),
                                           addAutomaticKeepAlives: false,
                                           addRepaintBoundaries: false,
                                           itemExtentBuilder: _extentForIndex,

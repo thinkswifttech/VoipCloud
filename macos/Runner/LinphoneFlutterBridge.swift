@@ -1,4 +1,7 @@
 import Cocoa
+import AVFoundation
+import AudioToolbox
+import CoreAudio
 import FlutterMacOS
 import Foundation
 import UserNotifications
@@ -24,7 +27,9 @@ final class LinphoneFlutterBridge {
   private let presenceEventsName = "voipcloud/linphone/presence"
 
   private let registrationEvents = LinphoneEventStreamHandler()
-  private let callEvents = LinphoneEventStreamHandler()
+  private let callEvents = LinphoneEventStreamHandler(
+    detachedBufferCapacity: 64
+  )
   private let messageEvents = LinphoneEventStreamHandler()
   private let presenceEvents = LinphoneEventStreamHandler()
   private let controller: LinphoneController
@@ -47,6 +52,15 @@ final class LinphoneFlutterBridge {
           message: "Linphone bridge is unavailable.",
           details: nil
         ))
+        return
+      }
+      if call.method == "setAppBadgeCount" {
+        let arguments = call.arguments as? [String: Any]
+        let count = max(0, (arguments?["count"] as? NSNumber)?.intValue ?? 0)
+        DispatchQueue.main.async {
+          NSApp.dockTile.badgeLabel = count == 0 ? nil : String(count)
+        }
+        result(nil)
         return
       }
       self.controller.handle(call: call, result: result)
@@ -72,13 +86,27 @@ final class LinphoneFlutterBridge {
 }
 
 private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
+  private let detachedBufferCapacity: Int
   private var eventSink: FlutterEventSink?
+  private var detachedEvents: [[String: Any?]] = []
+
+  init(detachedBufferCapacity: Int = 0) {
+    self.detachedBufferCapacity = max(0, detachedBufferCapacity)
+    super.init()
+  }
 
   func onListen(
     withArguments arguments: Any?,
     eventSink events: @escaping FlutterEventSink
   ) -> FlutterError? {
     eventSink = events
+    if !detachedEvents.isEmpty {
+      let pending = detachedEvents
+      detachedEvents.removeAll(keepingCapacity: true)
+      for event in pending {
+        events(event)
+      }
+    }
     return nil
   }
 
@@ -89,7 +117,17 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
 
   func send(_ event: [String: Any?]) {
     DispatchQueue.main.async { [weak self] in
-      self?.eventSink?(event)
+      guard let self else { return }
+      if let eventSink = self.eventSink {
+        eventSink(event)
+        return
+      }
+      guard self.detachedBufferCapacity > 0 else { return }
+      self.detachedEvents.append(event)
+      let overflow = self.detachedEvents.count - self.detachedBufferCapacity
+      if overflow > 0 {
+        self.detachedEvents.removeFirst(overflow)
+      }
     }
   }
 }
@@ -142,6 +180,11 @@ private final class UnavailableLinphoneController: LinphoneController {
          "ensureBluetoothPermission",
          "getAudioRoutes",
          "setAudioRoute",
+         "setAudioInputDevice",
+         "playAudioTestSound",
+         "startAudioInputTest",
+         "getAudioInputLevel",
+         "stopAudioInputTest",
          "sendDtmf",
          "sendMessage",
          "startPresenceSubscriptions",
@@ -177,6 +220,11 @@ private final class NativeLinphoneController: LinphoneController {
   private var pendingFeatureCodeDial = false
   private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String)] = [:]
   private var selectedAudioEndpointId: String?
+  private var selectedAudioInputEndpointId: String?
+  private var audioInputTestEngine: AVAudioEngine?
+  private let audioInputLevelLock = NSLock()
+  private var audioInputLevel: Double = 0
+  private var audioTestToneURL: URL?
   private var desktopNotificationCallIds = Set<String>()
   private var dndDeclinedCalls = Set<ObjectIdentifier>()
   private var deviceDndEnabled = DesktopDndStore.isEnabled
@@ -300,6 +348,24 @@ private final class NativeLinphoneController: LinphoneController {
           endpointId: args?["endpointId"] as? String,
           fallbackRoute: argument(call, "route")
         ))
+      case "setAudioInputDevice":
+        let args = call.arguments as? [String: Any]
+        result(try setAudioInputEndpoint(
+          endpointId: args?["endpointId"] as? String
+        ))
+      case "playAudioTestSound":
+        try playAudioTestSound()
+        result(nil)
+      case "startAudioInputTest":
+        startAudioInputTest(result: result)
+      case "getAudioInputLevel":
+        audioInputLevelLock.lock()
+        let level = audioInputLevel
+        audioInputLevelLock.unlock()
+        result(level)
+      case "stopAudioInputTest":
+        stopAudioInputTest()
+        result(nil)
       case "sendDtmf":
         try findCurrentCall()?.sendDtmf(dtmf: firstDtmf(argument(call, "value")))
         result(nil)
@@ -360,7 +426,7 @@ private final class NativeLinphoneController: LinphoneController {
     newCore.avpfMode = .Disabled
 
     let newDelegate = CoreDelegateStub(
-      onCallStateChanged: { [weak self] _, call, state, _ in
+      onCallStateChanged: { [weak self] _, call, state, message in
         guard let self else { return }
         let id = self.callId(call)
         self.calls[id] = call
@@ -370,13 +436,23 @@ private final class NativeLinphoneController: LinphoneController {
         }
         if self.featureCodeCalls.contains(featureKey) {
           self.maybeTerminateFeatureCodeCall(call: call, state: state)
-          self.emitCall(call: call, state: state, featureCode: true)
+          self.emitCall(
+            call: call,
+            state: state,
+            featureCode: true,
+            stateMessage: message
+          )
           if self.isTerminalCallState(state) {
             self.clearFeatureCodeCall(call: call)
           }
           return
         }
-        self.emitCall(call: call, state: state, featureCode: false)
+        self.emitCall(
+          call: call,
+          state: state,
+          featureCode: false,
+          stateMessage: message
+        )
       },
       onMessageReceived: { [weak self] _, _, message in
         self?.emitMessage(message: message, direction: "incoming", fallbackStatus: "delivered")
@@ -396,7 +472,11 @@ private final class NativeLinphoneController: LinphoneController {
       },
       onAudioDeviceChanged: { [weak self] _, device in
         guard let self else { return }
-        self.selectedAudioEndpointId = self.audioEndpointId(device)
+        if self.isInputAudioDevice(device) {
+          self.selectedAudioInputEndpointId = self.audioEndpointId(device)
+        } else {
+          self.selectedAudioEndpointId = self.audioEndpointId(device)
+        }
         if let call = self.findCurrentCall() {
           self.emitCall(call: call, state: call.state)
         }
@@ -408,6 +488,12 @@ private final class NativeLinphoneController: LinphoneController {
              self.audioEndpointId($0) == selected
            }) {
           self.selectedAudioEndpointId = nil
+        }
+        if let selected = self.selectedAudioInputEndpointId,
+           !self.inputAudioDevices().contains(where: {
+             self.audioEndpointId($0) == selected
+           }) {
+          self.selectedAudioInputEndpointId = nil
         }
         if let call = self.findCurrentCall() {
           self.emitCall(call: call, state: call.state)
@@ -422,7 +508,230 @@ private final class NativeLinphoneController: LinphoneController {
     try newCore.start()
     core = newCore
     delegate = newDelegate
+    restorePreferredAudioDevices()
     registrationEvents.send(["status": "unregistered", "message": nil])
+  }
+
+  private func playAudioTestSound() throws {
+    guard findCurrentCall() == nil else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1401,
+        userInfo: [NSLocalizedDescriptionKey: "Finish the current call before testing audio."]
+      )
+    }
+    guard let currentCore = core else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1402,
+        userInfo: [NSLocalizedDescriptionKey: "Calling audio is not ready."]
+      )
+    }
+    let toneURL = try makeAudioTestTone()
+    try currentCore.playLocal(audiofile: toneURL.path)
+  }
+
+  private func startAudioInputTest(result: @escaping FlutterResult) {
+    guard findCurrentCall() == nil else {
+      result(FlutterError(
+        code: "AUDIO_TEST_BUSY",
+        message: "Finish the current call before testing audio.",
+        details: nil
+      ))
+      return
+    }
+    let start = { [weak self] in
+      guard let self else { return }
+      do {
+        try self.startAudioInputMeter()
+        result(nil)
+      } catch {
+        result(FlutterError(
+          code: "AUDIO_INPUT",
+          message: error.localizedDescription,
+          details: nil
+        ))
+      }
+    }
+    switch AVCaptureDevice.authorizationStatus(for: .audio) {
+    case .authorized:
+      start()
+    case .notDetermined:
+      AVCaptureDevice.requestAccess(for: .audio) { allowed in
+        DispatchQueue.main.async {
+          if allowed {
+            start()
+          } else {
+            result(FlutterError(
+              code: "AUDIO_PERMISSION",
+              message: "Microphone permission is required to test audio.",
+              details: nil
+            ))
+          }
+        }
+      }
+    default:
+      result(FlutterError(
+        code: "AUDIO_PERMISSION",
+        message: "Microphone permission is required to test audio.",
+        details: nil
+      ))
+    }
+  }
+
+  private func startAudioInputMeter() throws {
+    stopAudioInputTest()
+    let engine = AVAudioEngine()
+    let input = engine.inputNode
+    if let selectedName = core?.inputAudioDevice?.deviceName,
+       let deviceId = coreAudioDeviceId(named: selectedName),
+       let audioUnit = input.audioUnit {
+      var mutableDeviceId = deviceId
+      let status = AudioUnitSetProperty(
+        audioUnit,
+        kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global,
+        0,
+        &mutableDeviceId,
+        UInt32(MemoryLayout<AudioDeviceID>.size)
+      )
+      guard status == noErr else {
+        throw NSError(
+          domain: NSOSStatusErrorDomain,
+          code: Int(status),
+          userInfo: [NSLocalizedDescriptionKey: "The selected microphone could not be opened."]
+        )
+      }
+    }
+    let format = input.inputFormat(forBus: 0)
+    guard format.channelCount > 0 else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1403,
+        userInfo: [NSLocalizedDescriptionKey: "No microphone is available."]
+      )
+    }
+    input.installTap(onBus: 0, bufferSize: 1024, format: format) {
+      [weak self] buffer, _ in
+      guard let self,
+            let channels = buffer.floatChannelData,
+            buffer.frameLength > 0
+      else { return }
+      let frames = Int(buffer.frameLength)
+      var sum: Float = 0
+      for frame in 0..<frames {
+        let sample = channels[0][frame]
+        sum += sample * sample
+      }
+      let rms = sqrt(sum / Float(frames))
+      let normalized = min(1, max(0, Double(rms) * 5.0))
+      self.audioInputLevelLock.lock()
+      self.audioInputLevel = normalized
+      self.audioInputLevelLock.unlock()
+    }
+    engine.prepare()
+    try engine.start()
+    audioInputTestEngine = engine
+  }
+
+  private func stopAudioInputTest() {
+    if let engine = audioInputTestEngine {
+      engine.inputNode.removeTap(onBus: 0)
+      engine.stop()
+    }
+    audioInputTestEngine = nil
+    audioInputLevelLock.lock()
+    audioInputLevel = 0
+    audioInputLevelLock.unlock()
+  }
+
+  private func makeAudioTestTone() throws -> URL {
+    if let url = audioTestToneURL,
+       FileManager.default.fileExists(atPath: url.path) {
+      return url
+    }
+    let sampleRate = 16_000
+    let sampleCount = Int(Double(sampleRate) * 0.48)
+    var samples = Data(capacity: sampleCount * 2)
+    for index in 0..<sampleCount {
+      let time = Double(index) / Double(sampleRate)
+      let frequency = time < 0.24 ? 659.25 : 783.99
+      let edge = min(1, min(time / 0.025, (0.48 - time) / 0.025))
+      let value = Int16((sin(2 * .pi * frequency * time) * 0.28 * edge) * 32767)
+      samples.appendLittleEndian(value)
+    }
+    var wave = Data()
+    wave.append(contentsOf: "RIFF".utf8)
+    wave.appendLittleEndian(UInt32(36 + samples.count))
+    wave.append(contentsOf: "WAVEfmt ".utf8)
+    wave.appendLittleEndian(UInt32(16))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt32(sampleRate))
+    wave.appendLittleEndian(UInt32(sampleRate * 2))
+    wave.appendLittleEndian(UInt16(2))
+    wave.appendLittleEndian(UInt16(16))
+    wave.append(contentsOf: "data".utf8)
+    wave.appendLittleEndian(UInt32(samples.count))
+    wave.append(samples)
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("voipcloud-audio-test.wav")
+    try wave.write(to: url, options: .atomic)
+    audioTestToneURL = url
+    return url
+  }
+
+  private func coreAudioDeviceId(named selectedName: String) -> AudioDeviceID? {
+    var devicesAddress = AudioObjectPropertyAddress(
+      mSelector: kAudioHardwarePropertyDevices,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(
+      AudioObjectID(kAudioObjectSystemObject),
+      &devicesAddress,
+      0,
+      nil,
+      &size
+    ) == noErr else { return nil }
+    var devices = [AudioDeviceID](
+      repeating: 0,
+      count: Int(size) / MemoryLayout<AudioDeviceID>.size
+    )
+    let deviceStatus = devices.withUnsafeMutableBytes { bytes in
+      AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject),
+        &devicesAddress,
+        0,
+        nil,
+        &size,
+        bytes.baseAddress
+      )
+    }
+    guard deviceStatus == noErr else { return nil }
+    let requested = selectedName.trimmingCharacters(in: .whitespacesAndNewlines)
+    for device in devices {
+      var nameAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioObjectPropertyName,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+      )
+      var name: CFString = "" as CFString
+      var nameSize = UInt32(MemoryLayout<CFString>.size)
+      guard AudioObjectGetPropertyData(
+        device,
+        &nameAddress,
+        0,
+        nil,
+        &nameSize,
+        &name
+      ) == noErr else { continue }
+      if (name as String).caseInsensitiveCompare(requested) == .orderedSame {
+        return device
+      }
+    }
+    return nil
   }
 
   private func configureAccount(args: [String: Any]) throws {
@@ -781,15 +1090,12 @@ private final class NativeLinphoneController: LinphoneController {
     }
   }
 
-  private func matchingInputDevice(for output: AudioDevice) -> AudioDevice? {
-    let inputs = availableAudioDevices().filter {
-      String(describing: $0.type).caseInsensitiveCompare("Microphone") == .orderedSame
-    }
-    return inputs.first(where: {
-      $0.driverName == output.driverName && $0.deviceName == output.deviceName
-    }) ?? inputs.first(where: {
-      $0.driverName == output.driverName
-    })
+  private func isInputAudioDevice(_ device: AudioDevice) -> Bool {
+    String(describing: device.type).caseInsensitiveCompare("Microphone") == .orderedSame
+  }
+
+  private func inputAudioDevices() -> [AudioDevice] {
+    availableAudioDevices().filter(isInputAudioDevice)
   }
 
   private func audioEndpoints() -> [[String: Any]] {
@@ -801,16 +1107,31 @@ private final class NativeLinphoneController: LinphoneController {
     } else {
       currentId = nil
     }
-    return outputAudioDevices().map { device in
+    let outputs: [[String: Any]] = outputAudioDevices().map { device in
       let id = audioEndpointId(device)
       return [
         "id": id,
+        "direction": "output",
         "route": audioRoute(device),
         "label": device.deviceName.isEmpty ? "System audio" : device.deviceName,
         "available": true,
         "selected": id == currentId
       ]
     }
+    let currentInputId = selectedAudioInputEndpointId
+      ?? core?.inputAudioDevice.map(audioEndpointId)
+    let inputs: [[String: Any]] = inputAudioDevices().map { device in
+      let id = audioEndpointId(device)
+      return [
+        "id": id,
+        "direction": "input",
+        "route": audioRoute(device),
+        "label": device.deviceName.isEmpty ? "System microphone" : device.deviceName,
+        "available": true,
+        "selected": id == currentInputId
+      ]
+    }
+    return outputs + inputs
   }
 
   private func setAudioEndpoint(
@@ -836,21 +1157,68 @@ private final class NativeLinphoneController: LinphoneController {
       )
     }
     selectedAudioEndpointId = audioEndpointId(selected)
+    UserDefaults.standard.set(selectedAudioEndpointId, forKey: "VoipCloudAudioOutputEndpoint")
     currentCore.defaultOutputAudioDevice = selected
     currentCore.outputAudioDevice = selected
-    let matchingInput = matchingInputDevice(for: selected)
-    if let matchingInput {
-      currentCore.defaultInputAudioDevice = matchingInput
-      currentCore.inputAudioDevice = matchingInput
-    }
     if let currentCall = findCurrentCall() {
       currentCall.outputAudioDevice = selected
-      if let matchingInput {
-        currentCall.inputAudioDevice = matchingInput
-      }
       emitCall(call: currentCall, state: currentCall.state)
     }
     return audioRoute(selected)
+  }
+
+  private func setAudioInputEndpoint(endpointId: String?) throws -> String {
+    guard let currentCore = core else {
+      throw NSError(
+        domain: "SoftphoneAudioRoute",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "The audio engine is unavailable."]
+      )
+    }
+    let selected = endpointId.flatMap { requestedId in
+      inputAudioDevices().first(where: { audioEndpointId($0) == requestedId })
+    }
+    guard let selected else {
+      throw NSError(
+        domain: "SoftphoneAudioRoute",
+        code: 3,
+        userInfo: [NSLocalizedDescriptionKey: "The selected microphone is unavailable."]
+      )
+    }
+    selectedAudioInputEndpointId = audioEndpointId(selected)
+    UserDefaults.standard.set(
+      selectedAudioInputEndpointId,
+      forKey: "VoipCloudAudioInputEndpoint"
+    )
+    currentCore.defaultInputAudioDevice = selected
+    currentCore.inputAudioDevice = selected
+    if let currentCall = findCurrentCall() {
+      currentCall.inputAudioDevice = selected
+      emitCall(call: currentCall, state: currentCall.state)
+    }
+    return audioEndpointId(selected)
+  }
+
+  private func restorePreferredAudioDevices() {
+    guard let currentCore = core else { return }
+    if let preferredOutput = UserDefaults.standard.string(
+      forKey: "VoipCloudAudioOutputEndpoint"
+    ), let device = outputAudioDevices().first(where: {
+      audioEndpointId($0) == preferredOutput
+    }) {
+      selectedAudioEndpointId = preferredOutput
+      currentCore.defaultOutputAudioDevice = device
+      currentCore.outputAudioDevice = device
+    }
+    if let preferredInput = UserDefaults.standard.string(
+      forKey: "VoipCloudAudioInputEndpoint"
+    ), let device = inputAudioDevices().first(where: {
+      audioEndpointId($0) == preferredInput
+    }) {
+      selectedAudioInputEndpointId = preferredInput
+      currentCore.defaultInputAudioDevice = device
+      currentCore.inputAudioDevice = device
+    }
   }
 
   private func holdCall(id: String) throws {
@@ -990,8 +1358,24 @@ private final class NativeLinphoneController: LinphoneController {
     ])
   }
 
-  private func emitCall(call: Call, state: Call.State, featureCode: Bool? = nil) {
+  private func emitCall(
+    call: Call,
+    state: Call.State,
+    featureCode: Bool? = nil,
+    stateMessage: String? = nil
+  ) {
     let id = callId(call)
+    let terminationMessage = [
+      stateMessage,
+      call.errorInfo?.phrase,
+      call.errorInfo?.subErrorInfo?.phrase
+    ]
+      .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+      .reduce(into: [String]()) { values, value in
+        if !values.contains(value) { values.append(value) }
+      }
+      .joined(separator: " | ")
     if isTerminalCallState(state) {
       calls.removeValue(forKey: id)
       dndDeclinedCalls.remove(ObjectIdentifier(call))
@@ -1018,7 +1402,8 @@ private final class NativeLinphoneController: LinphoneController {
       "audioRoute": route,
       "currentEndpointId": currentEndpointId,
       "availableEndpoints": endpoints,
-      "featureCode": isFeatureCode
+      "featureCode": isFeatureCode,
+      "stateMessage": terminationMessage
     ])
     if deviceDndEnabled && call.dir == .Incoming && isIncomingRinging(call) {
       clearDesktopCallNotification(callId: id)
@@ -1116,6 +1501,7 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   private func dispose() {
+    stopAudioInputTest()
     stopPresenceSubscriptions()
     if let delegate {
       core?.removeDelegate(delegate: delegate)
@@ -1169,6 +1555,15 @@ private func normalizeRelayServer(_ value: String) -> String {
     .replacingOccurrences(of: "turn:", with: "")
     .replacingOccurrences(of: "turns:", with: "")
     .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private extension Data {
+  mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
+    var littleEndian = value.littleEndian
+    Swift.withUnsafeBytes(of: &littleEndian) { bytes in
+      append(contentsOf: bytes)
+    }
+  }
 }
 
 private func normalizeSipAddress(_ value: String) -> String {

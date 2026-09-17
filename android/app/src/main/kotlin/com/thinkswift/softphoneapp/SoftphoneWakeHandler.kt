@@ -183,7 +183,14 @@ internal object SoftphoneWakeHandler {
             // SIP reconciliation. The coordinator timeout removes a placeholder
             // if the matching INVITE never becomes observable.
             val sipInviteMatched = !snapshot.sipCallId.isNullOrBlank()
-            if (lockedOrScreenOff && canUseFsi) {
+            // Keep the system incoming-call heads-up visible while VoIPCloud is
+            // backgrounded, including when the screen is unlocked. Android
+            // presents a permitted full-screen intent as a persistent heads-up
+            // in that state; swiping it up collapses the heads-up while the
+            // ongoing CallStyle notification remains available in the shade.
+            // When our activity is already visible, its Flutter call surface is
+            // authoritative and the foreground notification stays quiet.
+            if (!appOwnsVisibleCallSurface && canUseFsi) {
                 builder.setFullScreenIntent(
                     PendingIntent.getActivity(
                         context,
@@ -196,7 +203,8 @@ internal object SoftphoneWakeHandler {
                 Log.i(
                     TAG,
                     "Attached incoming-call full-screen intent " +
-                        "sipMatched=$sipInviteMatched lockedOrScreenOff=true canUseFsi=true"
+                        "sipMatched=$sipInviteMatched " +
+                        "lockedOrScreenOff=$lockedOrScreenOff canUseFsi=true"
                 )
             } else {
                 Log.i(

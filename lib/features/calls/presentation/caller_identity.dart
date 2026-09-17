@@ -161,6 +161,15 @@ String _withQueuePrefix(
   return '$prefix: $trimmed';
 }
 
+/// Whether [contact] owns the phone identity represented by [remoteUri].
+///
+/// Uses the same normalization and matching rules as caller/message identity
+/// resolution so UI actions do not offer to create a duplicate contact.
+bool contactMatchesRemoteIdentity(Contact contact, String remoteUri) {
+  final number = _identityNumber(remoteUri);
+  return number.isNotEmpty && _contactMatches(contact, number);
+}
+
 String? _displayNamePrefix(String? value) {
   final match = RegExp(
     r'^([A-Za-z][A-Za-z0-9._ -]{0,31}):\s*.+$',

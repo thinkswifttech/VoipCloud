@@ -24,6 +24,11 @@ constexpr const wchar_t kGetPreferredBrightnessRegKey[] =
   L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 constexpr const wchar_t kGetPreferredBrightnessRegValue[] = L"AppsUseLightTheme";
 
+// Keep the desktop shell usable when users resize the window. These values
+// are logical pixels and are scaled for the monitor that owns the window.
+constexpr int kMinimumWindowWidth = 480;
+constexpr int kMinimumWindowHeight = 640;
+
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
 
@@ -132,8 +137,11 @@ bool Win32Window::Create(const std::wstring& title,
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
+  // Keep normal resizing available, but do not offer a maximized/full-screen
+  // desktop layout. At narrow widths Flutter switches to bottom navigation.
+  constexpr DWORD window_style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX;
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      window_class, title.c_str(), window_style,
       Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
       Scale(size.width, scale_factor), Scale(size.height, scale_factor),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
@@ -195,6 +203,20 @@ Win32Window::MessageHandler(HWND hwnd,
 
       return 0;
     }
+
+    case WM_GETMINMAXINFO: {
+      const HMONITOR monitor =
+          MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      const double scale_factor =
+          FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+      auto min_max_info = reinterpret_cast<MINMAXINFO*>(lparam);
+      min_max_info->ptMinTrackSize.x =
+          Scale(kMinimumWindowWidth, scale_factor);
+      min_max_info->ptMinTrackSize.y =
+          Scale(kMinimumWindowHeight, scale_factor);
+      return 0;
+    }
+
     case WM_SIZE: {
       RECT rect = GetClientArea();
       if (child_content_ != nullptr) {

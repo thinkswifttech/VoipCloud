@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,11 +7,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../domain/audio_output_route.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
+import 'desktop_audio_test_dialog.dart';
 
 Future<void> showAudioRoutePicker({
   required BuildContext context,
   required WidgetRef ref,
   required AudioOutputRoute selectedRoute,
+  bool choosingDefaults = false,
 }) async {
   final service = ref.read(sipServiceProvider);
   final messenger = ScaffoldMessenger.of(context);
@@ -25,10 +28,12 @@ Future<void> showAudioRoutePicker({
   await showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
+    isScrollControlled: true,
     builder: (sheetContext) {
       return _AudioRoutePickerSheet(
         initialRoute: selectedRoute,
         messenger: messenger,
+        choosingDefaults: choosingDefaults,
       );
     },
   );
@@ -38,10 +43,12 @@ class _AudioRoutePickerSheet extends ConsumerStatefulWidget {
   const _AudioRoutePickerSheet({
     required this.initialRoute,
     required this.messenger,
+    required this.choosingDefaults,
   });
 
   final AudioOutputRoute initialRoute;
   final ScaffoldMessengerState messenger;
+  final bool choosingDefaults;
 
   @override
   ConsumerState<_AudioRoutePickerSheet> createState() =>
@@ -53,7 +60,7 @@ class _AudioRoutePickerSheetState
   List<AudioOutputRouteOption>? _options;
   var _loading = true;
   var _reloadInFlight = false;
-  String? _selectingEndpointId;
+  String? _selectingDeviceKey;
   Timer? _refreshTimer;
 
   @override
@@ -73,11 +80,11 @@ class _AudioRoutePickerSheetState
   }
 
   Future<void> _reloadRoutes({bool silent = false}) async {
-    if (_reloadInFlight || _selectingEndpointId != null) return;
+    if (_reloadInFlight || _selectingDeviceKey != null) return;
     _reloadInFlight = true;
     try {
       final service = ref.read(sipServiceProvider);
-      final options = _normalizedRoutes(await service.getAudioRoutes());
+      final options = await service.getAudioRoutes();
       if (!mounted) {
         return;
       }
@@ -104,86 +111,193 @@ class _AudioRoutePickerSheetState
     final liveCall = ref.watch(activeCallProvider).value;
     final selectedRoute = liveCall?.audioRoute ?? widget.initialRoute;
     final liveEndpoints = liveCall?.availableAudioEndpoints ?? const [];
-    final options = liveEndpoints.isNotEmpty
-        ? _normalizedRoutes(liveEndpoints)
-        : _options;
+    final allOptions = liveEndpoints.isNotEmpty ? liveEndpoints : _options;
+    final outputs = allOptions == null
+        ? null
+        : _normalizedRoutes(
+            allOptions
+                .where(
+                  (option) => option.direction == AudioDeviceDirection.output,
+                )
+                .toList(growable: false),
+          );
+    final inputs =
+        allOptions
+            ?.where((option) => option.direction == AudioDeviceDirection.input)
+            .toList(growable: false) ??
+        const <AudioOutputRouteOption>[];
+    final hasSeparateDevices = inputs.isNotEmpty;
+
+    final availableHeight = MediaQuery.sizeOf(context).height;
 
     return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Audio',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Choose where call audio plays.',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 8),
-            if (_loading && options == null)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: CircularProgressIndicator()),
-              )
-            else if (options != null)
-              for (final option in options)
-                ListTile(
-                  enabled: option.available && _selectingEndpointId == null,
-                  leading: Icon(_iconForRoute(option.route)),
-                  title: Text(option.label),
-                  trailing:
-                      _selectingEndpointId ==
-                          (option.endpointId ?? option.route.channelValue)
-                      ? const SizedBox.square(
-                          dimension: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : _isSelected(option, options, selectedRoute)
-                      ? Icon(
-                          Icons.check_rounded,
-                          color: Theme.of(context).colorScheme.primary,
-                        )
-                      : null,
-                  selected: _isSelected(option, options, selectedRoute),
-                  onTap: !option.available || _selectingEndpointId != null
-                      ? null
-                      : () => unawaited(_selectRoute(option)),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: availableHeight * 0.9),
+        child: Scrollbar(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Audio',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0,
+                  ),
                 ),
-          ],
+                const SizedBox(height: 4),
+                Text(
+                  hasSeparateDevices
+                      ? widget.choosingDefaults
+                            ? 'Choose the speaker and microphone VoipCloud uses.'
+                            : 'Choose a speaker and microphone for this call.'
+                      : 'Choose where call audio plays.',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (_loading && outputs == null)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (outputs != null) ...[
+                  if (hasSeparateDevices)
+                    const _AudioDeviceSectionLabel('Speaker'),
+                  for (final option in outputs)
+                    ListTile(
+                      enabled: option.available && _selectingDeviceKey == null,
+                      leading: Icon(_iconForRoute(option.route)),
+                      title: Text(option.label),
+                      trailing: _selectingDeviceKey == _deviceKey(option)
+                          ? const SizedBox.square(
+                              dimension: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : _isSelected(option, outputs, selectedRoute)
+                          ? Icon(
+                              Icons.check_rounded,
+                              color: Theme.of(context).colorScheme.primary,
+                            )
+                          : null,
+                      selected: _isSelected(option, outputs, selectedRoute),
+                      onTap: !option.available || _selectingDeviceKey != null
+                          ? null
+                          : () => unawaited(_selectDevice(option)),
+                    ),
+                  if (hasSeparateDevices) ...[
+                    const Divider(),
+                    const _AudioDeviceSectionLabel('Microphone'),
+                    for (final option in inputs)
+                      ListTile(
+                        enabled:
+                            option.available && _selectingDeviceKey == null,
+                        leading: const Icon(Icons.mic_rounded),
+                        title: Text(option.label),
+                        trailing: _selectingDeviceKey == _deviceKey(option)
+                            ? const SizedBox.square(
+                                dimension: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : option.selected
+                            ? Icon(
+                                Icons.check_rounded,
+                                color: Theme.of(context).colorScheme.primary,
+                              )
+                            : null,
+                        selected: option.selected,
+                        onTap: !option.available || _selectingDeviceKey != null
+                            ? null
+                            : () => unawaited(_selectDevice(option)),
+                      ),
+                    if (widget.choosingDefaults) ...[
+                      const Divider(),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.graphic_eq_rounded),
+                          label: const Text('Test audio'),
+                          onPressed: _selectingDeviceKey != null
+                              ? null
+                              : () => showDesktopAudioTestDialog(
+                                  context: context,
+                                ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 
-  Future<void> _selectRoute(AudioOutputRouteOption option) async {
+  Future<void> _selectDevice(AudioOutputRouteOption option) async {
     final service = ref.read(sipServiceProvider);
-    if (_selectingEndpointId != null) return;
+    if (_selectingDeviceKey != null) return;
     setState(() {
-      _selectingEndpointId = option.endpointId ?? option.route.channelValue;
+      _selectingDeviceKey = _deviceKey(option);
     });
     try {
-      await service.setAudioRoute(option.route, endpointId: option.endpointId);
+      if (option.direction == AudioDeviceDirection.input) {
+        final endpointId = option.endpointId;
+        if (endpointId == null) return;
+        await service.setAudioInputDevice(endpointId);
+      } else {
+        await service.setAudioRoute(
+          option.route,
+          endpointId: option.endpointId,
+        );
+      }
       if (!mounted) return;
-      Navigator.of(context).pop();
+      if (option.direction == AudioDeviceDirection.output &&
+          !Platform.isWindows &&
+          !Platform.isMacOS) {
+        Navigator.of(context).pop();
+        return;
+      }
+      setState(() => _selectingDeviceKey = null);
+      await _reloadRoutes(silent: true);
     } catch (_) {
       if (!mounted) return;
-      setState(() => _selectingEndpointId = null);
+      setState(() => _selectingDeviceKey = null);
       widget.messenger.showSnackBar(
         const SnackBar(
           content: Text('That audio device is no longer available.'),
         ),
       );
     }
+  }
+}
+
+String _deviceKey(AudioOutputRouteOption option) =>
+    '${option.direction.name}:${option.endpointId ?? option.route.channelValue}';
+
+class _AudioDeviceSectionLabel extends StatelessWidget {
+  const _AudioDeviceSectionLabel(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 2),
+      child: Text(
+        label,
+        style: Theme.of(context).textTheme.labelLarge?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
   }
 }
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/app/theme/app_theme.dart';
+import 'package:phone_app/features/legal/domain/legal_document.dart';
 import 'package:phone_app/features/legal/presentation/terms_agreement_screen.dart';
 
 void main() {
@@ -18,7 +19,16 @@ void main() {
                 ? ThemeMode.dark
                 : ThemeMode.light,
             home: const TermsAgreementScreen(
-              termsText: 'ThinkSwift Master Services Agreement\nTest terms',
+              testDocument: LegalDocument(
+                documentId: 'thinkswift-msa',
+                version: '2026-08-11',
+                effectiveAt: '2026-08-11',
+                title: 'ThinkSwift Master Services Agreement',
+                sha256:
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                body: 'ThinkSwift Master Services Agreement\nTest terms',
+              ),
             ),
           ),
         ),

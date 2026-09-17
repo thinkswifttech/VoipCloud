@@ -70,6 +70,7 @@ class AppIcons {
   static const speakerOff = LucideIcons.volumeX;
   static const bluetooth = LucideIcons.bluetooth;
   static const hold = LucideIcons.pause;
+  static const swapCalls = LucideIcons.arrowUpDown;
 
   static const themeSystem = LucideIcons.monitor;
   static const themeLight = LucideIcons.sun;

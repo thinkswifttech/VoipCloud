@@ -5,7 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/config_providers.dart';
 import '../constants/storage_keys.dart';
 import '../logging/app_logger.dart';
-import '../storage/secure_storage_service.dart';
 import '../storage/storage_providers.dart';
 import 'api_endpoints.dart';
 import 'app_client.dart';
@@ -40,15 +39,9 @@ final dioProvider = Provider<Dio>((ref) {
         handler.next(options);
       },
       onError: (error, handler) async {
-        final shouldClear =
-            error.response?.statusCode == 401 &&
-            !_isAuthRoute(error.requestOptions.path);
-        if (!shouldClear) {
-          handler.next(error);
-          return;
-        }
-
-        await _clearStoredSession(storage);
+        // A 401 can mean an expired control-plane token or a transient server
+        // policy mismatch. It must never delete the independently valid SIP
+        // provisioning. Session deletion is limited to explicit Reset/Logout.
         handler.next(error);
       },
     ),
@@ -106,34 +99,4 @@ class _SafeNetworkLogInterceptor extends Interceptor {
 
 bool _isAuthRoute(String path) {
   return path.contains(ApiEndpoints.provisioningExchange);
-}
-
-Future<void> _clearStoredSession(SecureStorageService storage) async {
-  await storage.delete(StorageKeys.appAccessToken);
-  await storage.delete(StorageKeys.appRefreshToken);
-  await storage.delete(StorageKeys.appUser);
-  await storage.delete(StorageKeys.appService);
-  await storage.delete(StorageKeys.appDevice);
-  await storage.delete(StorageKeys.appProvisioning);
-  await storage.delete(StorageKeys.appSipConfig);
-  await storage.delete(StorageKeys.appDirectoryAccess);
-  await storage.delete(StorageKeys.appCarrierMessaging);
-  await storage.delete(StorageKeys.messagingAccessToken);
-  await storage.delete(StorageKeys.messagingRefreshToken);
-  await storage.delete(StorageKeys.messagingAccessExpiresAt);
-  await storage.delete(StorageKeys.messagingRefreshExpiresAt);
-  await storage.delete(StorageKeys.messagingSessionId);
-  await storage.delete(StorageKeys.messagingInboxId);
-  await storage.delete(StorageKeys.messagingLastSequence);
-  await storage.delete(StorageKeys.authAccessToken);
-  await storage.delete(StorageKeys.authRefreshToken);
-  await storage.delete(StorageKeys.authExpiresAt);
-  await storage.delete(StorageKeys.authUserId);
-  await storage.delete(StorageKeys.authOrganizationId);
-  await storage.delete(StorageKeys.authUserEmail);
-  await storage.delete(StorageKeys.authUserPhoneNumber);
-  await storage.delete(StorageKeys.authUserDisplayName);
-  await storage.delete(StorageKeys.authUserRole);
-  await storage.delete(StorageKeys.authUserStatus);
-  await storage.delete(StorageKeys.authUserExtension);
 }

@@ -16,6 +16,7 @@ class AppConfig {
     required this.turnServer,
     required this.enableVoipDebugLogs,
     required this.desktopUpdateManifestUrl,
+    required this.legalTermsUrl,
   });
 
   factory AppConfig.fromEnvironment() {
@@ -44,6 +45,7 @@ class AppConfig {
       desktopUpdateManifestUrl: const String.fromEnvironment(
         'DESKTOP_UPDATE_MANIFEST_URL',
       ),
+      legalTermsUrl: const String.fromEnvironment('LEGAL_TERMS_URL'),
     );
   }
 
@@ -61,6 +63,7 @@ class AppConfig {
       enableVoipDebugLogs:
           (values['ENABLE_VOIP_DEBUG_LOGS'] ?? '').toLowerCase() == 'true',
       desktopUpdateManifestUrl: values['DESKTOP_UPDATE_MANIFEST_URL'] ?? '',
+      legalTermsUrl: values['LEGAL_TERMS_URL'] ?? '',
     );
   }
 
@@ -75,6 +78,7 @@ class AppConfig {
   final String turnServer;
   final bool enableVoipDebugLogs;
   final String desktopUpdateManifestUrl;
+  final String legalTermsUrl;
 
   bool get isProduction => environment == AppEnvironment.production;
 
@@ -103,6 +107,14 @@ class AppConfig {
 
   Uri? get desktopUpdateManifestUri {
     final uri = Uri.tryParse(desktopUpdateManifestUrl.trim());
+    if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
+      return null;
+    }
+    return uri;
+  }
+
+  Uri? get legalTermsUri {
+    final uri = Uri.tryParse(legalTermsUrl.trim());
     if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
       return null;
     }

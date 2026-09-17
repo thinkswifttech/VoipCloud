@@ -7,8 +7,6 @@ import 'package:go_router/go_router.dart';
 
 import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
-import '../../../features/calls/domain/call_direction.dart';
-import '../../../features/calls/domain/call_status.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/domain/contact.dart';
 import '../../../features/contacts/presentation/contacts_providers.dart';
@@ -21,8 +19,6 @@ import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
 import '../domain/call_history_item.dart';
 import 'call_history_providers.dart';
-
-enum _CallKind { incoming, outgoing, missed }
 
 class _HistoryParty {
   const _HistoryParty({
@@ -239,9 +235,9 @@ class _CallHistoryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final kind = _kindFor(item);
-    final isMissed = kind == _CallKind.missed;
-    final directionIcon = kind == _CallKind.outgoing
+    final disposition = item.effectiveDisposition;
+    final isMissed = disposition == CallHistoryDisposition.missed;
+    final directionIcon = disposition == CallHistoryDisposition.outgoing
         ? AppIcons.callDirectionOut
         : AppIcons.callDirectionIn;
     final directionColor = isMissed
@@ -256,10 +252,12 @@ class _CallHistoryTile extends StatelessWidget {
     final timeLabel = _timeLabel(item.startedAt);
     final durationLabel = _durationLabel(item.duration);
     final titleIsNumber = !party.hasNamedContact;
-    final kindLabel = switch (kind) {
-      _CallKind.incoming => 'Incoming',
-      _CallKind.outgoing => 'Outgoing',
-      _CallKind.missed => 'Missed',
+    final statusLabel = switch (disposition) {
+      CallHistoryDisposition.outgoing => 'Outgoing',
+      CallHistoryDisposition.answered => 'Answered',
+      CallHistoryDisposition.answeredElsewhere => 'Answered elsewhere',
+      CallHistoryDisposition.missed => 'Missed',
+      CallHistoryDisposition.declined => 'Declined',
     };
 
     return Material(
@@ -300,20 +298,19 @@ class _CallHistoryTile extends StatelessWidget {
                         const SizedBox(width: 6),
                         Expanded(
                           child: Text(
-                            showNumberUnderName ? party.number : kindLabel,
+                            showNumberUnderName
+                                ? '${party.number} · $statusLabel'
+                                : statusLabel,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: showNumberUnderName
-                                ? AppTheme.numberStyle(
-                                    theme.textTheme.bodyMedium,
-                                    color: theme.colorScheme.onSurfaceVariant,
-                                    fontWeight: FontWeight.w500,
-                                  )
-                                : theme.textTheme.bodyMedium?.copyWith(
-                                    color: isMissed
-                                        ? theme.colorScheme.error
-                                        : theme.colorScheme.onSurfaceVariant,
-                                  ),
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: isMissed
+                                  ? theme.colorScheme.error
+                                  : theme.colorScheme.onSurfaceVariant,
+                              fontWeight: showNumberUnderName
+                                  ? FontWeight.w500
+                                  : null,
+                            ),
                           ),
                         ),
                       ],
@@ -434,17 +431,6 @@ _HistoryParty _partyForCaller(
   );
 }
 
-_CallKind _kindFor(CallHistoryItem item) {
-  if (item.direction == CallDirection.missed ||
-      item.status == CallStatus.missed) {
-    return _CallKind.missed;
-  }
-  if (item.direction == CallDirection.incoming) {
-    return _CallKind.incoming;
-  }
-  return _CallKind.outgoing;
-}
-
 String _dayKey(DateTime value) {
   final local = value.toLocal();
   return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
@@ -510,12 +496,12 @@ String _durationLabel(Duration? duration) {
 }
 
 String _callerNumber(CallHistoryItem item) {
-  final display = _pstnNumber(item.remoteDisplayName);
-  if (display.isNotEmpty) {
-    return display;
-  }
   final number = _pstnNumber(item.remoteNumber);
-  return number.isEmpty ? item.remoteNumber : number;
+  if (number.isNotEmpty) {
+    return number;
+  }
+  final display = _pstnNumber(item.remoteDisplayName);
+  return display.isEmpty ? item.remoteNumber : display;
 }
 
 String _initials(String value) {
@@ -577,6 +563,23 @@ String _pstnNumber(String? value) {
     text = text.split('@').first.trim();
   }
 
+  try {
+    text = Uri.decodeComponent(text);
+  } on ArgumentError {
+    // Preserve malformed SIP user parts best-effort.
+  } on FormatException {
+    // Preserve malformed SIP user parts best-effort.
+  }
+
+  final compact = text.replaceAll(RegExp(r'\s+'), '');
+  if (_prefixedHistoryIdentifier.hasMatch(compact)) {
+    return compact;
+  }
+
   final allowed = RegExp(r'[0-9+*#,]');
-  return text.split('').where((char) => allowed.hasMatch(char)).join();
+  return compact.split('').where((char) => allowed.hasMatch(char)).join();
 }
+
+final _prefixedHistoryIdentifier = RegExp(
+  r'^[A-Za-z][A-Za-z0-9._-]*:[+*#0-9][A-Za-z0-9+*#,._-]*$',
+);

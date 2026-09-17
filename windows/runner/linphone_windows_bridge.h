@@ -37,6 +37,7 @@ class LinphoneWindowsBridge {
   void DrainPendingEvents();
   void ShowIncomingCallNotification(const std::string& caller);
   void ClearIncomingCallNotification();
+  void SetAppBadgeCount(int count);
 };
 
 #endif  // RUNNER_LINPHONE_WINDOWS_BRIDGE_H_

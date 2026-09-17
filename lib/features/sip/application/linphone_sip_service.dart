@@ -37,6 +37,7 @@ class LinphoneSipService implements SipService {
        _sipLogStore = sipLogStore {
     _registrationController.add(_registrationState);
     _callController.add(null);
+    _liveCallsController.add(const []);
   }
 
   /// When true, incoming ringing calls are rejected client-side without UI.
@@ -52,6 +53,8 @@ class LinphoneSipService implements SipService {
       StreamController<SipRegistrationState>.broadcast();
   final StreamController<VoipCall?> _callController =
       StreamController<VoipCall?>.broadcast();
+  final StreamController<List<VoipCall>> _liveCallsController =
+      StreamController<List<VoipCall>>.broadcast();
   final StreamController<SipMessage> _messageController =
       StreamController<SipMessage>.broadcast();
 
@@ -66,6 +69,7 @@ class LinphoneSipService implements SipService {
   bool _disposed = false;
   final Set<String> _ringingIncomingCallIds = {};
   final Set<String> _answeredIncomingCallIds = {};
+  final Set<String> _declinedIncomingCallIds = {};
   final Set<String> _featureCodeCallIds = {};
   bool _pendingPbxDndToggle = false;
   bool _featureCodeDialInFlight = false;
@@ -88,6 +92,12 @@ class LinphoneSipService implements SipService {
 
   @override
   Stream<VoipCall?> get callStateStream => _callController.stream;
+
+  @override
+  List<VoipCall> get liveCalls => _orderedLiveCalls();
+
+  @override
+  Stream<List<VoipCall>> get liveCallsStream => _liveCallsController.stream;
 
   @override
   Stream<SipMessage> get messageStream => _messageController.stream;
@@ -217,8 +227,9 @@ class LinphoneSipService implements SipService {
   /// still live. Never tear down a local in-progress call from `none` alone —
   /// only explicit ended/failed/missed events (or a finished local state) clear it.
   void _handleNativeCallCleared() {
-    final previous = _activeCall;
-    if (previous != null && !_isFinished(previous.status)) {
+    final remaining = _orderedLiveCalls();
+    if (remaining.isNotEmpty) {
+      final previous = _activeCall ?? remaining.first;
       AppLogger.info(
         'Ignoring native call none while local call is active '
         'id=${previous.id} status=${previous.status}',
@@ -226,10 +237,12 @@ class LinphoneSipService implements SipService {
       // Re-assert the live call so consumers do not briefly treat the stream
       // as idle when native sync races a registration refresh.
       _callController.add(previous);
+      _liveCallsController.add(remaining);
       return;
     }
     _activeCall = null;
     _callController.add(null);
+    _liveCallsController.add(const []);
   }
 
   @override
@@ -335,6 +348,7 @@ class LinphoneSipService implements SipService {
     _knownCalls[placeholder.id] = placeholder;
     _activeCall = placeholder;
     _callController.add(placeholder);
+    _liveCallsController.add(_orderedLiveCalls());
     _startWindowsCallReconciliation();
     _traceCall('make_call_requested', identity: trimmed);
     try {
@@ -378,7 +392,7 @@ class LinphoneSipService implements SipService {
       return;
     }
     _activeCall = null;
-    _callController.add(null);
+    _publishCallState();
     _stopWindowsCallReconciliationIfIdle();
   }
 
@@ -460,7 +474,7 @@ class LinphoneSipService implements SipService {
 
   @override
   Future<void> acceptCall(String callId) async {
-    final call = _activeCall;
+    final call = _knownCalls[callId] ?? _activeCall;
     if (call == null ||
         call.id != callId ||
         call.direction != CallDirection.incoming ||
@@ -470,23 +484,79 @@ class LinphoneSipService implements SipService {
         userMessage: 'This call has already ended.',
       );
     }
-    await _traceCallAction(
-      'answer',
-      callId,
-      () => _platformChannel.acceptCall(callId),
-    );
+    final current = _currentMediaCall(excluding: callId);
+    if (current != null) {
+      await hold(current.id);
+      await _waitForCallStatus(
+        current.id,
+        (status) => status == CallStatus.held,
+        operation: 'hold current call',
+      );
+    }
+    try {
+      await _traceCallAction(
+        'answer',
+        callId,
+        () => _platformChannel.acceptCall(callId),
+      );
+    } catch (_) {
+      if (current != null) {
+        unawaited(resume(current.id));
+      }
+      rethrow;
+    }
     // An accepted answer that subsequently fails to establish is not a missed
     // call—the user acted on it. Native active state reinforces this marker.
     _answeredIncomingCallIds.add(callId);
   }
 
   @override
-  Future<void> rejectCall(String callId) async {
+  Future<void> endCurrentAndAcceptCall(String callId) async {
+    final waiting = _knownCalls[callId];
+    if (waiting == null ||
+        waiting.direction != CallDirection.incoming ||
+        waiting.status != CallStatus.ringing) {
+      throw const VoipException(
+        message: 'Incoming call is no longer available',
+        userMessage: 'This call has already ended.',
+      );
+    }
+    final current = _currentMediaCall(excluding: callId);
+    if (current != null) {
+      await endCall(current.id);
+      await _waitForCallStatus(
+        current.id,
+        _isFinished,
+        operation: 'end current call',
+      );
+    }
     await _traceCallAction(
-      'reject',
+      'answer_after_end',
       callId,
-      () => _platformChannel.rejectCall(callId),
+      () => _platformChannel.acceptCall(callId),
     );
+    _answeredIncomingCallIds.add(callId);
+  }
+
+  @override
+  Future<void> rejectCall(String callId) async {
+    final call = _knownCalls[callId] ?? _activeCall;
+    final isUserDecline =
+        call?.id == callId &&
+        call?.direction == CallDirection.incoming &&
+        isDndEnabled?.call() != true &&
+        !_dndRejectedCallIds.contains(callId);
+    if (isUserDecline) _declinedIncomingCallIds.add(callId);
+    try {
+      await _traceCallAction(
+        'reject',
+        callId,
+        () => _platformChannel.rejectCall(callId),
+      );
+    } catch (_) {
+      if (isUserDecline) _declinedIncomingCallIds.remove(callId);
+      rethrow;
+    }
   }
 
   @override
@@ -525,6 +595,37 @@ class LinphoneSipService implements SipService {
   }
 
   @override
+  Future<void> switchToCall(String callId) async {
+    final target = _knownCalls[callId];
+    if (target == null || target.status != CallStatus.held) {
+      throw const VoipException(
+        message: 'Held call is no longer available',
+        userMessage: 'The held call is no longer available.',
+      );
+    }
+    final current = _currentMediaCall(excluding: callId);
+    if (current != null) {
+      await hold(current.id);
+      await _waitForCallStatus(
+        current.id,
+        (status) => status == CallStatus.held,
+        operation: 'hold current call',
+      );
+    }
+    try {
+      await resume(callId);
+      await _waitForCallStatus(
+        callId,
+        (status) => status == CallStatus.active,
+        operation: 'resume held call',
+      );
+    } catch (_) {
+      if (current != null) unawaited(resume(current.id));
+      rethrow;
+    }
+  }
+
+  @override
   Future<void> setSpeaker(bool enabled) async {
     await setAudioRoute(
       enabled ? AudioOutputRoute.speaker : AudioOutputRoute.earpiece,
@@ -559,6 +660,28 @@ class LinphoneSipService implements SipService {
     _audioRouteSerial = operation.then<void>((_) {}, onError: (_, _) {});
     return operation;
   }
+
+  @override
+  Future<void> setAudioInputDevice(String endpointId) {
+    final operation = _audioRouteSerial.then<void>((_) async {
+      await _platformChannel.setAudioInputDevice(endpointId);
+      await _waitForAudioInput(endpointId);
+    });
+    _audioRouteSerial = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
+  }
+
+  @override
+  Future<void> playAudioTestSound() => _platformChannel.playAudioTestSound();
+
+  @override
+  Future<void> startAudioInputTest() => _platformChannel.startAudioInputTest();
+
+  @override
+  Future<double> getAudioInputLevel() => _platformChannel.getAudioInputLevel();
+
+  @override
+  Future<void> stopAudioInputTest() => _platformChannel.stopAudioInputTest();
 
   Future<void> _applyAudioRoute(
     AudioOutputRoute route, {
@@ -620,9 +743,12 @@ class LinphoneSipService implements SipService {
     final deadline = DateTime.now().add(const Duration(seconds: 2));
     do {
       final endpoints = await getAudioRoutes();
-      final reportsSelection = endpoints.any((item) => item.selected);
+      final outputEndpoints = endpoints
+          .where((item) => item.direction == AudioDeviceDirection.output)
+          .toList(growable: false);
+      final reportsSelection = outputEndpoints.any((item) => item.selected);
       if (!reportsSelection) return;
-      final confirmed = endpoints.any(
+      final confirmed = outputEndpoints.any(
         (item) =>
             item.selected &&
             (endpointId == null
@@ -634,6 +760,26 @@ class LinphoneSipService implements SipService {
     } while (DateTime.now().isBefore(deadline));
     throw StateError(
       'The operating system did not activate the selected audio device.',
+    );
+  }
+
+  Future<void> _waitForAudioInput(String endpointId) async {
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    do {
+      final endpoints = await getAudioRoutes();
+      final inputs = endpoints
+          .where((item) => item.direction == AudioDeviceDirection.input)
+          .toList(growable: false);
+      if (inputs.isEmpty || !inputs.any((item) => item.selected)) return;
+      if (inputs.any(
+        (item) => item.selected && item.endpointId == endpointId,
+      )) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    } while (DateTime.now().isBefore(deadline));
+    throw StateError(
+      'The operating system did not activate the selected microphone.',
     );
   }
 
@@ -715,6 +861,7 @@ class LinphoneSipService implements SipService {
     }
     await _registrationController.close();
     await _callController.close();
+    await _liveCallsController.close();
     await _messageController.close();
   }
 
@@ -813,6 +960,15 @@ class LinphoneSipService implements SipService {
     }
     final call = _callFromEvent(event);
     _trackIncomingCallState(call);
+    if (call.direction == CallDirection.incoming &&
+        _isFinished(call.status) &&
+        stateMessage?.toLowerCase().contains('declin') == true &&
+        !_dndRejectedCallIds.contains(call.id)) {
+      // Native system call UIs (CallKit, Android Telecom) can decline without
+      // invoking Dart's rejectCall method. Linphone's terminal reason lets the
+      // local history retain that explicit user action.
+      _declinedIncomingCallIds.add(call.id);
+    }
     _traceCall(
       'call_state_applied',
       identity: call.id,
@@ -852,24 +1008,118 @@ class LinphoneSipService implements SipService {
         _sipLog('warn', 'DND auto-reject incoming id=${call.id}');
         unawaited(rejectCall(call.id));
       }
-      _activeCall = null;
-      _callController.add(null);
+      _publishCallState();
       _stopWindowsCallReconciliationIfIdle();
       return;
     }
     _recordCallState(call);
     final previousActive = _activeCall;
-    _activeCall = _isFinished(call.status) ? null : call;
-    _callController.add(_activeCall);
+    _publishCallState();
+    if (_activeCall == null && call.answeredElsewhere) {
+      // Let the router/incoming screen present the meaningful completion before
+      // publishing the normal idle state.
+      _callController.add(call);
+      scheduleMicrotask(() {
+        if (!_disposed && _activeCall == null) _callController.add(null);
+      });
+    }
     if (_activeCall == null) {
       _stopWindowsCallReconciliationIfIdle();
     } else {
       _startWindowsCallReconciliation();
     }
-    if (previousActive != null &&
-        _activeCall == null &&
-        _isFinished(call.status)) {
-      _flushPendingPbxDndToggleIfIdle();
+    if (previousActive != null && _isFinished(call.status)) {
+      final held = _orderedLiveCalls()
+          .where((candidate) => candidate.status == CallStatus.held)
+          .toList(growable: false);
+      final hasMediaCall = _currentMediaCall() != null;
+      final hasRinging = _orderedLiveCalls().any(
+        (candidate) => candidate.status == CallStatus.ringing,
+      );
+      if (!hasMediaCall && !hasRinging && held.length == 1) {
+        unawaited(_resumeAfterPeerEnded(held.single.id));
+      } else if (_activeCall == null) {
+        _flushPendingPbxDndToggleIfIdle();
+      }
+    }
+  }
+
+  List<VoipCall> _orderedLiveCalls() {
+    final calls = _knownCalls.values
+        .where(
+          (call) =>
+              !_isFinished(call.status) &&
+              !_featureCodeCallIds.contains(call.id) &&
+              !_dndRejectedCallIds.contains(call.id),
+        )
+        .toList(growable: false);
+    int priority(VoipCall call) => switch (call.status) {
+      CallStatus.ringing => 0,
+      CallStatus.active => 1,
+      CallStatus.connecting || CallStatus.dialing => 2,
+      CallStatus.held => 3,
+      _ => 4,
+    };
+    calls.sort((a, b) {
+      final byStatus = priority(a).compareTo(priority(b));
+      if (byStatus != 0) return byStatus;
+      return a.startedAt.compareTo(b.startedAt);
+    });
+    return List.unmodifiable(calls);
+  }
+
+  void _publishCallState() {
+    final calls = _orderedLiveCalls();
+    _activeCall = calls.isEmpty ? null : calls.first;
+    _liveCallsController.add(calls);
+    _callController.add(_activeCall);
+  }
+
+  VoipCall? _currentMediaCall({String? excluding}) {
+    for (final call in _knownCalls.values) {
+      if (call.id == excluding || _isFinished(call.status)) continue;
+      if (call.status == CallStatus.active ||
+          call.status == CallStatus.connecting ||
+          call.status == CallStatus.dialing) {
+        return call;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _waitForCallStatus(
+    String callId,
+    bool Function(CallStatus status) predicate, {
+    required String operation,
+  }) async {
+    final current = _knownCalls[callId];
+    if (current != null && predicate(current.status)) return;
+    final completer = Completer<void>();
+    late final StreamSubscription<List<VoipCall>> subscription;
+    subscription = liveCallsStream.listen((_) {
+      final call = _knownCalls[callId];
+      if (call != null && predicate(call.status) && !completer.isCompleted) {
+        completer.complete();
+      }
+    });
+    try {
+      await completer.future.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () => throw VoipException(
+          message: 'Timed out waiting to $operation',
+          userMessage: 'The call could not be changed. Please try again.',
+        ),
+      );
+    } finally {
+      await subscription.cancel();
+    }
+  }
+
+  Future<void> _resumeAfterPeerEnded(String callId) async {
+    try {
+      await resume(callId);
+    } catch (error) {
+      AppLogger.warning('Unable to resume held call after peer ended: $error');
     }
   }
 
@@ -1001,6 +1251,10 @@ class LinphoneSipService implements SipService {
           _nullableString(event['currentEndpointId']) ??
           previous?.audioEndpointId,
       availableAudioEndpoints: availableEndpoints,
+      answeredElsewhere:
+          previous?.answeredElsewhere == true ||
+          event['answeredElsewhere'] == true ||
+          isAnsweredElsewhereReason(_nullableString(event['stateMessage'])),
     );
   }
 
@@ -1050,6 +1304,9 @@ class LinphoneSipService implements SipService {
     if (_answeredIncomingCallIds.remove(candidate.id)) {
       _answeredIncomingCallIds.add(newId);
     }
+    if (_declinedIncomingCallIds.remove(candidate.id)) {
+      _declinedIncomingCallIds.add(newId);
+    }
     AppLogger.info(
       'Promoted active native call identity ${candidate.id} -> $newId',
     );
@@ -1065,6 +1322,7 @@ class LinphoneSipService implements SipService {
     _knownCalls[updated.id] = updated;
     _activeCall = updated;
     _callController.add(updated);
+    _liveCallsController.add(_orderedLiveCalls());
   }
 
   bool _shouldSuppressIncoming(VoipCall call) {
@@ -1128,7 +1386,14 @@ class LinphoneSipService implements SipService {
     if (!_isFinished(call.status)) {
       return;
     }
-    if (previous != null && _isFinished(previous.status)) {
+    final upgradesAnsweredElsewhere =
+        previous != null &&
+        _isFinished(previous.status) &&
+        !previous.answeredElsewhere &&
+        call.answeredElsewhere;
+    if (previous != null &&
+        _isFinished(previous.status) &&
+        !upgradesAnsweredElsewhere) {
       return;
     }
     final repository = _callHistoryRepository;
@@ -1136,19 +1401,24 @@ class LinphoneSipService implements SipService {
       return;
     }
     final wasDndReject = _dndRejectedCallIds.remove(call.id);
+    final wasDeclined = _declinedIncomingCallIds.remove(call.id);
     final classification = classifyCompletedCall(
       direction: call.direction,
       status: call.status,
       wasRinging: _ringingIncomingCallIds.remove(call.id),
       wasAnswered: _answeredIncomingCallIds.remove(call.id),
       wasDndRejected: wasDndReject,
+      wasDeclined: wasDeclined,
+      wasAnsweredElsewhere: call.answeredElsewhere,
     );
     unawaited(
       repository
           .syncCallLog(
             remoteNumber: _displayNumber(call.remoteUri),
+            remoteDisplayName: call.remoteDisplayName,
             direction: classification.direction,
             status: classification.status,
+            disposition: classification.disposition,
             startedAt: call.startedAt,
             endedAt: call.endedAt ?? DateTime.now(),
             sipCallId: call.id,
@@ -1267,10 +1537,30 @@ String _displayNumber(String value) {
     text = text.split('@').first.trim();
   }
 
+  try {
+    text = Uri.decodeComponent(text);
+  } on ArgumentError {
+    // Preserve malformed SIP user parts best-effort.
+  } on FormatException {
+    // Preserve malformed SIP user parts best-effort.
+  }
+
+  final compact = text.replaceAll(RegExp(r'\s+'), '');
+  if (_prefixedRemoteIdentifier.hasMatch(compact)) {
+    return compact;
+  }
+
   final allowed = RegExp(r'[0-9+*#,]');
-  final number = text.split('').where((char) => allowed.hasMatch(char)).join();
-  return number.isEmpty ? text : number;
+  final number = compact
+      .split('')
+      .where((char) => allowed.hasMatch(char))
+      .join();
+  return number.isEmpty ? compact : number;
 }
+
+final _prefixedRemoteIdentifier = RegExp(
+  r'^[A-Za-z][A-Za-z0-9._-]*:[+*#0-9][A-Za-z0-9+*#,._-]*$',
+);
 
 SipRegistrationStatus _registrationStatus(String value) {
   return switch (value.trim().toLowerCase()) {

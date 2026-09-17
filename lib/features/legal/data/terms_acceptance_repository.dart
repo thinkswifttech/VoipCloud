@@ -4,9 +4,6 @@ import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/secure_storage_service.dart';
 import '../../../core/storage/storage_providers.dart';
 
-const termsAgreementVersion = '2026-08-11';
-const termsAgreementAsset = 'assets/legal/terms_of_service.txt';
-
 final termsAcceptanceRepositoryProvider = Provider<TermsAcceptanceRepository>(
   (ref) => TermsAcceptanceRepository(ref.watch(secureStorageProvider)),
 );
@@ -21,20 +18,17 @@ class TermsAcceptanceRepository {
 
   Future<bool> isPending() async {
     final value = await _storage.read(StorageKeys.appTermsAcceptance);
-    return value?.startsWith('$_pending:') == true;
+    return value == _pending || value?.startsWith('$_pending:') == true;
   }
 
   Future<void> markPending() {
-    return _storage.write(
-      StorageKeys.appTermsAcceptance,
-      '$_pending:$termsAgreementVersion',
-    );
+    return _storage.write(StorageKeys.appTermsAcceptance, _pending);
   }
 
-  Future<void> accept() {
+  Future<void> accept({required String version, required String sha256}) {
     return _storage.write(
       StorageKeys.appTermsAcceptance,
-      '$_accepted:$termsAgreementVersion',
+      '$_accepted:$version:$sha256',
     );
   }
 

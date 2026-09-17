@@ -17,6 +17,8 @@ import '../../../shared/widgets/responsive.dart';
 import '../../../shared/widgets/status_pill.dart';
 import '../../../voip/platform/android_background_permissions.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
+import '../../calls/domain/audio_output_route.dart';
+import '../../calls/presentation/audio_route_picker.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import 'liblinphone_attribution.dart';
@@ -129,6 +131,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     const _AndroidBackgroundPermissionTile(),
                     const Divider(),
                     const _AndroidFullScreenCallTile(),
+                  ],
+                  if (Platform.isWindows || Platform.isMacOS) ...[
+                    const Divider(),
+                    AppInfoTile(
+                      icon: AppIcons.speakerOn,
+                      title: 'Audio devices',
+                      subtitle: 'Choose a speaker and microphone',
+                      trailing: IconButton(
+                        tooltip: 'Choose audio devices',
+                        icon: const Icon(AppIcons.chevronRight),
+                        onPressed: () => showAudioRoutePicker(
+                          context: context,
+                          ref: ref,
+                          selectedRoute: AudioOutputRoute.speaker,
+                          choosingDefaults: true,
+                        ),
+                      ),
+                    ),
                   ],
                 ],
               ),

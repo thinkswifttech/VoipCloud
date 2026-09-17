@@ -434,7 +434,15 @@ private final class SoftphoneAudioRoutePlatformViewFactory: NSObject,
 final class LinphoneFlutterBridge {
   private static weak var sharedInstance: LinphoneFlutterBridge?
   private static let registrationEvents = LinphoneEventStreamHandler(name: "registration")
-  private static let callEvents = LinphoneEventStreamHandler(name: "calls")
+  // Queue calls can ring and finish (missed or answered elsewhere) before the
+  // Flutter engine has attached its EventChannel listener. Keeping only the
+  // latest event loses that terminal transition when a later idle snapshot is
+  // emitted, so Dart never creates the history item or missed-call badge.
+  private static let callEvents = LinphoneEventStreamHandler(
+    name: "calls",
+    detachedBufferCapacity: 64,
+    replayLatestEvent: false
+  )
   private static let messageEvents = LinphoneEventStreamHandler(name: "messages")
   private static let sipLogEvents = LinphoneEventStreamHandler(name: "logs")
   private static let presenceEvents = LinphoneEventStreamHandler(name: "presence")
@@ -495,6 +503,23 @@ final class LinphoneFlutterBridge {
           message: "Linphone bridge is unavailable.",
           details: nil
         ))
+        return
+      }
+      if call.method == "setAppBadgeCount" {
+        let arguments = call.arguments as? [String: Any]
+        let count = max(0, (arguments?["count"] as? NSNumber)?.intValue ?? 0)
+        if #available(iOS 16.0, *) {
+          UNUserNotificationCenter.current().setBadgeCount(count) { error in
+            if let error {
+              NSLog("Softphone/AppBadge update failed: %@", error.localizedDescription)
+            }
+          }
+        } else {
+          DispatchQueue.main.async {
+            UIApplication.shared.applicationIconBadgeNumber = count
+          }
+        }
+        result(nil)
         return
       }
       self.controller.handle(call: call, result: result)
@@ -1026,11 +1051,20 @@ private enum SipCredentialStore {
 
 private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   private let name: String
+  private let detachedBufferCapacity: Int
+  private let replayLatestEvent: Bool
   private var eventSink: FlutterEventSink?
   private var lastEvent: [String: Any?]?
+  private var detachedEvents: [[String: Any?]] = []
 
-  init(name: String) {
+  init(
+    name: String,
+    detachedBufferCapacity: Int = 0,
+    replayLatestEvent: Bool = true
+  ) {
     self.name = name
+    self.detachedBufferCapacity = max(0, detachedBufferCapacity)
+    self.replayLatestEvent = replayLatestEvent
     super.init()
   }
 
@@ -1040,7 +1074,18 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   ) -> FlutterError? {
     eventSink = events
     NSLog("Softphone/EventChannel %@ listener attached", name)
-    if let lastEvent {
+    if !detachedEvents.isEmpty {
+      let pending = detachedEvents
+      detachedEvents.removeAll(keepingCapacity: true)
+      NSLog(
+        "Softphone/EventChannel %@ replaying %d buffered events",
+        name,
+        pending.count
+      )
+      for event in pending {
+        events(event)
+      }
+    } else if replayLatestEvent, let lastEvent {
       NSLog("Softphone/EventChannel %@ replaying latest event", name)
       events(lastEvent)
     }
@@ -1056,10 +1101,29 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   func send(_ event: [String: Any?]) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      self.lastEvent = event
       guard let eventSink = self.eventSink else {
-        NSLog("Softphone/EventChannel %@ has no listener; cached latest event", self.name)
+        if self.detachedBufferCapacity > 0 {
+          self.detachedEvents.append(event)
+          let overflow = self.detachedEvents.count - self.detachedBufferCapacity
+          if overflow > 0 {
+            self.detachedEvents.removeFirst(overflow)
+          }
+          NSLog(
+            "Softphone/EventChannel %@ has no listener; buffered event (%d pending)",
+            self.name,
+            self.detachedEvents.count
+          )
+        } else {
+          self.lastEvent = event
+          NSLog(
+            "Softphone/EventChannel %@ has no listener; cached latest event",
+            self.name
+          )
+        }
         return
+      }
+      if self.replayLatestEvent {
+        self.lastEvent = event
       }
       eventSink(event)
     }
@@ -1333,8 +1397,10 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
   private override init() {
     let configuration = CXProviderConfiguration()
     configuration.supportsVideo = false
+    // Support one active call plus one waiting/held call. Separate groups keep
+    // CallKit from offering an unsupported conference/merge operation.
     configuration.maximumCallsPerCallGroup = 1
-    configuration.maximumCallGroups = 1
+    configuration.maximumCallGroups = 2
     configuration.supportedHandleTypes = [.generic, .phoneNumber]
     // VoIPCloud already has an authoritative in-app call history. Avoid a
     // second persistent list in Phone while retaining the active CallKit call.
@@ -1378,7 +1444,9 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
       callId: incomingCallId,
       details: "hasCallId=\(incomingCallId == nil ? "false" : "true")"
     )
-    let hasPresentedCall = !pushOnlyCallKitUuids.isEmpty || !callKitUuidByLinphoneId.isEmpty
+    let presentedCallCount = pushOnlyCallKitUuids
+      .union(callKitUuidByLinphoneId.values)
+      .count
     if let incomingCallId,
        pushCallIdByUuid.values.contains(incomingCallId) ||
        callKitUuidByLinphoneId[incomingCallId] != nil {
@@ -1386,7 +1454,7 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
       completion(nil)
       return
     }
-    if hasPresentedCall {
+    if presentedCallCount >= 2 {
       guard let incomingCallId else {
         // The deployed payload contract always includes Call-ID. An ambiguous
         // legacy wake cannot safely be distinguished from a duplicate and must
@@ -1444,9 +1512,9 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     )
   }
 
-  /// Every genuine PushKit VoIP invitation must be reported to CallKit. Since
-  /// VoIPCloud supports one call, report a second distinct Call-ID and close it
-  /// immediately as busy instead of silently consuming its VoIP push.
+  /// Every genuine PushKit VoIP invitation must be reported to CallKit. A third
+  /// distinct call exceeds VoIPCloud's one-active/one-held policy, so report it
+  /// and close it as busy instead of silently consuming its VoIP push.
   private func reportBusyIncomingPushCall(
     payload: [AnyHashable: Any],
     callId: String,
@@ -1553,7 +1621,11 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     )
   }
 
-  func handleCallStateChanged(call: Call, state: Call.State) {
+  func handleCallStateChanged(
+    call: Call,
+    state: Call.State,
+    stateMessage: String? = nil
+  ) {
     guard let linphoneIdForCall else { return }
     let linphoneId = linphoneIdForCall(call)
     nativeCallTrace(
@@ -1614,7 +1686,16 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     case .End, .Released, .Error:
       pendingResumeAttempts.removeValue(forKey: ObjectIdentifier(call))
       failPendingAnswer(linphoneId: linphoneId)
-      endCallKitCall(linphoneId: linphoneId)
+      let terminationMessage = Self.callTerminationMessage(
+        call: call,
+        callbackMessage: stateMessage
+      )
+      let answeredElsewhere = call.dir == .Incoming
+        && Self.isAnsweredElsewhereReason(terminationMessage)
+      endCallKitCall(
+        linphoneId: linphoneId,
+        reason: answeredElsewhere ? .answeredElsewhere : .remoteEnded
+      )
       if call.dir != .Incoming {
         releaseOutgoingAudioSessionIfNeeded()
       }
@@ -1925,6 +2006,7 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
   func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
     nativeCallTrace("answer_action_perform", callId: action.callUUID.uuidString)
     configureAudioSessionForCall()
+    holdActivePeerCalls(excluding: action.callUUID)
     pendingAnswerCallUuids.insert(action.callUUID)
     drivePendingAnswerIfNeeded(callKitUuid: action.callUUID)
     if !pendingAnswerCallUuids.contains(action.callUUID) {
@@ -1983,6 +2065,24 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
       }
     }
     action.fulfill()
+  }
+
+  private func holdActivePeerCalls(excluding answeredUuid: UUID) {
+    for (uuid, linphoneId) in linphoneIdByCallKitUuid where uuid != answeredUuid {
+      guard let peer = findCallByLinphoneId?(linphoneId),
+            peer.state == .Connected || peer.state == .StreamsRunning
+      else { continue }
+      do {
+        try setLinphoneCall(peer, held: true)
+        nativeCallTrace("peer_hold_for_answer", callId: linphoneId)
+      } catch {
+        NSLog(
+          "Softphone/CallKit could not hold peer before answering %@: %@",
+          linphoneId,
+          error.localizedDescription
+        )
+      }
+    }
   }
 
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
@@ -2399,14 +2499,41 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     }
   }
 
-  private func endCallKitCall(linphoneId: String) {
+  fileprivate static func isAnsweredElsewhereReason(_ message: String?) -> Bool {
+    let normalized = (message ?? "").lowercased()
+    return normalized.contains("call completed elsewhere")
+      || normalized.contains("answered elsewhere")
+      || normalized.contains("completed elsewhere")
+  }
+
+  fileprivate static func callTerminationMessage(
+    call: Call,
+    callbackMessage: String?
+  ) -> String {
+    return [
+      callbackMessage,
+      call.errorInfo?.phrase,
+      call.errorInfo?.subErrorInfo?.phrase
+    ]
+      .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+      .reduce(into: [String]()) { values, value in
+        if !values.contains(value) { values.append(value) }
+      }
+      .joined(separator: " | ")
+  }
+
+  private func endCallKitCall(
+    linphoneId: String,
+    reason: CXCallEndedReason = .remoteEnded
+  ) {
     if let uuid = callKitUuidByLinphoneId.removeValue(forKey: linphoneId) {
       linphoneIdByCallKitUuid.removeValue(forKey: uuid)
       failPendingAnswer(uuid: uuid)
       pushOnlyCallKitUuids.remove(uuid)
       pushCallIdByUuid.removeValue(forKey: uuid)
       callKitUuidByCallObject = callKitUuidByCallObject.filter { $0.value != uuid }
-      reportCallEnded(uuid: uuid, reason: .remoteEnded)
+      reportCallEnded(uuid: uuid, reason: reason)
     }
 
     // Defensive cleanup for placeholders created by duplicate pushes before the
@@ -2416,7 +2543,7 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     for orphanUuid in orphanUuids {
       failPendingAnswer(uuid: orphanUuid)
       pushCallIdByUuid.removeValue(forKey: orphanUuid)
-      reportCallEnded(uuid: orphanUuid, reason: .remoteEnded)
+      reportCallEnded(uuid: orphanUuid, reason: reason)
     }
   }
 
@@ -3269,7 +3396,11 @@ private final class NativeLinphoneController: LinphoneController {
               }
               return
             }
-            SoftphoneCallKitController.shared.handleCallStateChanged(call: call, state: state)
+            SoftphoneCallKitController.shared.handleCallStateChanged(
+              call: call,
+              state: state,
+              stateMessage: message
+            )
             self.prepareAudioRoute(call: call, state: state)
             self.emitCall(
               call: call,
@@ -3619,11 +3750,12 @@ private final class NativeLinphoneController: LinphoneController {
       core?.enterForeground()
       restoreSavedAccountIfNeeded()
       account = account ?? core?.defaultAccount
-      // A foreground/live SIP call is already authoritative. Refreshing its
-      // registration in response to the delayed wake push can make a fork-late
-      // proxy deliver the same INVITE again, causing a second busy-rejected call.
-      if hasActiveCall() {
-        NSLog("Softphone/Linphone VoIP push matched an existing live call; skipping SIP wake")
+      // Skip only a duplicate wake for a call already linked to CallKit. A
+      // different Call-ID while another call is active is legitimate call
+      // waiting and must still wake the SIP core.
+      if let pushedCallId = pushCallId(from: payload),
+         callKitUuidByLinphoneId[pushedCallId] != nil {
+        NSLog("Softphone/Linphone VoIP push matched an existing call; skipping SIP wake")
         syncCurrentCall(reason: "voip-push-existing-call")
         endBackgroundTaskIfNeeded()
         return
@@ -4602,8 +4734,12 @@ private final class NativeLinphoneController: LinphoneController {
       calls[id] = call
     }
     let status = callStatus(state)
-    let diagnosticMessage = (stateMessage ?? "")
-      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let diagnosticMessage = SoftphoneCallKitController.callTerminationMessage(
+      call: call,
+      callbackMessage: stateMessage
+    )
+    let answeredElsewhere = call.dir == .Incoming
+      && SoftphoneCallKitController.isAnsweredElsewhereReason(diagnosticMessage)
     nativeCallTrace(
       "flutter_call_event_emitted",
       callId: id,
@@ -4675,7 +4811,8 @@ private final class NativeLinphoneController: LinphoneController {
       "currentEndpointId": currentEndpointId,
       "availableEndpoints": endpoints,
       "featureCode": isFeatureCode,
-      "stateMessage": diagnosticMessage
+      "stateMessage": diagnosticMessage,
+      "answeredElsewhere": answeredElsewhere
     ])
     if terminal {
       DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in

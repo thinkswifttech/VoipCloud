@@ -43,6 +43,24 @@ void main() {
         status: CallStatus.ended,
         endedAt: viewedAt.add(const Duration(minutes: 2)),
       ),
+      CallHistoryItem(
+        id: 'declined',
+        remoteNumber: '211',
+        direction: CallDirection.incoming,
+        status: CallStatus.ended,
+        disposition: CallHistoryDisposition.declined,
+        startedAt: viewedAt,
+        endedAt: viewedAt.add(const Duration(minutes: 3)),
+      ),
+      CallHistoryItem(
+        id: 'answered-elsewhere',
+        remoteNumber: '212',
+        direction: CallDirection.incoming,
+        status: CallStatus.ended,
+        disposition: CallHistoryDisposition.answeredElsewhere,
+        startedAt: viewedAt,
+        endedAt: viewedAt.add(const Duration(minutes: 4)),
+      ),
     ];
 
     expect(unreadMissedCallCount(calls, lastViewedAt: viewedAt), 1);

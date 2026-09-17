@@ -1,6 +1,14 @@
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 
+enum CallHistoryDisposition {
+  outgoing,
+  answered,
+  answeredElsewhere,
+  missed,
+  declined,
+}
+
 class CallHistoryItem {
   const CallHistoryItem({
     required this.id,
@@ -8,6 +16,7 @@ class CallHistoryItem {
     required this.direction,
     required this.status,
     required this.startedAt,
+    this.disposition,
     this.remoteDisplayName,
     this.endedAt,
   });
@@ -19,6 +28,22 @@ class CallHistoryItem {
   final CallStatus status;
   final DateTime startedAt;
   final DateTime? endedAt;
+  final CallHistoryDisposition? disposition;
+
+  CallHistoryDisposition get effectiveDisposition {
+    final saved = disposition;
+    if (saved != null) return saved;
+    if (direction == CallDirection.outgoing) {
+      return CallHistoryDisposition.outgoing;
+    }
+    if (direction == CallDirection.missed || status == CallStatus.missed) {
+      return CallHistoryDisposition.missed;
+    }
+    if (status == CallStatus.ended) {
+      return CallHistoryDisposition.answered;
+    }
+    return CallHistoryDisposition.missed;
+  }
 
   Duration? get duration {
     final ended = endedAt;
@@ -37,6 +62,7 @@ class CallHistoryItem {
       'status': status.name,
       'startedAt': startedAt.toIso8601String(),
       'endedAt': endedAt?.toIso8601String(),
+      'disposition': disposition?.name,
     };
   }
 
@@ -53,8 +79,18 @@ class CallHistoryItem {
       startedAt:
           DateTime.tryParse(_string(json['startedAt'])) ?? DateTime.now(),
       endedAt: DateTime.tryParse(_string(json['endedAt'])),
+      disposition: _callDisposition(json['disposition']),
     );
   }
+}
+
+CallHistoryDisposition? _callDisposition(Object? value) {
+  final name = _string(value);
+  if (name.isEmpty) return null;
+  for (final disposition in CallHistoryDisposition.values) {
+    if (disposition.name == name) return disposition;
+  }
+  return null;
 }
 
 String _string(Object? value, {String fallback = ''}) {

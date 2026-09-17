@@ -12,8 +12,8 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/platform/desktop_platform.dart';
 import '../../contacts/presentation/contacts_providers.dart';
 import '../../directory/presentation/directory_providers.dart';
-import '../domain/call_direction.dart';
 import '../domain/call_status.dart';
+import '../domain/voip_call.dart';
 import '../../session/presentation/session_controller.dart';
 import 'caller_identity.dart';
 import 'caller_avatar.dart';
@@ -54,20 +54,15 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
     final theme = Theme.of(context);
     final useDesktopControls = isSupportedDesktopPlatform();
 
-    ref.listen(activeCallProvider, (_, next) {
-      next.whenData((call) {
-        final isThisCallStillRinging =
-            call != null &&
-            call.id == widget.callId &&
-            call.direction == CallDirection.incoming &&
-            call.status == CallStatus.ringing;
-        if (!isThisCallStillRinging && context.mounted) {
-          context.go(RoutePaths.dialer);
-        }
-      });
+    final liveCalls = ref.watch(liveCallsProvider).value ?? const [];
+    final call = _firstCallWhere(liveCalls, (item) => item.id == widget.callId);
+    final currentCall = _firstCallWhere(liveCalls, (item) {
+      return item.id != widget.callId &&
+          (item.status == CallStatus.active ||
+              item.status == CallStatus.connecting ||
+              item.status == CallStatus.dialing);
     });
-
-    final call = ref.watch(activeCallProvider).value;
+    final isCallWaiting = currentCall != null;
     final contacts = ref.watch(contactsProvider).value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
     final identity = resolveCallerIdentity(
@@ -89,7 +84,7 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
                 children: [
                   const SizedBox(height: 18),
                   Text(
-                    'Incoming call',
+                    isCallWaiting ? 'Call waiting' : 'Incoming call',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.titleLarge?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
@@ -145,7 +140,15 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
                     constraints: BoxConstraints(
                       maxWidth: useDesktopControls ? 520 : 420,
                     ),
-                    child: useDesktopControls
+                    child: isCallWaiting
+                        ? _CallWaitingActions(
+                            enabled: !_isCompletingAction,
+                            onHoldAndAnswer: () => unawaited(_answer(context)),
+                            onEndAndAnswer: () =>
+                                unawaited(_endAndAnswer(context)),
+                            onDecline: () => unawaited(_reject(context)),
+                          )
+                        : useDesktopControls
                         ? _DesktopIncomingCallActions(
                             enabled: !_isCompletingAction,
                             onAnswer: () => unawaited(_answer(context)),
@@ -214,6 +217,72 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
     if (context.mounted) {
       context.go(RoutePaths.dialer);
     }
+  }
+
+  Future<void> _endAndAnswer(BuildContext context) async {
+    if (_isCompletingAction) return;
+    setState(() => _isCompletingAction = true);
+    try {
+      await ref.read(sipServiceProvider).endCurrentAndAcceptCall(widget.callId);
+      if (context.mounted) context.go(RoutePaths.dialer);
+    } catch (_) {
+      if (!context.mounted) return;
+      setState(() => _isCompletingAction = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not switch calls. Please try again.'),
+        ),
+      );
+    }
+  }
+}
+
+VoipCall? _firstCallWhere(
+  Iterable<VoipCall> calls,
+  bool Function(VoipCall call) predicate,
+) {
+  for (final call in calls) {
+    if (predicate(call)) return call;
+  }
+  return null;
+}
+
+class _CallWaitingActions extends StatelessWidget {
+  const _CallWaitingActions({
+    required this.enabled,
+    required this.onHoldAndAnswer,
+    required this.onEndAndAnswer,
+    required this.onDecline,
+  });
+
+  final bool enabled;
+  final VoidCallback onHoldAndAnswer;
+  final VoidCallback onEndAndAnswer;
+  final VoidCallback onDecline;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        FilledButton.icon(
+          onPressed: enabled ? onHoldAndAnswer : null,
+          icon: const Icon(AppIcons.call),
+          label: const Text('Hold & answer'),
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: enabled ? onEndAndAnswer : null,
+          icon: const Icon(AppIcons.callEnd),
+          label: const Text('End current & answer'),
+        ),
+        const SizedBox(height: 10),
+        TextButton(
+          onPressed: enabled ? onDecline : null,
+          child: const Text('Decline new call'),
+        ),
+      ],
+    );
   }
 }
 

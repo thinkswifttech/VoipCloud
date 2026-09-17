@@ -21,12 +21,11 @@ selected by default:
 - launch VoipCloud after installation; and
 - offer to pin VoipCloud to the taskbar after launch.
 
-The preceding license page contains the complete, offline ThinkSwift Master
-Services Agreement from `assets/legal/terms_of_service.txt`, currently
-versioned 2026-08-11. The Windows build fails if the agreement is missing,
-does not contain its expected final schedules, or is omitted from CPack's
-generated configuration. Legal wording must be updated only from an approved
-authoritative source.
+The MSI does not present a separate license page. Like every other platform,
+Windows displays the current ThinkSwift Master Services Agreement after a
+successful provisioning and before SIP is activated. The agreement is loaded
+from the versioned, checksummed VoIPCloud legal endpoint configured through
+`LEGAL_TERMS_URL`; it is not compiled into the installer.
 
 The pin option launches or activates VoipCloud with a one-time, dismissible
 in-app banner, including when an existing tray instance receives the installer
@@ -79,9 +78,9 @@ After building the MSI, publish it with:
 
 ```powershell
 .\tool\publish_windows_update.ps1 `
-  -MsiPath .\build\windows\msi\VoipCloud-1.0.1-win64.msi `
+  -MsiPath .\build\windows\msi\VoipCloud-1.0.1+28-windows-x64.msi `
   -Version 1.0.1 `
-  -Build 26 `
+  -Build 28 `
   -OutputDirectory .\build\desktop-update `
   -ReleaseNotes 'Reliability and desktop usability improvements.' `
   -AllowUnsigned

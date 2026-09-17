@@ -4,6 +4,23 @@ import 'package:phone_app/features/contacts/domain/contact.dart';
 import 'package:phone_app/features/directory/domain/directory_entry.dart';
 
 void main() {
+  test('detects an existing contact using normalized message identity', () {
+    const contact = Contact(
+      id: 'contact-1',
+      displayName: 'Saved Person',
+      phoneNumber: '+1 (416) 555-0123',
+    );
+
+    expect(
+      contactMatchesRemoteIdentity(
+        contact,
+        'sip:+14165550123@tenant.example.test',
+      ),
+      isTrue,
+    );
+    expect(contactMatchesRemoteIdentity(contact, '+14165550999'), isFalse);
+  });
+
   test('preserves a prefixed SIP caller identifier', () {
     final identity = resolveRemoteIdentity(
       remoteUri: 'sip:sup:204@tenant.example.test',

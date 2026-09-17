@@ -16,6 +16,7 @@ class VoipCall {
     this.audioRoute = AudioOutputRoute.earpiece,
     this.audioEndpointId,
     this.availableAudioEndpoints = const [],
+    this.answeredElsewhere = false,
   });
 
   final String id;
@@ -30,6 +31,7 @@ class VoipCall {
   final AudioOutputRoute audioRoute;
   final String? audioEndpointId;
   final List<AudioOutputRouteOption> availableAudioEndpoints;
+  final bool answeredElsewhere;
 
   VoipCall copyWith({
     String? id,
@@ -44,6 +46,7 @@ class VoipCall {
     AudioOutputRoute? audioRoute,
     String? audioEndpointId,
     List<AudioOutputRouteOption>? availableAudioEndpoints,
+    bool? answeredElsewhere,
   }) {
     return VoipCall(
       id: id ?? this.id,
@@ -59,6 +62,7 @@ class VoipCall {
       audioEndpointId: audioEndpointId ?? this.audioEndpointId,
       availableAudioEndpoints:
           availableAudioEndpoints ?? this.availableAudioEndpoints,
+      answeredElsewhere: answeredElsewhere ?? this.answeredElsewhere,
     );
   }
 }

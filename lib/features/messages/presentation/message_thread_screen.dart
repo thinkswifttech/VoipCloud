@@ -102,13 +102,22 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final messagesById = {for (final message in messages) message.id: message};
     final desktopInteractions = isSupportedDesktopPlatform();
     final isBlocked = messaging.isBlocked(widget.remoteNumber);
-    final contacts = ref.watch(contactsProvider).value ?? const [];
+    final contactsState = ref.watch(contactsProvider);
+    final contacts = contactsState.value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
     final identity = resolveRemoteIdentity(
       remoteUri: widget.remoteNumber,
       contacts: contacts,
       directory: directory,
     );
+    final isSavedContact = contacts.any(
+      (contact) => contactMatchesRemoteIdentity(contact, widget.remoteNumber),
+    );
+    final canAddContact =
+        !isSavedContact &&
+        contactsState.hasValue &&
+        identity.number.isNotEmpty &&
+        ref.read(deviceContactsRepositoryProvider).isSupported;
 
     return Theme(
       data: theme,
@@ -173,8 +182,18 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
             PopupMenuButton<_ThreadAction>(
               tooltip: 'Conversation options',
               icon: const Icon(AppIcons.moreVertical),
-              onSelected: (action) => _handleThreadAction(action, isBlocked),
+              onSelected: (action) =>
+                  _handleThreadAction(action, isBlocked, identity.number),
               itemBuilder: (_) => [
+                if (canAddContact)
+                  const PopupMenuItem(
+                    value: _ThreadAction.addContact,
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.person_add_alt_1_outlined),
+                      title: Text('Add to contacts'),
+                    ),
+                  ),
                 PopupMenuItem(
                   value: isBlocked
                       ? _ThreadAction.unblock
@@ -521,7 +540,15 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     }
   }
 
-  Future<void> _handleThreadAction(_ThreadAction action, bool isBlocked) async {
+  Future<void> _handleThreadAction(
+    _ThreadAction action,
+    bool isBlocked,
+    String phoneNumber,
+  ) async {
+    if (action == _ThreadAction.addContact) {
+      await _addRemoteContact(phoneNumber);
+      return;
+    }
     final unblock = action == _ThreadAction.unblock;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -557,6 +584,25 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(error.userMessage)));
+    }
+  }
+
+  Future<void> _addRemoteContact(String phoneNumber) async {
+    try {
+      final createdId = await ref
+          .read(contactsProvider.notifier)
+          .addContact(phoneNumber: phoneNumber);
+      if (!mounted || createdId == null) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Contact added')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not open the phone contact editor.'),
+        ),
+      );
     }
   }
 
@@ -2006,6 +2052,6 @@ class _MessageMeta extends StatelessWidget {
   };
 }
 
-enum _ThreadAction { block, unblock }
+enum _ThreadAction { addContact, block, unblock }
 
 enum _MessageAction { reply, copy, delete }

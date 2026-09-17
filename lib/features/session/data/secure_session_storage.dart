@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../../../core/constants/storage_keys.dart';
+import '../../../core/errors/app_exception.dart';
 import '../../../core/storage/secure_storage_service.dart';
 import '../../sip/domain/sip_config.dart';
 import '../../directory/domain/directory_access.dart';
@@ -16,6 +17,32 @@ class SecureSessionStorage {
   const SecureSessionStorage(this._storage);
 
   final SecureStorageService _storage;
+
+  /// Reads the saved account without treating a temporarily unavailable
+  /// platform keystore as an empty session.
+  ///
+  /// iOS can cold-launch the process for PushKit while protected data is still
+  /// locked. A Keychain read can fail during that short window even though all
+  /// provisioned values are intact. Retry those storage failures and preserve
+  /// the distinction between "no session" and "session cannot be read yet".
+  Future<AppSession?> readSessionResilient({
+    int maxAttempts = 4,
+    Duration retryDelay = const Duration(milliseconds: 200),
+    void Function(int attempt, Object error)? onRetry,
+  }) async {
+    assert(maxAttempts > 0);
+    for (var attempt = 1; ; attempt++) {
+      try {
+        return await readSession();
+      } on StorageException catch (error) {
+        if (attempt >= maxAttempts) rethrow;
+        onRetry?.call(attempt, error);
+        await Future<void>.delayed(
+          Duration(milliseconds: retryDelay.inMilliseconds * attempt),
+        );
+      }
+    }
+  }
 
   Future<AppSession?> readSession() async {
     final accessToken = await _storage.read(StorageKeys.appAccessToken);

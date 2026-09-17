@@ -49,13 +49,19 @@ class ContactsController extends AsyncNotifier<List<Contact>> {
     return contacts;
   }
 
-  Future<void> addContact({
+  Future<String?> addContact({
     String? displayName,
     String? phoneNumber,
     String? extension,
   }) async {
-    await ref.read(deviceContactsRepositoryProvider).openNativeContactCreator();
-    await refresh();
+    final createdId = await ref
+        .read(deviceContactsRepositoryProvider)
+        .openNativeContactCreator(
+          displayName: displayName,
+          phoneNumber: phoneNumber,
+        );
+    if (createdId != null) await refresh();
+    return createdId;
   }
 
   Future<Contact> updateContact({

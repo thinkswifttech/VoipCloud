@@ -24,6 +24,7 @@ import '../../sip/domain/sip_routing.dart';
 import '../../sip/domain/sip_config.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import '../../sip/presentation/sip_log_providers.dart';
+import '../../../voip/platform/voip_platform_channel.dart';
 import '../data/app_config_repository.dart';
 import '../data/device_info_repository.dart';
 import '../data/device_credential_repository.dart';
@@ -105,6 +106,20 @@ final activeCallProvider = StreamProvider((ref) {
   });
 });
 
+final liveCallsProvider = StreamProvider<List<VoipCall>>((ref) {
+  final service = ref.watch(sipServiceProvider);
+  return Stream<List<VoipCall>>.multi((controller) {
+    controller.add(service.liveCalls);
+    final subscription = service.liveCallsStream.listen(
+      controller.add,
+      onError: controller.addError,
+      onDone: controller.close,
+    );
+    unawaited(service.syncCurrentCall());
+    controller.onCancel = subscription.cancel;
+  });
+});
+
 final sipMessagesProvider = StreamProvider((ref) {
   return ref.watch(sipServiceProvider).messageStream;
 });
@@ -112,21 +127,25 @@ final sipMessagesProvider = StreamProvider((ref) {
 final sessionControllerProvider =
     AsyncNotifierProvider<SessionController, AppSession?>(
       SessionController.new,
+      // Startup owns retries so a locked iOS Keychain cannot start an
+      // unbounded background retry loop behind the recovery screen.
+      retry: (_, _) => null,
     );
 
 class SessionController extends AsyncNotifier<AppSession?> {
   Timer? _registrationRetryTimer;
+  Future<AppSession?>? _startupSessionRead;
 
   @override
   Future<AppSession?> build() {
     ref.onDispose(() => _registrationRetryTimer?.cancel());
-    return ref.watch(secureSessionStorageProvider).readSession();
+    return _readStoredSessionForStartup();
   }
 
   Future<AppSession?> restoreAndRefresh() async {
     state = const AsyncLoading();
     final storage = ref.read(secureSessionStorageProvider);
-    final stored = await storage.readSession();
+    final stored = await _readStoredSessionForStartup();
     if (stored == null) {
       state = const AsyncData(null);
       return null;
@@ -172,6 +191,7 @@ class SessionController extends AsyncNotifier<AppSession?> {
             snapshot.provisioning.requiresProvisioning,
       );
       await storage.writeSession(refreshed);
+      _startupSessionRead = Future<AppSession?>.value(refreshed);
       if (_sipIdentityChanged(stored, refreshed)) {
         await _syncSip(refreshed);
       }
@@ -179,8 +199,23 @@ class SessionController extends AsyncNotifier<AppSession?> {
       return refreshed;
     } on ApiException catch (error, stackTrace) {
       if (error.statusCode == 401) {
-        await resetLocal();
-        return null;
+        // An expired control-plane token must not erase a valid SIP identity.
+        // Explicit Reset/Logout remain the only destructive local actions.
+        AppLogger.error(
+          'Config refresh was unauthorized; preserving cached session',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        ref
+            .read(sipLogStoreProvider)
+            .diagnostic(
+              level: 'warn',
+              source: 'session',
+              message:
+                  'Control-plane refresh unauthorized; cached SIP session preserved',
+            );
+        state = AsyncData(stored);
+        return stored;
       }
       // Keep the local session usable if refresh fails after SIP is already up.
       AppLogger.error(
@@ -247,15 +282,21 @@ class SessionController extends AsyncNotifier<AppSession?> {
   Future<void> stageProvisionedSession(AppSession session) async {
     await ref.read(termsAcceptanceRepositoryProvider).markPending();
     await ref.read(secureSessionStorageProvider).writeSession(session);
+    _startupSessionRead = Future<AppSession?>.value(session);
     state = AsyncData(session);
   }
 
-  Future<void> acceptProvisionedTerms() async {
+  Future<void> acceptProvisionedTerms({
+    required String version,
+    required String sha256,
+  }) async {
     final session = state.value;
     if (session == null) {
       throw StateError('No provisioned session is awaiting acceptance.');
     }
-    await ref.read(termsAcceptanceRepositoryProvider).accept();
+    await ref
+        .read(termsAcceptanceRepositoryProvider)
+        .accept(version: version, sha256: sha256);
     await _syncSip(session);
   }
 
@@ -375,10 +416,59 @@ class SessionController extends AsyncNotifier<AppSession?> {
     await sipService.purgeAccount();
     await ref.read(secureSessionStorageProvider).clearSession();
     await ref.read(callHistoryRepositoryProvider).clearCallHistory();
+    try {
+      await const VoipPlatformChannel().setAppBadgeCount(0);
+    } catch (_) {
+      // Reset must complete on older native shells without badge support.
+    }
     await ref.read(quickDialRepositoryProvider).clear();
+    _startupSessionRead = Future<AppSession?>.value(null);
     ref.invalidate(callHistoryProvider);
     ref.invalidate(quickDialProvider);
     state = const AsyncData(null);
+  }
+
+  Future<AppSession?> _readStoredSessionForStartup() {
+    return _startupSessionRead ??= _createStartupSessionRead();
+  }
+
+  Future<AppSession?> _createStartupSessionRead() async {
+    try {
+      return await ref
+          .read(secureSessionStorageProvider)
+          .readSessionResilient(
+            onRetry: (attempt, error) {
+              AppLogger.warning(
+                'Secure session temporarily unavailable; retrying startup',
+                data: {
+                  'attempt': attempt,
+                  'errorType': error.runtimeType.toString(),
+                },
+              );
+              ref
+                  .read(sipLogStoreProvider)
+                  .diagnostic(
+                    level: 'warn',
+                    source: 'session',
+                    message:
+                        'Secure session read unavailable; startup retry $attempt',
+                  );
+            },
+          );
+    } catch (error) {
+      // A later foreground/unlock retry must perform a fresh Keychain read.
+      _startupSessionRead = null;
+      ref
+          .read(sipLogStoreProvider)
+          .diagnostic(
+            level: 'error',
+            source: 'session',
+            message:
+                'Secure session restore failed; provisioning was preserved '
+                '(${error.runtimeType})',
+          );
+      rethrow;
+    }
   }
 
   Future<void> _syncSip(AppSession session) async {

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -17,6 +18,7 @@ import '../../../shared/widgets/responsive.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
 import '../data/dialog_presence_parser.dart';
 import '../data/directory_presence.dart';
+import '../data/presence_subscription_target.dart';
 import '../domain/directory_entry.dart';
 import 'directory_providers.dart';
 
@@ -193,7 +195,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
             .where((entry) => entry.isCompany)
             .expand((entry) => entry.numbers)
             .map((number) => number.trim())
-            .where((number) => RegExp(r'^\d{2,8}$').hasMatch(number))
+            .where(isPresenceSubscriptionTarget)
             .toSet()
             .toList()
           ..sort();
@@ -943,7 +945,8 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
                                         keyboardDismissBehavior:
                                             ScrollViewKeyboardDismissBehavior
                                                 .onDrag,
-                                        cacheExtent: 960,
+                                        scrollCacheExtent:
+                                            const ScrollCacheExtent.pixels(960),
                                         addAutomaticKeepAlives: false,
                                         addRepaintBoundaries: false,
                                         itemExtentBuilder: _extentForIndex,

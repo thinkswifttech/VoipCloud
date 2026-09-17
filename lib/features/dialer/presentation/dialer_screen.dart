@@ -911,7 +911,15 @@ class _AccountDetailSheet extends ConsumerWidget {
               ),
             ],
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
+          Text(
+            'When enabled, silence calls on',
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 10),
           SizedBox(
             width: double.infinity,
             child: SegmentedButton<DndScope>(
@@ -930,6 +938,18 @@ class _AccountDetailSheet extends ConsumerWidget {
               selected: {dndScope},
               showSelectedIcon: false,
               expandedInsets: EdgeInsets.zero,
+              style: ButtonStyle(
+                backgroundColor: WidgetStateProperty.resolveWith((states) {
+                  return states.contains(WidgetState.selected)
+                      ? theme.colorScheme.primary
+                      : Colors.transparent;
+                }),
+                foregroundColor: WidgetStateProperty.resolveWith((states) {
+                  return states.contains(WidgetState.selected)
+                      ? Colors.white
+                      : theme.colorScheme.onSurfaceVariant;
+                }),
+              ),
               onSelectionChanged: (selection) {
                 ref
                     .read(settingsControllerProvider.notifier)
@@ -940,10 +960,9 @@ class _AccountDetailSheet extends ConsumerWidget {
           const SizedBox(height: 10),
           Text(
             dndScope == DndScope.thisDevice
-                ? 'Only this device silently declines incoming calls. Your '
-                      'other signed-in devices keep ringing.'
-                : 'Turns on PBX DND for this extension, so incoming calls '
-                      'stop on every signed-in device.',
+                ? 'Only this device will stay silent. Calls will continue '
+                      'ringing on your other signed-in devices.'
+                : 'Every device signed in to this extension will stay silent.',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: theme.colorScheme.onSurfaceVariant,
               height: 1.45,

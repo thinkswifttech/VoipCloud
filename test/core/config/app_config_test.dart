@@ -18,6 +18,8 @@ void main() {
       'ENABLE_VOIP_DEBUG_LOGS': 'true',
       'DESKTOP_UPDATE_MANIFEST_URL':
           'https://updates.example.test/desktop/stable.json',
+      'LEGAL_TERMS_URL':
+          'https://updates.example.test/legal/terms/current.json',
     });
 
     expect(config.environment, AppEnvironment.staging);
@@ -28,6 +30,7 @@ void main() {
     expect(config.sipTransport, SipTransport.tls);
     expect(config.enableVoipDebugLogs, isTrue);
     expect(config.desktopUpdateManifestUri?.host, 'updates.example.test');
+    expect(config.legalTermsUri?.path, '/legal/terms/current.json');
     expect(config.hasBackend, isTrue);
     expect(config.hasSipProxy, isTrue);
   });
@@ -40,6 +43,7 @@ void main() {
     expect(config.hasSipProxy, isFalse);
     expect(config.messagingBaseUri, isNull);
     expect(config.desktopUpdateManifestUri, isNull);
+    expect(config.legalTermsUri, isNull);
   });
 
   test('rejects an insecure desktop update manifest', () {
@@ -49,5 +53,13 @@ void main() {
     });
 
     expect(config.desktopUpdateManifestUri, isNull);
+  });
+
+  test('rejects an insecure legal terms endpoint', () {
+    final config = AppConfig.fromMap({
+      'LEGAL_TERMS_URL': 'http://updates.example.test/legal/terms/current.json',
+    });
+
+    expect(config.legalTermsUri, isNull);
   });
 }

@@ -1,7 +1,9 @@
 #include "flutter_window.h"
 
 #include <shellapi.h>
+#include <windows.h>
 
+#include <algorithm>
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
@@ -14,6 +16,11 @@ constexpr UINT kOpenCommand = 41001;
 constexpr UINT kQuitCommand = 41002;
 constexpr wchar_t kActivateExistingMessageName[] =
     L"ThinkSwift.VoipCloud.ActivateExisting.v1";
+constexpr wchar_t kWindowStateRegistryPath[] =
+    L"Software\\ThinkSwift\\VoipCloud";
+constexpr wchar_t kWindowBoundsRegistryValue[] = L"WindowBounds";
+constexpr LONG kMinimumWindowWidth = 480;
+constexpr LONG kMinimumWindowHeight = 640;
 
 UINT ActivateExistingMessage() {
   static const UINT message = RegisterWindowMessage(kActivateExistingMessageName);
@@ -30,6 +37,8 @@ bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
   }
+
+  RestoreWindowBounds();
 
   RECT frame = GetClientArea();
 
@@ -62,6 +71,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  SaveWindowBounds();
   RemoveTrayIcon();
   taskbar_pin_bridge_ = nullptr;
   linphone_bridge_ = nullptr;
@@ -101,9 +111,13 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     }
   }
   switch (message) {
+    case WM_EXITSIZEMOVE:
+      SaveWindowBounds();
+      break;
     case WM_CLOSE:
       if (!quitting_) {
         // Keep the Linphone core and SIP registration alive in the tray.
+        SaveWindowBounds();
         ShowWindow(hwnd, SW_HIDE);
         return 0;
       }
@@ -137,6 +151,60 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
+}
+
+void FlutterWindow::RestoreWindowBounds() {
+  RECT saved{};
+  DWORD size = sizeof(saved);
+  if (RegGetValueW(HKEY_CURRENT_USER, kWindowStateRegistryPath,
+                   kWindowBoundsRegistryValue, RRF_RT_REG_BINARY, nullptr,
+                   &saved, &size) != ERROR_SUCCESS ||
+      size != sizeof(saved)) {
+    return;
+  }
+
+  LONG width = saved.right - saved.left;
+  LONG height = saved.bottom - saved.top;
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+
+  HMONITOR monitor = MonitorFromRect(&saved, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO info{sizeof(info)};
+  if (monitor == nullptr || !GetMonitorInfoW(monitor, &info)) {
+    return;
+  }
+
+  const LONG work_width = info.rcWork.right - info.rcWork.left;
+  const LONG work_height = info.rcWork.bottom - info.rcWork.top;
+  width = std::min(std::max(width, kMinimumWindowWidth), work_width);
+  height = std::min(std::max(height, kMinimumWindowHeight), work_height);
+  const LONG left = std::clamp(saved.left, info.rcWork.left,
+                               info.rcWork.right - width);
+  const LONG top = std::clamp(saved.top, info.rcWork.top,
+                              info.rcWork.bottom - height);
+  SetWindowPos(GetHandle(), nullptr, left, top, width, height,
+               SWP_NOACTIVATE | SWP_NOZORDER);
+}
+
+void FlutterWindow::SaveWindowBounds() {
+  const HWND window = GetHandle();
+  if (window == nullptr || IsIconic(window)) {
+    return;
+  }
+  RECT bounds{};
+  if (!GetWindowRect(window, &bounds)) {
+    return;
+  }
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kWindowStateRegistryPath, 0, nullptr,
+                      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  RegSetValueExW(key, kWindowBoundsRegistryValue, 0, REG_BINARY,
+                 reinterpret_cast<const BYTE*>(&bounds), sizeof(bounds));
+  RegCloseKey(key);
 }
 
 void FlutterWindow::AddTrayIcon() {

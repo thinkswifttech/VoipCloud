@@ -135,9 +135,34 @@ class DeviceContactsRepository {
     return contact == null ? null : _mapContact(contact);
   }
 
-  Future<String?> openNativeContactCreator() async {
+  Future<String?> openNativeContactCreator({
+    String? displayName,
+    String? phoneNumber,
+  }) async {
     _ensureMobilePlatform();
-    return native.FlutterContacts.native.showCreator();
+    final normalizedName = displayName?.trim() ?? '';
+    final normalizedNumber = phoneNumber?.trim() ?? '';
+    final nameParts = normalizedName
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .toList(growable: false);
+    final prefill = normalizedName.isEmpty && normalizedNumber.isEmpty
+        ? null
+        : native.Contact(
+            displayName: normalizedName.isEmpty ? null : normalizedName,
+            name: nameParts.isEmpty
+                ? null
+                : native.Name(
+                    first: nameParts.first,
+                    last: nameParts.length > 1
+                        ? nameParts.sublist(1).join(' ')
+                        : null,
+                  ),
+            phones: normalizedNumber.isEmpty
+                ? const []
+                : [native.Phone(number: normalizedNumber, isPrimary: true)],
+          );
+    return native.FlutterContacts.native.showCreator(contact: prefill);
   }
 
   Future<String?> openNativeContactEditor(String id) async {

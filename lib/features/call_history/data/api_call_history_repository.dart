@@ -34,8 +34,10 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
   @override
   Future<CallHistoryItem> syncCallLog({
     required String remoteNumber,
+    String? remoteDisplayName,
     required CallDirection direction,
     required CallStatus status,
+    required CallHistoryDisposition disposition,
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
@@ -45,7 +47,7 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
       data: {
         'remoteParty': remoteNumber,
         'direction': _apiDirection(direction),
-        'status': _apiStatus(status),
+        'status': _apiStatus(status, disposition),
         'startedAt': startedAt.toUtc().toIso8601String(),
         if (endedAt != null) 'endedAt': endedAt.toUtc().toIso8601String(),
         'durationSeconds': endedAt == null
@@ -73,7 +75,25 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
       status: _statusFromApi(_requiredString(json, 'status')),
       startedAt: _requiredDate(json, 'startedAt'),
       endedAt: _optionalDate(json['endedAt']),
+      disposition: _dispositionFromApi(
+        direction: _directionFromApi(_requiredString(json, 'direction')),
+        status: _requiredString(json, 'status'),
+      ),
     );
+  }
+
+  CallHistoryDisposition _dispositionFromApi({
+    required CallDirection direction,
+    required String status,
+  }) {
+    if (direction == CallDirection.outgoing) {
+      return CallHistoryDisposition.outgoing;
+    }
+    return switch (status) {
+      'COMPLETED' => CallHistoryDisposition.answered,
+      'REJECTED' => CallHistoryDisposition.declined,
+      _ => CallHistoryDisposition.missed,
+    };
   }
 
   CallDirection _directionFromApi(String value) {
@@ -101,7 +121,10 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
     };
   }
 
-  String _apiStatus(CallStatus status) {
+  String _apiStatus(CallStatus status, CallHistoryDisposition disposition) {
+    if (disposition == CallHistoryDisposition.declined) {
+      return 'REJECTED';
+    }
     return switch (status) {
       CallStatus.ended => 'COMPLETED',
       CallStatus.missed => 'MISSED',

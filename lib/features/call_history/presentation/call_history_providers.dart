@@ -5,8 +5,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/secure_storage_service.dart';
-import '../../calls/domain/call_direction.dart';
-import '../../calls/domain/call_status.dart';
 import '../data/local_call_history_repository.dart';
 import '../domain/call_history_item.dart';
 import '../domain/call_history_repository.dart';
@@ -76,9 +74,7 @@ int unreadMissedCallCount(
 }) {
   final viewedAt = lastViewedAt?.toUtc();
   return items.where((item) {
-    final isMissed =
-        item.direction == CallDirection.missed ||
-        item.status == CallStatus.missed;
+    final isMissed = item.effectiveDisposition == CallHistoryDisposition.missed;
     if (!isMissed) return false;
     final completedAt = (item.endedAt ?? item.startedAt).toUtc();
     return viewedAt == null || completedAt.isAfter(viewedAt);

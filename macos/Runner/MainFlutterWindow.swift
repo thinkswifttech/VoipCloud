@@ -6,9 +6,18 @@ class MainFlutterWindow: NSWindow {
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
-    let windowFrame = self.frame
+    var windowFrame = self.frame
+    windowFrame.size.width = max(windowFrame.size.width, 480)
+    windowFrame.size.height = max(windowFrame.size.height, 640)
     self.contentViewController = flutterViewController
-    self.setFrame(windowFrame, display: true)
+    self.minSize = NSSize(width: 480, height: 640)
+    self.collectionBehavior.insert(.fullScreenNone)
+    self.standardWindowButton(.zoomButton)?.isEnabled = false
+    let frameName = NSWindow.FrameAutosaveName("VoipCloudMainWindow")
+    if !self.setFrameUsingName(frameName) {
+      self.setFrame(windowFrame, display: true)
+    }
+    self.setFrameAutosaveName(frameName)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
     linphoneBridge = LinphoneFlutterBridge(

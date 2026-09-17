@@ -15,7 +15,7 @@ void main() {
       await repository.markPending();
       expect(await repository.isPending(), isTrue);
 
-      await repository.accept();
+      await repository.accept(version: '2026-08-11', sha256: 'a' * 64);
       expect(await repository.isPending(), isFalse);
     },
   );

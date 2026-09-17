@@ -199,14 +199,37 @@ class VoipPlatformChannel {
     return _channel.invokeMethod<void>('clearNativeCallState');
   }
 
+  Future<void> setAppBadgeCount(
+    int count, {
+    int? missedCalls,
+    int? unreadMessages,
+  }) {
+    return _channel.invokeMethod<void>('setAppBadgeCount', {
+      'count': count < 0 ? 0 : count,
+      if (missedCalls != null) 'missedCalls': missedCalls < 0 ? 0 : missedCalls,
+      if (unreadMessages != null)
+        'unreadMessages': unreadMessages < 0 ? 0 : unreadMessages,
+    });
+  }
+
   Future<List<Map<String, dynamic>>> getAudioRoutes() async {
-    final result = await _channel.invokeMethod<List<dynamic>>('getAudioRoutes');
-    if (result == null) {
-      return const [];
+    final result = await _channel.invokeMethod<dynamic>('getAudioRoutes');
+    if (result is! Iterable) return const [];
+
+    // StandardMethodCodec decodes native maps as Map<Object?, Object?>. Do not
+    // cast the whole payload to Map<String, dynamic>: a single unexpected key
+    // or stale native entry would otherwise reject every valid audio device.
+    final routes = <Map<String, dynamic>>[];
+    for (final item in result) {
+      if (item is! Map) continue;
+      final route = <String, dynamic>{};
+      for (final entry in item.entries) {
+        final key = entry.key;
+        if (key is String) route[key] = entry.value;
+      }
+      if (route.isNotEmpty) routes.add(route);
     }
-    return result
-        .map((item) => Map<String, dynamic>.from(item as Map))
-        .toList();
+    return routes;
   }
 
   Future<String?> setAudioRoute(String route, {String? endpointId}) {
@@ -214,6 +237,29 @@ class VoipPlatformChannel {
       'route': route,
       'endpointId': ?endpointId,
     });
+  }
+
+  Future<String?> setAudioInputDevice(String endpointId) {
+    return _channel.invokeMethod<String>('setAudioInputDevice', {
+      'endpointId': endpointId,
+    });
+  }
+
+  Future<void> playAudioTestSound() {
+    return _channel.invokeMethod<void>('playAudioTestSound');
+  }
+
+  Future<void> startAudioInputTest() {
+    return _channel.invokeMethod<void>('startAudioInputTest');
+  }
+
+  Future<double> getAudioInputLevel() async {
+    final value = await _channel.invokeMethod<num>('getAudioInputLevel');
+    return (value?.toDouble() ?? 0).clamp(0, 1);
+  }
+
+  Future<void> stopAudioInputTest() {
+    return _channel.invokeMethod<void>('stopAudioInputTest');
   }
 
   Future<void> sendDtmf(String value) {

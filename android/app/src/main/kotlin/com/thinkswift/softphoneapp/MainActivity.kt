@@ -1,7 +1,11 @@
 package com.thinkswift.softphoneapp
 
 import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -13,6 +17,8 @@ import android.os.SystemClock
 import android.net.Uri
 import android.util.Log
 import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -51,6 +57,8 @@ class MainActivity : FlutterActivity() {
         const val ACTION_EXTERNAL_MESSAGE =
             "com.thinkswift.softphoneapp.action.EXTERNAL_MESSAGE"
         const val EXTRA_EXTERNAL_DESTINATION = "external_destination"
+        private const val MISSED_CALLS_CHANNEL_ID = "voipcloud_missed_calls"
+        private const val MISSED_CALLS_NOTIFICATION_ID = 7204
     }
 
     private val methodChannelName = "voipcloud/linphone"
@@ -293,11 +301,20 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             methodChannelName
         ).setMethodCallHandler { call, result ->
-            bridge?.handle(call, result) ?: result.error(
-                "LINPHONE_BRIDGE_UNAVAILABLE",
-                "Linphone bridge is unavailable.",
-                null
-            )
+            if (call.method == "setAppBadgeCount") {
+                setAppBadgeCount(
+                    call.argument<Int>("count") ?: 0,
+                    call.argument<Int>("missedCalls") ?: 0,
+                    call.argument<Int>("unreadMessages") ?: 0
+                )
+                result.success(null)
+            } else {
+                bridge?.handle(call, result) ?: result.error(
+                    "LINPHONE_BRIDGE_UNAVAILABLE",
+                    "Linphone bridge is unavailable.",
+                    null
+                )
+            }
         }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -388,7 +405,7 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             callEventsName
         ).setStreamHandler(ForwardingStreamHandler {
-            bridge?.callSink = it
+            bridge?.updateCallSink(it)
             if (it != null) {
                 bridge?.syncCurrentCall("call-stream-listen")
             }
@@ -433,6 +450,89 @@ class MainActivity : FlutterActivity() {
             }
             return
         }
+    }
+
+    private fun setAppBadgeCount(
+        rawCount: Int,
+        rawMissedCalls: Int,
+        rawUnreadMessages: Int
+    ) {
+        val count = rawCount.coerceAtLeast(0)
+        val missedCalls = rawMissedCalls.coerceAtLeast(0)
+        val unreadMessages = rawUnreadMessages.coerceAtLeast(0)
+        val manager = NotificationManagerCompat.from(this)
+        if (count == 0) {
+            manager.cancel(MISSED_CALLS_NOTIFICATION_ID)
+            return
+        }
+
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ActivityCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val notificationManager =
+                getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(
+                NotificationChannel(
+                    MISSED_CALLS_CHANNEL_ID,
+                    "Unread activity",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Unread VoIPCloud calls and messages"
+                    setShowBadge(true)
+                    enableVibration(false)
+                    setSound(null, null)
+                }
+            )
+        }
+
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            MISSED_CALLS_NOTIFICATION_ID,
+            launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val label = when {
+            missedCalls == 0 && unreadMessages == 0 && count == 1 -> "1 unread item"
+            missedCalls == 0 && unreadMessages == 0 -> "$count unread items"
+            unreadMessages == 0 && missedCalls == 1 -> "1 missed call"
+            unreadMessages == 0 -> "$missedCalls missed calls"
+            missedCalls == 0 && unreadMessages == 1 -> "1 unread message"
+            missedCalls == 0 -> "$unreadMessages unread messages"
+            count == 1 -> "1 unread item"
+            else -> "$count unread items"
+        }
+        val detail = when {
+            missedCalls == 0 && unreadMessages == 0 -> "Open VoIPCloud to view it"
+            unreadMessages == 0 -> "Open VoIPCloud to view call history"
+            missedCalls == 0 -> "Open VoIPCloud to view messages"
+            else -> "Open VoIPCloud to view missed calls and messages"
+        }
+        val notification = NotificationCompat.Builder(this, MISSED_CALLS_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(label)
+            .setContentText(detail)
+            .setContentIntent(pendingIntent)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
+            .setNumber(count)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setAutoCancel(false)
+            .build()
+        manager.notify(MISSED_CALLS_NOTIFICATION_ID, notification)
     }
 
     private fun handleExternalCommunicationIntent(intent: Intent?) {
@@ -575,10 +675,12 @@ private class ForwardingStreamHandler(
 
 private class LinphoneBridge private constructor(private val context: android.content.Context) {
     var registrationSink: EventChannel.EventSink? = null
-    var callSink: EventChannel.EventSink? = null
     var messageSink: EventChannel.EventSink? = null
     var sipLogSink: EventChannel.EventSink? = null
     var presenceSink: EventChannel.EventSink? = null
+    private val callEventLock = Any()
+    private var callSink: EventChannel.EventSink? = null
+    private val detachedCallEvents = java.util.ArrayDeque<Map<String, Any?>>()
     private var hostActivity: MainActivity? = null
     private val telecomListener: (AndroidCallCoordinator.Snapshot?) -> Unit = { snapshot ->
         if (snapshot != null) emitCoordinatorSnapshot(snapshot)
@@ -590,6 +692,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     companion object {
+        private const val DETACHED_CALL_EVENT_CAPACITY = 64
         private const val FEATURE_CODE_HANGUP_DELAY_MS = 1500L
         private const val MOBILE_REGISTRATION_EXPIRES_SECONDS = 604_800
         private const val PUSH_CALL_RECONCILE_INTERVAL_MS = 150L
@@ -663,17 +766,22 @@ private class LinphoneBridge private constructor(private val context: android.co
             val isFeatureCode = call in featureCodeCalls
             if (isFeatureCode) {
                 maybeTerminateFeatureCodeCall(call, currentState)
-                emitCall(call, currentState, featureCode = true)
+                emitCall(call, currentState, featureCode = true, stateMessage = message)
                 if (isTerminalCallState(currentState)) {
                     clearFeatureCodeCall(call)
                 }
                 return
             }
-            reportCallToCoordinator(call, currentState, "listener")
+            reportCallToCoordinator(
+                call,
+                currentState,
+                "listener",
+                stateMessage = message
+            )
             if (!AndroidCallCoordinator.isManagingCall()) {
                 prepareAudioRoute(call, currentState)
             }
-            emitCall(call, currentState, featureCode = false)
+            emitCall(call, currentState, featureCode = false, stateMessage = message)
         }
 
         override fun onAudioDevicesListUpdated(core: Core) {
@@ -896,14 +1004,17 @@ private class LinphoneBridge private constructor(private val context: android.co
                     if (AndroidCallCoordinator.canAnswerIncoming(requestedId) ||
                         (incoming != null && isIncomingRinging(incoming))
                     ) {
-                        AndroidCallCoordinator.answerFromApp(context)
+                        AndroidCallCoordinator.answerFromApp(context, requestedId)
                         result.success(null)
                     } else {
                         result.error("CALL_ENDED", "This incoming call has already ended.", null)
                     }
                 }
                 "rejectCall" -> {
-                    AndroidCallCoordinator.rejectFromApp(context)
+                    AndroidCallCoordinator.rejectFromApp(
+                        context,
+                        call.argument<String>("callId")
+                    )
                     result.success(null)
                 }
                 "endCall" -> {
@@ -920,7 +1031,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                             "VoIPCloud/Linphone",
                             "Ending call requestedId=$requestedId nativeId=${callId(activeCall)} state=${activeCall.state}"
                         )
-                        AndroidCallCoordinator.endFromApp(context)
+                        AndroidCallCoordinator.endFromApp(context, requestedId)
                         result.success(null)
                     }
                 }
@@ -2021,15 +2132,21 @@ private class LinphoneBridge private constructor(private val context: android.co
         registrationSink?.success(mapOf("status" to status, "message" to message))
     }
 
-    private fun emitCall(call: Call, state: Call.State, featureCode: Boolean = call in featureCodeCalls) {
+    private fun emitCall(
+        call: Call,
+        state: Call.State,
+        featureCode: Boolean = call in featureCodeCalls,
+        stateMessage: String? = null
+    ) {
         val id = callId(call)
+        val terminationMessage = callTerminationMessage(call, stateMessage)
         if (isTerminalCallState(state)) {
             calls.remove(id)
         } else {
             calls[id] = call
         }
         val telecom = AndroidCallCoordinator.snapshot()
-        callSink?.success(
+        emitCallEvent(
             mapOf(
                 "id" to id,
                 "remoteUri" to (call.remoteAddress?.asStringUriOnly() ?: ""),
@@ -2041,6 +2158,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                 "isSpeakerEnabled" to (audioRouteForCall(call) == "speaker"),
                 "audioRoute" to audioRouteForCall(call),
                 "featureCode" to featureCode,
+                "stateMessage" to terminationMessage,
                 "telecomManaged" to (telecom?.telecomManaged == true),
                 "telecomState" to telecom?.state?.name?.lowercase(),
                 "currentEndpointId" to telecom?.currentEndpointId,
@@ -2063,7 +2181,7 @@ private class LinphoneBridge private constructor(private val context: android.co
             AndroidCallCoordinator.State.FAILED -> "failed"
             AndroidCallCoordinator.State.CONNECTING -> "connecting"
         }
-        callSink?.success(
+        emitCallEvent(
             mapOf(
                 "id" to (snapshot.sipCallId ?: snapshot.sessionId),
                 "remoteUri" to snapshot.callerNumber,
@@ -2077,8 +2195,9 @@ private class LinphoneBridge private constructor(private val context: android.co
                     ),
                 "audioRoute" to (
                     snapshot.endpoints.firstOrNull { it.id == snapshot.currentEndpointId }?.route ?: "earpiece"
-                    ),
+                ),
                 "featureCode" to false,
+                "stateMessage" to snapshot.terminalReason,
                 "telecomManaged" to snapshot.telecomManaged,
                 "telecomState" to snapshot.state.name.lowercase(),
                 "currentEndpointId" to snapshot.currentEndpointId,
@@ -2117,7 +2236,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                 return
             }
             Log.i("VoIPCloud/Linphone", "syncCurrentCall($reason) => none")
-            callSink?.success(mapOf("status" to "none"))
+            emitCallEvent(mapOf("status" to "none"))
             return
         }
         if (BuildConfig.DEBUG) {
@@ -2130,7 +2249,12 @@ private class LinphoneBridge private constructor(private val context: android.co
         emitCall(call, call.state)
     }
 
-    private fun reportCallToCoordinator(call: Call, state: Call.State, source: String) {
+    private fun reportCallToCoordinator(
+        call: Call,
+        state: Call.State,
+        source: String,
+        stateMessage: String? = null
+    ) {
         val authoritativeSipCallId = call.callLog?.callId?.trim().orEmpty()
         // Linphone exposes an outgoing Call before its SIP Call-ID exists. The
         // temporary hash returned by callId() changes as soon as the INVITE is
@@ -2162,9 +2286,17 @@ private class LinphoneBridge private constructor(private val context: android.co
             },
             state = telecomState(state),
             callerName = callerDisplayLabel(call),
-            callerNumber = call.remoteAddress?.username?.trim().orEmpty()
+            callerNumber = call.remoteAddress?.username?.trim().orEmpty(),
+            terminationMessage = callTerminationMessage(call, stateMessage)
         )
     }
+
+    private fun callTerminationMessage(call: Call, stateMessage: String?): String =
+        listOfNotNull(
+            stateMessage?.takeIf { it.isNotBlank() },
+            call.errorInfo?.phrase?.takeIf { it.isNotBlank() },
+            call.errorInfo?.subErrorInfo?.phrase?.takeIf { it.isNotBlank() }
+        ).distinct().joinToString(" | ")
 
     private fun recoverLiveCall(): Call? {
         pruneTerminalCachedCalls()
@@ -2227,6 +2359,38 @@ private class LinphoneBridge private constructor(private val context: android.co
             Log.w("VoIPCloud/Linphone", "Coordinator answer failed", it)
             false
         }
+    }
+
+    fun updateCallSink(sink: EventChannel.EventSink?) {
+        val pending = synchronized(callEventLock) {
+            callSink = sink
+            if (sink == null || detachedCallEvents.isEmpty()) {
+                emptyList()
+            } else {
+                buildList {
+                    while (detachedCallEvents.isNotEmpty()) {
+                        add(detachedCallEvents.removeFirst())
+                    }
+                }
+            }
+        }
+        if (sink != null) {
+            pending.forEach(sink::success)
+        }
+    }
+
+    private fun emitCallEvent(event: Map<String, Any?>) {
+        val sink = synchronized(callEventLock) {
+            val attached = callSink
+            if (attached == null) {
+                while (detachedCallEvents.size >= DETACHED_CALL_EVENT_CAPACITY) {
+                    detachedCallEvents.removeFirst()
+                }
+                detachedCallEvents.addLast(event)
+            }
+            attached
+        }
+        sink?.success(event)
     }
 
     fun updateFcmPushToken(token: String) {

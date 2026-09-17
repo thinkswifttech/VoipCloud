@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -8,13 +7,14 @@ import '../../../app/theme/app_theme.dart';
 import '../../../shared/widgets/app_brand_icon.dart';
 import '../../session/domain/service_account.dart';
 import '../../session/presentation/session_controller.dart';
-import '../data/terms_acceptance_repository.dart';
+import '../data/legal_document_repository.dart';
+import '../domain/legal_document.dart';
 
 class TermsAgreementScreen extends ConsumerStatefulWidget {
-  const TermsAgreementScreen({this.termsText, super.key});
+  const TermsAgreementScreen({this.testDocument, super.key});
 
   @visibleForTesting
-  final String? termsText;
+  final LegalDocument? testDocument;
 
   @override
   ConsumerState<TermsAgreementScreen> createState() =>
@@ -22,7 +22,8 @@ class TermsAgreementScreen extends ConsumerStatefulWidget {
 }
 
 class _TermsAgreementScreenState extends ConsumerState<TermsAgreementScreen> {
-  late final Future<String> _terms;
+  late Future<LegalDocument> _terms;
+  LegalDocument? _document;
   bool _termsAvailable = false;
   bool _confirmed = false;
   bool _isSubmitting = false;
@@ -31,12 +32,29 @@ class _TermsAgreementScreenState extends ConsumerState<TermsAgreementScreen> {
   @override
   void initState() {
     super.initState();
-    _terms = widget.termsText == null
-        ? rootBundle.loadString(termsAgreementAsset)
-        : Future<String>.value(widget.termsText);
-    _terms.then((_) {
-      if (mounted) setState(() => _termsAvailable = true);
+    _loadTerms();
+  }
+
+  void _loadTerms() {
+    setStateIfMounted(() {
+      _termsAvailable = false;
+      _document = null;
+      _error = null;
+    });
+    _terms = widget.testDocument == null
+        ? ref.read(legalDocumentRepositoryProvider).getCurrent()
+        : Future<LegalDocument>.value(widget.testDocument);
+    _terms.then((document) {
+      if (!mounted) return;
+      setState(() {
+        _document = document;
+        _termsAvailable = true;
+      });
     }, onError: (_) {});
+  }
+
+  void setStateIfMounted(VoidCallback callback) {
+    if (mounted) setState(callback);
   }
 
   @override
@@ -75,8 +93,10 @@ class _TermsAgreementScreenState extends ConsumerState<TermsAgreementScreen> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          'ThinkSwift Master Services Agreement • '
-                          'Version $termsAgreementVersion',
+                          _document == null
+                              ? 'Loading the current agreement…'
+                              : '${_document!.title} • '
+                                    'Version ${_document!.version}',
                           style: theme.textTheme.bodyMedium?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
@@ -93,13 +113,30 @@ class _TermsAgreementScreenState extends ConsumerState<TermsAgreementScreen> {
                               ),
                               borderRadius: BorderRadius.circular(14),
                             ),
-                            child: FutureBuilder<String>(
+                            child: FutureBuilder<LegalDocument>(
                               future: _terms,
                               builder: (context, snapshot) {
                                 if (snapshot.hasError) {
-                                  return const Center(
-                                    child: Text(
-                                      'The agreement could not be loaded.',
+                                  return Center(
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(24),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Text(
+                                            'The current agreement could not '
+                                            'be loaded. Check your connection '
+                                            'and try again.',
+                                            textAlign: TextAlign.center,
+                                          ),
+                                          const SizedBox(height: 14),
+                                          OutlinedButton.icon(
+                                            onPressed: _loadTerms,
+                                            icon: const Icon(Icons.refresh),
+                                            label: const Text('Try again'),
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   );
                                 }
@@ -113,7 +150,7 @@ class _TermsAgreementScreenState extends ConsumerState<TermsAgreementScreen> {
                                     primary: true,
                                     padding: const EdgeInsets.all(20),
                                     child: SelectableText(
-                                      snapshot.data!,
+                                      snapshot.data!.body,
                                       style: theme.textTheme.bodySmall
                                           ?.copyWith(height: 1.55),
                                     ),
@@ -193,7 +230,10 @@ class _TermsAgreementScreenState extends ConsumerState<TermsAgreementScreen> {
     try {
       await ref
           .read(sessionControllerProvider.notifier)
-          .acceptProvisionedTerms();
+          .acceptProvisionedTerms(
+            version: _document!.version,
+            sha256: _document!.sha256,
+          );
       if (!mounted) return;
       final session = ref.read(sessionControllerProvider).value;
       final destination = session?.service.serviceStatus == ServiceStatus.active

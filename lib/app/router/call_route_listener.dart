@@ -81,7 +81,9 @@ class CallRouteListener extends ConsumerWidget {
         if (_isFinished(call.status)) {
           ref.read(callTransferModeProvider.notifier).clear();
           final target = RoutePaths.callEndedPath(
-            status: _statusLabel(call.status),
+            status: call.answeredElsewhere
+                ? 'Answered elsewhere'
+                : _statusLabel(call.status),
             caller: call.remoteDisplayName ?? call.remoteUri,
           );
           AppLogger.info(
@@ -108,10 +110,10 @@ class CallRouteListener extends ConsumerWidget {
           // as foreground here because presenting CallKit's banner temporarily
           // resigns the app without moving it to the background.
           final lifecycle = WidgetsBinding.instance.lifecycleState;
-          final appIsForeground = lifecycle == AppLifecycleState.resumed ||
+          final appIsForeground =
+              lifecycle == AppLifecycleState.resumed ||
               lifecycle == AppLifecycleState.inactive;
-          if (defaultTargetPlatform == TargetPlatform.iOS &&
-              !appIsForeground) {
+          if (defaultTargetPlatform == TargetPlatform.iOS && !appIsForeground) {
             AppLogger.info(
               'Call route decision => background iOS CallKit UI id=${call.id}',
             );

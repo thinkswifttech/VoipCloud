@@ -110,6 +110,28 @@ class SipLogStore {
     append(level: 'debug', source: source, message: message);
   }
 
+  /// Persists a low-volume application diagnostic even when verbose SIP
+  /// logging is disabled. This is reserved for startup/session failures that
+  /// would otherwise disappear before a user can open the log screen.
+  void diagnostic({
+    required String level,
+    required String source,
+    required String message,
+  }) {
+    final sanitized = LogSanitizer.sanitizeText(message).trim();
+    if (sanitized.isEmpty) return;
+    final entry = SipLogEntry(
+      at: DateTime.now(),
+      level: SipLogEntry.normalizeLevel(level),
+      source: source,
+      message: sanitized,
+    );
+    _entries.add(entry);
+    _trim();
+    _emit();
+    unawaited(_platform.appendSipLogLine(entry.line).catchError((_) => null));
+  }
+
   Future<void> clear() async {
     _entries.clear();
     _emit();

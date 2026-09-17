@@ -34,6 +34,12 @@ abstract class SipService {
 
   Stream<VoipCall?> get callStateStream;
 
+  /// All non-terminal SIP calls known to this device. At most one call may be
+  /// active; another may be ringing or held.
+  List<VoipCall> get liveCalls;
+
+  Stream<List<VoipCall>> get liveCallsStream;
+
   Stream<SipMessage> get messageStream;
 
   Future<void> makeCall(String destination);
@@ -45,6 +51,9 @@ abstract class SipService {
 
   Future<void> acceptCall(String callId);
 
+  /// Ends any other active call before accepting [callId].
+  Future<void> endCurrentAndAcceptCall(String callId);
+
   Future<void> rejectCall(String callId);
 
   Future<void> mute(bool enabled);
@@ -53,6 +62,9 @@ abstract class SipService {
 
   Future<void> resume(String callId);
 
+  /// Atomically holds the current media call and resumes [callId].
+  Future<void> switchToCall(String callId);
+
   Future<void> setSpeaker(bool enabled);
 
   Future<bool> ensureBluetoothPermission();
@@ -60,6 +72,20 @@ abstract class SipService {
   Future<List<AudioOutputRouteOption>> getAudioRoutes();
 
   Future<void> setAudioRoute(AudioOutputRoute route, {String? endpointId});
+
+  Future<void> setAudioInputDevice(String endpointId);
+
+  /// Plays a short, local sound through the configured desktop output.
+  Future<void> playAudioTestSound();
+
+  /// Starts a temporary desktop microphone meter without retaining audio.
+  Future<void> startAudioInputTest();
+
+  /// Returns the current normalized microphone activity in the range 0...1.
+  Future<double> getAudioInputLevel();
+
+  /// Releases all resources used by the temporary microphone meter.
+  Future<void> stopAudioInputTest();
 
   Future<void> setBluetooth(bool enabled);
 

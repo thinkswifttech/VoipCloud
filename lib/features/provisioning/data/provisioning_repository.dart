@@ -148,6 +148,16 @@ class ProvisioningRepository {
 }
 
 AppException _sipProvisioningException(AppException error) {
+  if (error is ApiException && error.statusCode == 410) {
+    return ApiException(
+      statusCode: error.statusCode,
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      userMessage:
+          'This activation link has expired or reached its registration limit. Request a new QR code or ask an administrator to allow unlimited registrations.',
+    );
+  }
   if (error is ApiException && error.statusCode == 400) {
     return ApiException(
       statusCode: error.statusCode,

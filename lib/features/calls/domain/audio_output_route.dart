@@ -27,6 +27,17 @@ enum AudioOutputRoute {
   };
 }
 
+enum AudioDeviceDirection {
+  output,
+  input;
+
+  static AudioDeviceDirection fromPlatform(Object? value) {
+    return value == 'input'
+        ? AudioDeviceDirection.input
+        : AudioDeviceDirection.output;
+  }
+}
+
 class AudioOutputRouteOption {
   const AudioOutputRouteOption({
     required this.route,
@@ -34,6 +45,7 @@ class AudioOutputRouteOption {
     this.available = true,
     this.endpointId,
     this.selected = false,
+    this.direction = AudioDeviceDirection.output,
   });
 
   final AudioOutputRoute route;
@@ -41,6 +53,7 @@ class AudioOutputRouteOption {
   final bool available;
   final String? endpointId;
   final bool selected;
+  final AudioDeviceDirection direction;
 
   factory AudioOutputRouteOption.fromPlatform(Map<String, dynamic> event) {
     final route =
@@ -55,6 +68,7 @@ class AudioOutputRouteOption {
           ? null
           : '${event['id']}'.trim(),
       selected: event['selected'] == true,
+      direction: AudioDeviceDirection.fromPlatform(event['direction']),
     );
   }
 }

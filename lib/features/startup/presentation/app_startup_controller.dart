@@ -20,6 +20,12 @@ class AppStartupController extends AsyncNotifier<AppSession?> {
       () => ref.read(sessionControllerProvider.notifier).restoreAndRefresh(),
     );
     state = result;
+    if (result.hasError) {
+      Error.throwWithStackTrace(
+        result.error!,
+        result.stackTrace ?? StackTrace.current,
+      );
+    }
     return result.value;
   }
 }

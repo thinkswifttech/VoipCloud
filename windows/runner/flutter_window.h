@@ -26,6 +26,8 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
+  void RestoreWindowBounds();
+  void SaveWindowBounds();
   void AddTrayIcon();
   void RemoveTrayIcon();
   void ShowAndActivate();

@@ -17,6 +17,21 @@ void main() {
       expect(option.label, 'AirPods');
       expect(option.available, isTrue);
       expect(option.selected, isTrue);
+      expect(option.direction, AudioDeviceDirection.output);
+    });
+
+    test('distinguishes desktop microphone endpoints', () {
+      final option = AudioOutputRouteOption.fromPlatform(const {
+        'id': 'windows:input:usb-mic',
+        'direction': 'input',
+        'route': 'wired',
+        'label': 'USB microphone',
+        'selected': true,
+      });
+
+      expect(option.endpointId, 'windows:input:usb-mic');
+      expect(option.direction, AudioDeviceDirection.input);
+      expect(option.selected, isTrue);
     });
 
     test('supports wired and automotive streaming endpoints', () {

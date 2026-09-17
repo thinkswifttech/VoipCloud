@@ -9,8 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $productionConfig = Join-Path $projectRoot "config\production.json"
-$termsOfService = Join-Path $projectRoot `
-  "assets\legal\terms_of_service.txt"
+$pubspec = Join-Path $projectRoot "pubspec.yaml"
 $linphoneDll = Join-Path $projectRoot `
   "windows\third_party\linphone\linphone-sdk\win64\bin\liblinphone.dll"
 
@@ -20,20 +19,20 @@ if (-not (Test-Path -LiteralPath $linphoneDll)) {
 if (-not (Test-Path -LiteralPath $productionConfig)) {
   throw "The required Windows production configuration is missing: $productionConfig"
 }
-if (-not (Test-Path -LiteralPath $termsOfService)) {
-  throw "The required MSI Terms of Service agreement is missing: $termsOfService"
+if (-not (Test-Path -LiteralPath $pubspec)) {
+  throw "The Flutter package manifest is missing: $pubspec"
 }
-$termsText = Get-Content -LiteralPath $termsOfService -Raw
-foreach ($requiredTerm in @(
-    "ThinkSwift Master Services Agreement",
-    "Last Updated / Version: 2026-08-11",
-    "SCHEDULE 9: UNIFIED COMMUNICATIONS AND TELECOM",
-    "SCHEDULE 11: CYBER WARRANTY, PROTECTION, AND THIRD-PARTY COVERAGE PROGRAMS"
-  )) {
-  if (-not $termsText.Contains($requiredTerm)) {
-    throw "The MSI Terms of Service agreement is incomplete or unexpected: missing '$requiredTerm'."
-  }
+$pubspecText = Get-Content -LiteralPath $pubspec -Raw
+$versionMatch = [regex]::Match(
+  $pubspecText,
+  '(?m)^version:\s*(?<version>\d+\.\d+\.\d+)\+(?<build>\d+)\s*$'
+)
+if (-not $versionMatch.Success) {
+  throw "pubspec.yaml must use the release version format x.y.z+build."
 }
+$releaseVersion = $versionMatch.Groups['version'].Value
+$releaseBuild = $versionMatch.Groups['build'].Value
+$releaseFileName = "VoipCloud-$releaseVersion+$releaseBuild-windows-x64.msi"
 $productionValues = Get-Content -LiteralPath $productionConfig -Raw |
   ConvertFrom-Json -AsHashtable
 if ($productionValues["APP_ENV"] -ne "production") {
@@ -256,10 +255,6 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw "Unable to configure the relative CPack install graph."
   }
-  $cpackConfigText = Get-Content -LiteralPath $cpackConfig.FullName -Raw
-  if (-not $cpackConfigText.Contains("terms_of_service.txt")) {
-    throw "CPack omitted the ThinkSwift Terms of Service agreement."
-  }
   try {
     & $cpack -G WIX -C $Configuration --config $cpackConfig.FullName `
       -B $outputDirectory
@@ -279,6 +274,12 @@ try {
   $msi = Get-ChildItem -Path $outputDirectory -Filter "*.msi" |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if ($null -eq $msi) { throw "MSI generation completed without an MSI output." }
+
+  $releaseMsiPath = Join-Path $outputDirectory $releaseFileName
+  if ($msi.FullName -ne $releaseMsiPath) {
+    Move-Item -LiteralPath $msi.FullName -Destination $releaseMsiPath -Force
+    $msi = Get-Item -LiteralPath $releaseMsiPath
+  }
 
   if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     if ([string]::IsNullOrWhiteSpace($signTool)) {

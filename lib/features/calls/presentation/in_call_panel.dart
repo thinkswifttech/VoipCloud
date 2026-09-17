@@ -131,12 +131,27 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     final call = isInCallUiCall(live) ? live! : widget.call;
     final contacts = ref.watch(contactsProvider).value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
+    final calls = ref.watch(liveCallsProvider).value ?? const <VoipCall>[];
+    VoipCall? heldCall;
+    for (final candidate in calls) {
+      if (candidate.id != call.id && candidate.status == CallStatus.held) {
+        heldCall = candidate;
+        break;
+      }
+    }
     final identity = resolveCallerIdentity(
       call: call,
       contacts: contacts,
       directory: directory,
     );
     final displayName = identity.label;
+    final heldIdentity = heldCall == null
+        ? null
+        : resolveCallerIdentity(
+            call: heldCall,
+            contacts: contacts,
+            directory: directory,
+          );
 
     ref.listen(activeCallProvider, (_, next) {
       next.whenData((liveCall) {
@@ -160,19 +175,32 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       _setProximity(call.audioRoute == AudioOutputRoute.earpiece);
     });
 
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 220),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
-      child: _showKeypad
-          ? KeyedSubtree(
-              key: const ValueKey('in-call-keypad'),
-              child: _buildKeypad(context, call, displayName),
-            )
-          : KeyedSubtree(
-              key: const ValueKey('in-call-controls'),
-              child: _buildControls(context, call, identity, displayName),
-            ),
+    final acceptsKeyboardInput = supportsDesktopDialerKeyboard();
+    return Focus(
+      focusNode: _dtmfKeyboardFocus,
+      autofocus: acceptsKeyboardInput,
+      onKeyEvent: acceptsKeyboardInput ? _handleDtmfKeyEvent : null,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 220),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        child: _showKeypad
+            ? KeyedSubtree(
+                key: const ValueKey('in-call-keypad'),
+                child: _buildKeypad(context, call, displayName),
+              )
+            : KeyedSubtree(
+                key: const ValueKey('in-call-controls'),
+                child: _buildControls(
+                  context,
+                  call,
+                  identity,
+                  displayName,
+                  heldCall: heldCall,
+                  heldIdentity: heldIdentity,
+                ),
+              ),
+      ),
     );
   }
 
@@ -180,8 +208,10 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     BuildContext context,
     VoipCall call,
     CallerIdentity identity,
-    String displayName,
-  ) {
+    String displayName, {
+    VoipCall? heldCall,
+    CallerIdentity? heldIdentity,
+  }) {
     final theme = Theme.of(context);
     final quality = _quality;
     final qualityScore = quality?.currentQuality;
@@ -231,6 +261,13 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                 letterSpacing: 0,
               ),
             ),
+            if (heldCall != null && heldIdentity != null) ...[
+              const SizedBox(height: 14),
+              _HeldCallCard(
+                label: heldIdentity.label,
+                onSwap: () => unawaited(_swapToCall(heldCall.id)),
+              ),
+            ],
             const Spacer(flex: 2),
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -360,108 +397,101 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   Widget _buildKeypad(BuildContext context, VoipCall call, String displayName) {
     final theme = Theme.of(context);
     final digits = _dtmfBuffer.isEmpty ? displayName : _dtmfBuffer;
-    final acceptsKeyboardInput = supportsDesktopDialerKeyboard();
-
-    return Focus(
-      focusNode: _dtmfKeyboardFocus,
-      autofocus: acceptsKeyboardInput,
-      onKeyEvent: acceptsKeyboardInput ? _handleDtmfKeyEvent : null,
-      child: Column(
-        children: [
-          const SizedBox(height: 36),
-          Text(
-            digits,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: AppTheme.numberStyle(
-              theme.textTheme.headlineSmall,
-              fontWeight: FontWeight.w700,
-            ),
+    return Column(
+      children: [
+        const SizedBox(height: 36),
+        Text(
+          digits,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: AppTheme.numberStyle(
+            theme.textTheme.headlineSmall,
+            fontWeight: FontWeight.w700,
           ),
-          const SizedBox(height: 28),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final maxWidth = constraints.maxWidth.clamp(0.0, 340.0);
-                final height = constraints.maxHeight;
-                // Keep keys circular-ish and fully visible on short screens.
-                final cell = (maxWidth / 3).clamp(56.0, 92.0);
-                final spacing = height < 340 ? 8.0 : 12.0;
-                final gridHeight = cell * 4 + spacing * 3;
-                final scale = gridHeight > height && height > 0
-                    ? height / gridHeight
-                    : 1.0;
-                final keySize = (cell * scale).clamp(48.0, 92.0);
-                final gap = (spacing * scale).clamp(6.0, 12.0);
+        ),
+        const SizedBox(height: 28),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final maxWidth = constraints.maxWidth.clamp(0.0, 340.0);
+              final height = constraints.maxHeight;
+              // Keep keys circular-ish and fully visible on short screens.
+              final cell = (maxWidth / 3).clamp(56.0, 92.0);
+              final spacing = height < 340 ? 8.0 : 12.0;
+              final gridHeight = cell * 4 + spacing * 3;
+              final scale = gridHeight > height && height > 0
+                  ? height / gridHeight
+                  : 1.0;
+              final keySize = (cell * scale).clamp(48.0, 92.0);
+              final gap = (spacing * scale).clamp(6.0, 12.0);
 
-                return Center(
-                  child: SizedBox(
-                    width: keySize * 3 + gap * 2,
-                    child: GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _dtmfKeys.length,
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
-                        mainAxisSpacing: gap,
-                        crossAxisSpacing: gap,
-                        mainAxisExtent: keySize,
-                      ),
-                      itemBuilder: (context, index) {
-                        final (value, letters) = _dtmfKeys[index];
-                        return _DtmfKey(
-                          value: value,
-                          letters: letters,
-                          compact: keySize < 70,
-                          onPressed: () => _sendDtmf(value),
-                        );
-                      },
+              return Center(
+                child: SizedBox(
+                  width: keySize * 3 + gap * 2,
+                  child: GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _dtmfKeys.length,
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      mainAxisSpacing: gap,
+                      crossAxisSpacing: gap,
+                      mainAxisExtent: keySize,
                     ),
+                    itemBuilder: (context, index) {
+                      final (value, letters) = _dtmfKeys[index];
+                      return _DtmfKey(
+                        value: value,
+                        letters: letters,
+                        compact: keySize < 70,
+                        onPressed: () => _sendDtmf(value),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
+                ),
+              );
+            },
           ),
-          const SizedBox(height: 8),
-          // Phone.app-style footer: Hide left, End centered, Audio right.
-          SizedBox(
-            height: 96,
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.only(left: 12),
-                    child: _CallAction(
-                      icon: AppIcons.keypad,
-                      label: 'Hide',
-                      onPressed: () => setState(() => _showKeypad = false),
+        ),
+        const SizedBox(height: 8),
+        // Phone.app-style footer: Hide left, End centered, Audio right.
+        SizedBox(
+          height: 96,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 12),
+                  child: _CallAction(
+                    icon: AppIcons.keypad,
+                    label: 'Hide',
+                    onPressed: () => setState(() => _showKeypad = false),
+                  ),
+                ),
+              ),
+              _EndCallButton(onPressed: () => unawaited(_endCall(call))),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: _AudioRouteAction(
+                    route: call.audioRoute,
+                    onPressed: () => showAudioRoutePicker(
+                      context: context,
+                      ref: ref,
+                      selectedRoute: call.audioRoute,
                     ),
                   ),
                 ),
-                _EndCallButton(onPressed: () => unawaited(_endCall(call))),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 12),
-                    child: _AudioRouteAction(
-                      route: call.audioRoute,
-                      onPressed: () => showAudioRoutePicker(
-                        context: context,
-                        ref: ref,
-                        selectedRoute: call.audioRoute,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-        ],
-      ),
+        ),
+        const SizedBox(height: 12),
+      ],
     );
   }
 
@@ -482,6 +512,10 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
 
     final value = dtmfCharacterFromKeyboard(event.character);
     if (value == null) return KeyEventResult.ignored;
+    if (!_showKeypad) {
+      setState(() => _showKeypad = true);
+      _setProximity(false);
+    }
     _sendDtmf(value);
     return KeyEventResult.handled;
   }
@@ -515,6 +549,20 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     }
   }
 
+  Future<void> _swapToCall(String callId) async {
+    try {
+      await ref.read(sipServiceProvider).switchToCall(callId);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Unable to switch calls. Please try again.'),
+        ),
+      );
+      await ref.read(sipServiceProvider).syncCurrentCall();
+    }
+  }
+
   void _setProximity(bool enabled) {
     if (_proximityEnabled == enabled) {
       return;
@@ -534,6 +582,65 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       CallStatus.missed => 'Missed',
       CallStatus.failed => 'Failed',
     };
+  }
+}
+
+class _HeldCallCard extends StatelessWidget {
+  const _HeldCallCard({required this.label, required this.onSwap});
+
+  final String label;
+  final VoidCallback onSwap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 420),
+      child: Material(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: onSwap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                Icon(AppIcons.hold, color: theme.colorScheme.primary),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('On hold', style: theme.textTheme.labelMedium),
+                      Text(
+                        label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Icon(AppIcons.swapCalls, color: theme.colorScheme.primary),
+                const SizedBox(width: 6),
+                Text(
+                  'Swap',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

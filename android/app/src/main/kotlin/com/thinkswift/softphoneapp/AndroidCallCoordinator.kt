@@ -114,6 +114,7 @@ internal object AndroidCallCoordinator {
     private val rejectedSipCallIds = ConcurrentHashMap.newKeySet<String>()
     private val endpointChangeMutex = Mutex()
     @Volatile private var session: Session? = null
+    @Volatile private var secondarySession: Session? = null
     @Volatile private var registered = false
     private var callsManager: CallsManager? = null
 
@@ -135,7 +136,41 @@ internal object AndroidCallCoordinator {
         }
     }
 
-    fun snapshot(): Snapshot? = session?.snapshot
+    fun snapshot(): Snapshot? = preferredSession()?.snapshot
+
+    private fun managedSessions(): List<Session> =
+        listOfNotNull(session, secondarySession).filter { !it.snapshot.isTerminal }
+
+    private fun owns(target: Session): Boolean = session === target || secondarySession === target
+
+    private fun preferredSession(): Session? {
+        val sessions = managedSessions()
+        return sessions.firstOrNull {
+            it.snapshot.direction == Direction.INCOMING &&
+                it.snapshot.state in setOf(State.PUSH_RECEIVED, State.RINGING)
+        } ?: sessions.firstOrNull { it.snapshot.state == State.ACTIVE }
+            ?: sessions.firstOrNull { it.snapshot.state == State.CONNECTING || it.snapshot.state == State.DIALING }
+            ?: sessions.firstOrNull()
+    }
+
+    private fun findSession(callId: String?): Session? {
+        if (callId.isNullOrBlank()) return null
+        return managedSessions().firstOrNull {
+            it.snapshot.sessionId == callId || it.snapshot.sipCallId == callId
+        }
+    }
+
+    private fun attachSession(target: Session): Boolean {
+        if (session == null || session?.snapshot?.isTerminal == true) {
+            session = target
+            return true
+        }
+        if (secondarySession == null || secondarySession?.snapshot?.isTerminal == true) {
+            secondarySession = target
+            return true
+        }
+        return false
+    }
 
     fun addListener(listener: (Snapshot?) -> Unit) {
         listeners.add(listener)
@@ -158,14 +193,14 @@ internal object AndroidCallCoordinator {
             data["caller_name"], data["from_name"], data["from-name"],
             data["display_name"], data["display-name"], data["displayName"], data["caller"]
         )
-        val existing = session
-        if (existing != null && !existing.snapshot.isTerminal) {
-            if (existing.snapshot.sipCallId == callId || existing.snapshot.sessionId == callId) {
-                Log.i(TAG, "Deduplicated call push correlation=${correlation(callId)}")
-                refreshIdentityFromPush(context, existing, number, trustedName)
-                return true
-            }
-            Log.w(TAG, "Rejected concurrent VoIP push as busy correlation=${correlation(callId)}")
+        val existing = findSession(callId)
+        if (existing != null) {
+            Log.i(TAG, "Deduplicated call push correlation=${correlation(callId)}")
+            refreshIdentityFromPush(context, existing, number, trustedName)
+            return true
+        }
+        if (managedSessions().size >= 2) {
+            Log.w(TAG, "Rejected third VoIP push as busy correlation=${correlation(callId)}")
             rememberRejectedCallId(callId)
             return false
         }
@@ -190,7 +225,10 @@ internal object AndroidCallCoordinator {
                 startedAtMs = System.currentTimeMillis()
             )
         )
-        session = newSession
+        if (!attachSession(newSession)) {
+            rememberRejectedCallId(callId)
+            return false
+        }
         publish(newSession, State.RINGING)
         Log.i(TAG, "Accepted incoming push correlation=${correlation(callId)}")
         SoftphoneWakeHandler.refreshCallNotification(context, "incoming_push")
@@ -206,15 +244,14 @@ internal object AndroidCallCoordinator {
         refreshIdentityFromPush(context, newSession, number, trustedName)
         newSession.timeoutJob = scope.launch {
             delay(INVITE_TIMEOUT_MS)
-            val current = session
-            if (current === newSession && !current.snapshot.isTerminal &&
-                !current.sipMatched
+            if (owns(newSession) && !newSession.snapshot.isTerminal &&
+                !newSession.sipMatched
             ) {
                 // A cold-start SDK call may exist even if its initial callback
                 // was not observed. Do not leave Linphone's ringtone/vibrator
                 // alive after the coordinator placeholder expires.
                 LinphoneBridgeAccessor.decline(context, callId)
-                finish(context, DisconnectCause.MISSED, "invite_timeout", State.FAILED)
+                finish(context, DisconnectCause.MISSED, "invite_timeout", State.FAILED, newSession)
             }
         }
         return true
@@ -223,10 +260,10 @@ internal object AndroidCallCoordinator {
     fun onCallCancelled(context: Context, data: Map<String, String>): Boolean {
         val callId = firstNonBlank(data["call_id"], data["call-id"], data["callId"])
         if (callId.isBlank()) return false
-        val target = session ?: return false
+        val target = findSession(callId) ?: return false
         val matches = target.snapshot.sessionId == callId || target.snapshot.sipCallId == callId
         if (!matches || target.snapshot.isTerminal) return false
-        finish(context, DisconnectCause.REMOTE, "remote_cancel_push", State.ENDED)
+        finish(context, DisconnectCause.REMOTE, "remote_cancel_push", State.ENDED, target)
         Log.i(TAG, "Applied remote cancel push correlation=${correlation(callId)}")
         return true
     }
@@ -238,7 +275,7 @@ internal object AndroidCallCoordinator {
 
     fun isCurrentSession(expectedSessionId: String?): Boolean {
         if (expectedSessionId.isNullOrBlank()) return false
-        val current = session ?: return false
+        val current = findSession(expectedSessionId) ?: return false
         return !current.snapshot.isTerminal &&
             (current.snapshot.sessionId == expectedSessionId ||
                 current.snapshot.sipCallId == expectedSessionId)
@@ -246,7 +283,7 @@ internal object AndroidCallCoordinator {
 
     fun canAnswerIncoming(expectedSessionId: String?): Boolean {
         if (expectedSessionId.isNullOrBlank()) return false
-        val current = session ?: return false
+        val current = findSession(expectedSessionId) ?: return false
         return current.snapshot.direction == Direction.INCOMING &&
             !current.snapshot.isTerminal &&
             (current.snapshot.state == State.RINGING ||
@@ -261,7 +298,7 @@ internal object AndroidCallCoordinator {
         onReady: (Result<Unit>) -> Unit
     ) {
         initialize(context)
-        val current = session
+        val current = preferredSession()
         if (current != null) {
             if (!current.snapshot.isTerminal) {
                 onReady(Result.failure(IllegalStateException("Another call is already active.")))
@@ -292,12 +329,15 @@ internal object AndroidCallCoordinator {
             ),
             outgoingReady = onReady
         )
-        session = newSession
+        if (!attachSession(newSession)) {
+            onReady(Result.failure(IllegalStateException("Another call is already active.")))
+            return
+        }
         publish(newSession)
         SoftphoneWakeHandler.refreshCallNotification(context, "outgoing_start")
         if (!registered) {
             onReady(Result.failure(IllegalStateException("Android Telecom is unavailable.")))
-            finishFallback(context, "telecom_unavailable")
+            finishFallback(context, "telecom_unavailable", newSession)
             return
         }
         val unavailableReason = telecomUnavailableReason(context, Direction.OUTGOING)
@@ -306,7 +346,7 @@ internal object AndroidCallCoordinator {
             onReady(Result.failure(IllegalStateException(
                 "Android Telecom cannot start this call right now."
             )))
-            finishFallback(context, unavailableReason)
+            finishFallback(context, unavailableReason, newSession)
             return
         }
         addToTelecom(context, newSession)
@@ -389,10 +429,10 @@ internal object AndroidCallCoordinator {
                 manager.addCall(
                     attributes,
                     onAnswer = {
-                        requestAnswer(context)
+                        requestAnswer(context, target)
                     },
                     onDisconnect = { cause ->
-                        requestDisconnectFromSystem(context, cause)
+                        requestDisconnectFromSystem(context, cause, target)
                     },
                     onSetActive = {
                         applySystemActiveRequest(context, target, active = true)
@@ -401,7 +441,7 @@ internal object AndroidCallCoordinator {
                         applySystemActiveRequest(context, target, active = false)
                     }
                 ) {
-                    if (session !== target) {
+                    if (!owns(target)) {
                         launch { disconnect(DisconnectCause(DisconnectCause.LOCAL)) }
                         return@addCall
                     }
@@ -444,7 +484,7 @@ internal object AndroidCallCoordinator {
                     }
                 }
             } catch (error: Throwable) {
-                if (session === target && !target.snapshot.isTerminal) {
+                if (owns(target) && !target.snapshot.isTerminal) {
                     val reason = when {
                         error is CallException &&
                             error.code == CallException.ERROR_CALL_NOT_PERMITTED_AT_PRESENT_TIME ->
@@ -462,7 +502,7 @@ internal object AndroidCallCoordinator {
                     if (target.snapshot.direction == Direction.INCOMING) {
                         update(target) { it.copy(telecomManaged = false, terminalReason = reason) }
                     } else {
-                        finishFallback(context, reason)
+                        finishFallback(context, reason, target)
                     }
                 }
             } finally {
@@ -477,7 +517,8 @@ internal object AndroidCallCoordinator {
         direction: Direction,
         state: State,
         callerName: String,
-        callerNumber: String
+        callerNumber: String,
+        terminationMessage: String? = null
     ) {
         initialize(context)
         if (direction == Direction.INCOMING && state == State.RINGING &&
@@ -495,7 +536,12 @@ internal object AndroidCallCoordinator {
             return
         }
         val terminalSipState = state == State.ENDED || state == State.FAILED
-        var target = session
+        var target = findSession(sipCallId)
+        if (target == null) {
+            target = managedSessions().firstOrNull {
+                !it.sipMatched && it.snapshot.direction == direction
+            }
+        }
         if (terminalSipState && (target == null || target.snapshot.isTerminal)) {
             Log.i(TAG, "Ignoring orphan terminal SIP callback correlation=${correlation(sipCallId)}")
             return
@@ -526,21 +572,31 @@ internal object AndroidCallCoordinator {
                 ),
                 sipMatched = true
             )
-            session = target
+            if (!attachSession(target)) {
+                Log.w(TAG, "Declining third concurrent SIP call correlation=${correlation(sipCallId)}")
+                if (direction == Direction.INCOMING) {
+                    rememberRejectedCallId(sipCallId)
+                    LinphoneBridgeAccessor.decline(context, sipCallId)
+                } else {
+                    LinphoneBridgeAccessor.end(context, sipCallId)
+                }
+                return
+            }
             if (registered) addToTelecom(context, target)
         } else if (target.snapshot.direction != direction ||
             (direction == Direction.INCOMING && !target.sipMatched &&
                 target.snapshot.sessionId != sipCallId) ||
             (target.sipMatched && target.snapshot.sipCallId != sipCallId)
         ) {
-            Log.w(TAG, "Declining unmatched concurrent SIP call correlation=${correlation(sipCallId)}")
-            if (direction == Direction.INCOMING) {
-                rememberRejectedCallId(sipCallId)
-                LinphoneBridgeAccessor.decline(context, sipCallId)
-            } else {
-                LinphoneBridgeAccessor.end(context, sipCallId)
+            val replacement = managedSessions().firstOrNull {
+                it.snapshot.sipCallId == sipCallId || it.snapshot.sessionId == sipCallId
             }
-            return
+            if (replacement != null) {
+                target = replacement
+            } else {
+                Log.w(TAG, "Ignoring mismatched SIP callback correlation=${correlation(sipCallId)}")
+                return
+            }
         }
 
         target.sipMatched = true
@@ -585,8 +641,28 @@ internal object AndroidCallCoordinator {
                 target.pendingSystemActive = null
                 logControlResult("held", target, target.control?.setInactive())
             }
-            State.ENDED -> finish(context, DisconnectCause.REMOTE, "sip_ended", State.ENDED)
-            State.FAILED -> finish(context, DisconnectCause.REMOTE, "sip_failed", State.FAILED)
+            State.ENDED,
+            State.FAILED -> {
+                val answeredElsewhere = direction == Direction.INCOMING &&
+                    isAnsweredElsewhereReason(terminationMessage)
+                finish(
+                    context,
+                    // Core-Telecom transactional calls reject
+                    // ANSWERED_ELSEWHERE (11). Preserve that semantic in the
+                    // terminal reason sent to Flutter, but use one of the four
+                    // disconnect causes accepted by CallControl.
+                    DisconnectCause.REMOTE,
+                    if (answeredElsewhere) {
+                        "Call completed elsewhere"
+                    } else if (state == State.ENDED) {
+                        "sip_ended"
+                    } else {
+                        "sip_failed"
+                    },
+                    state,
+                    target
+                )
+            }
             else -> Unit
         }
         if (!target.snapshot.isTerminal) {
@@ -597,21 +673,47 @@ internal object AndroidCallCoordinator {
         }
     }
 
+    private fun isAnsweredElsewhereReason(message: String?): Boolean {
+        val normalized = message?.trim()?.lowercase().orEmpty()
+        return normalized.contains("call completed elsewhere") ||
+            normalized.contains("answered elsewhere") ||
+            normalized.contains("completed elsewhere")
+    }
+
     fun requestAnswer(context: Context) {
-        val target = session ?: return
+        val target = managedSessions().firstOrNull {
+            it.snapshot.direction == Direction.INCOMING &&
+                it.snapshot.state in setOf(State.PUSH_RECEIVED, State.RINGING, State.CONNECTING)
+        } ?: return
+        requestAnswer(context, target)
+    }
+
+    private fun requestAnswer(context: Context, target: Session) {
         if (target.snapshot.direction != Direction.INCOMING || target.snapshot.isTerminal) return
+        managedSessions().firstOrNull {
+            it !== target && it.snapshot.state == State.ACTIVE
+        }?.let { activePeer ->
+            activePeer.pendingSystemActive = false
+            LinphoneBridgeAccessor.hold(context, activePeer.snapshot.sipCallId)
+        }
         target.pendingAnswer = true
         LinphoneBridgeAccessor.accept(context, target.snapshot.sipCallId)
         publish(target, State.CONNECTING)
         SoftphoneWakeHandler.refreshCallNotification(context, "local_answer")
     }
 
-    fun answerFromApp(context: Context) {
-        val target = session ?: return
+    fun answerFromApp(context: Context, callId: String? = null) {
+        val target = findSession(callId)?.takeIf {
+            it.snapshot.direction == Direction.INCOMING &&
+                it.snapshot.state in setOf(State.PUSH_RECEIVED, State.RINGING, State.CONNECTING)
+        } ?: managedSessions().firstOrNull {
+            it.snapshot.direction == Direction.INCOMING &&
+                it.snapshot.state in setOf(State.PUSH_RECEIVED, State.RINGING, State.CONNECTING)
+        } ?: return
         // Record the user's intent before waiting for Telecom. On a cold start
         // the authoritative SIP INVITE may not have arrived yet; requestAnswer
         // keeps that action pending and accepts immediately after Call-ID match.
-        requestAnswer(context)
+        requestAnswer(context, target)
         scope.launch {
             logControlResult(
                 "answer",
@@ -621,29 +723,29 @@ internal object AndroidCallCoordinator {
         }
     }
 
-    fun rejectFromApp(context: Context) {
-        val target = session ?: return
+    fun rejectFromApp(context: Context, callId: String? = null) {
+        val target = findSession(callId) ?: preferredSession() ?: return
         target.pendingReject = true
         rememberRejectedCallId(target.snapshot.sipCallId ?: target.snapshot.sessionId)
         LinphoneBridgeAccessor.decline(context, target.snapshot.sipCallId)
-        finish(context, DisconnectCause.REJECTED, "local_reject", State.ENDED)
+        finish(context, DisconnectCause.REJECTED, "local_reject", State.ENDED, target)
     }
 
-    fun endFromApp(context: Context) {
-        val target = session ?: return
+    fun endFromApp(context: Context, callId: String? = null) {
+        val target = findSession(callId) ?: preferredSession() ?: return
         LinphoneBridgeAccessor.end(context, target.snapshot.sipCallId)
-        finish(context, DisconnectCause.LOCAL, "local_end", State.ENDED)
+        finish(context, DisconnectCause.LOCAL, "local_end", State.ENDED, target)
     }
 
     fun setMuted(context: Context, muted: Boolean) {
         LinphoneBridgeAccessor.setMuted(context, muted)
-        session?.let { update(it) { old -> old.copy(muted = muted) } }
+        preferredSession()?.let { update(it) { old -> old.copy(muted = muted) } }
     }
 
     fun requestEndpoint(endpointId: String, onResult: (Result<String>) -> Unit) {
         scope.launch {
             endpointChangeMutex.withLock {
-                val target = session
+                val target = preferredSession()
                 val endpoint = target?.rawEndpoints?.firstOrNull {
                     it.identifier.toString() == endpointId
                 }
@@ -671,7 +773,7 @@ internal object AndroidCallCoordinator {
             "speaker", "bluetooth", "wired", "streaming" -> route
             else -> "earpiece"
         }
-        val endpoint = session?.snapshot?.endpoints?.firstOrNull { it.route == normalized }
+        val endpoint = preferredSession()?.snapshot?.endpoints?.firstOrNull { it.route == normalized }
         if (endpoint == null) {
             onResult(Result.failure(IllegalArgumentException("Audio route is unavailable.")))
         } else {
@@ -684,10 +786,13 @@ internal object AndroidCallCoordinator {
         return current.endpoints.map { it.toMap(current.currentEndpointId) }
     }
 
-    fun isManagingCall(): Boolean = session?.let { !it.snapshot.isTerminal && it.snapshot.telecomManaged } == true
+    fun isManagingCall(): Boolean = managedSessions().any { it.snapshot.telecomManaged }
 
-    private suspend fun requestDisconnectFromSystem(context: Context, cause: DisconnectCause) {
-        val target = session ?: return
+    private suspend fun requestDisconnectFromSystem(
+        context: Context,
+        cause: DisconnectCause,
+        target: Session
+    ) {
         if (cause.code == DisconnectCause.REJECTED) {
             target.pendingReject = true
             rememberRejectedCallId(target.snapshot.sipCallId ?: target.snapshot.sessionId)
@@ -695,7 +800,7 @@ internal object AndroidCallCoordinator {
         } else {
             LinphoneBridgeAccessor.end(context, target.snapshot.sipCallId)
         }
-        finishFallback(context, "system_disconnect_${cause.code}")
+        finishFallback(context, "system_disconnect_${cause.code}", target)
     }
 
     /**
@@ -704,7 +809,7 @@ internal object AndroidCallCoordinator {
      * complete normally; throwing aborts the Telecom handshake on some OEMs.
      */
     private fun applySystemActiveRequest(context: Context, target: Session, active: Boolean) {
-        if (session !== target || target.snapshot.isTerminal) return
+        if (!owns(target) || target.snapshot.isTerminal) return
         target.pendingSystemActive = active
         val sipCallId = target.snapshot.sipCallId
         if (!target.sipMatched || sipCallId.isNullOrBlank()) {
@@ -722,6 +827,12 @@ internal object AndroidCallCoordinator {
             return
         }
         val applied = if (active) {
+            managedSessions().firstOrNull {
+                it !== target && it.snapshot.state == State.ACTIVE
+            }?.let { activePeer ->
+                activePeer.pendingSystemActive = false
+                LinphoneBridgeAccessor.hold(context, activePeer.snapshot.sipCallId)
+            }
             LinphoneBridgeAccessor.resume(context, sipCallId)
         } else {
             LinphoneBridgeAccessor.hold(context, sipCallId)
@@ -737,8 +848,13 @@ internal object AndroidCallCoordinator {
         }
     }
 
-    private fun finish(context: Context, cause: Int, reason: String, terminalState: State) {
-        val target = session ?: return
+    private fun finish(
+        context: Context,
+        cause: Int,
+        reason: String,
+        terminalState: State,
+        target: Session
+    ) {
         if (target.finishing) return
         target.finishing = true
         Log.i(
@@ -761,20 +877,56 @@ internal object AndroidCallCoordinator {
             // first races OEM Telecom implementations and can surface their
             // ErrorDialogActivity while a remote rejection is being handled.
             val callJob = target.telecomJob
-            logControlResult("disconnect", target, target.control?.disconnect(DisconnectCause(cause)))
+            val telecomCause = supportedTelecomDisconnectCause(cause)
+            try {
+                logControlResult(
+                    "disconnect",
+                    target,
+                    target.control?.disconnect(DisconnectCause(telecomCause))
+                )
+            } catch (error: Exception) {
+                // A device-specific Telecom failure must not terminate the app.
+                // SIP has already reached a terminal state, so continue the
+                // local cleanup and let Flutter persist the call outcome.
+                Log.e(
+                    TAG,
+                    "Telecom disconnect failed correlation=${correlation(target.snapshot.sessionId)} " +
+                        "cause=$telecomCause",
+                    error
+                )
+            }
             target.finished.complete(Unit)
-            SoftphoneWakeHandler.clearIncomingCallNotification(context)
             callJob?.join()
             delay(TELECOM_RELEASE_GRACE_MS)
-            if (session === target) {
-                session = null
-                notifyListeners(null)
+            if (owns(target)) {
+                detachSession(target)
+                val remaining = snapshot()
+                notifyListeners(remaining)
+                if (remaining == null) {
+                    SoftphoneWakeHandler.clearIncomingCallNotification(context)
+                } else {
+                    SoftphoneWakeHandler.refreshCallNotification(context, "peer_call_finished")
+                }
             }
         }
     }
 
-    private fun finishFallback(context: Context, reason: String) {
-        val target = session ?: return
+    private fun supportedTelecomDisconnectCause(cause: Int): Int = when (cause) {
+        DisconnectCause.LOCAL,
+        DisconnectCause.REMOTE,
+        DisconnectCause.MISSED,
+        DisconnectCause.REJECTED -> cause
+        else -> {
+            Log.w(TAG, "Unsupported Core-Telecom disconnect cause=$cause; using REMOTE")
+            DisconnectCause.REMOTE
+        }
+    }
+
+    private fun finishFallback(
+        context: Context,
+        reason: String,
+        target: Session
+    ) {
         if (!target.finished.complete(Unit)) return
         if (!target.snapshot.isTerminal) {
             update(target) { it.copy(state = State.FAILED, terminalReason = reason) }
@@ -783,20 +935,34 @@ internal object AndroidCallCoordinator {
         if (target.control == null) {
             target.telecomJob?.cancel()
         }
-        SoftphoneWakeHandler.clearIncomingCallNotification(context)
         val callJob = target.telecomJob
         scope.launch {
             callJob?.join()
             delay(TELECOM_RELEASE_GRACE_MS)
-            if (session === target) {
-                session = null
-                notifyListeners(null)
+            if (owns(target)) {
+                detachSession(target)
+                val remaining = snapshot()
+                notifyListeners(remaining)
+                if (remaining == null) {
+                    SoftphoneWakeHandler.clearIncomingCallNotification(context)
+                } else {
+                    SoftphoneWakeHandler.refreshCallNotification(context, "peer_call_fallback")
+                }
             }
         }
     }
 
+    private fun detachSession(target: Session) {
+        if (session === target) session = null
+        if (secondarySession === target) secondarySession = null
+        if (session == null && secondarySession != null) {
+            session = secondarySession
+            secondarySession = null
+        }
+    }
+
     private fun updateEndpoints(target: Session, raw: List<CallEndpointCompat>) {
-        if (session !== target || target.snapshot.isTerminal) return
+        if (!owns(target) || target.snapshot.isTerminal) return
         val distinctEndpoints = raw.distinctBy { it.identifier.toString() }
         val mappedEndpoints = distinctEndpoints.map(::endpointFrom)
         if (target.snapshot.endpoints == mappedEndpoints) return
@@ -807,7 +973,7 @@ internal object AndroidCallCoordinator {
     }
 
     private fun updateCurrentEndpoint(target: Session, endpoint: CallEndpointCompat) {
-        if (session !== target || target.snapshot.isTerminal) return
+        if (!owns(target) || target.snapshot.isTerminal) return
         val mapped = endpointFrom(endpoint)
         if (target.snapshot.currentEndpointId == mapped.id &&
             target.snapshot.endpoints.any { it == mapped }
@@ -844,7 +1010,7 @@ internal object AndroidCallCoordinator {
     }
 
     private fun update(target: Session, transform: (Snapshot) -> Snapshot) {
-        if (session !== target) return
+        if (!owns(target)) return
         val previous = target.snapshot
         val proposed = transform(previous)
         target.snapshot = proposed.copy(
@@ -889,7 +1055,7 @@ internal object AndroidCallCoordinator {
             val effectiveNumber = number.ifBlank { target.snapshot.callerNumber }
             val resolvedName = CallerIdentityStore.resolve(context, effectiveNumber, trustedName)
             withContext(Dispatchers.Main.immediate) {
-                if (session === target && !target.snapshot.isTerminal &&
+                if (owns(target) && !target.snapshot.isTerminal &&
                     resolvedName != target.snapshot.callerName
                 ) {
                     update(target) { it.copy(callerName = resolvedName) }

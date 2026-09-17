@@ -6,12 +6,18 @@
 #include <flutter/standard_method_codec.h>
 
 #include <shellapi.h>
+#include <shobjidl.h>
+#include <audioclient.h>
+#include <endpointvolume.h>
+#include <mmdeviceapi.h>
+#include <wrl/client.h>
 
 #include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -20,6 +26,7 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -32,6 +39,8 @@ constexpr UINT kVoipCloudTrayIconId = 1;
 constexpr wchar_t kVoipCloudRegistryPath[] =
     L"Software\\ThinkSwift\\VoipCloud";
 constexpr wchar_t kDeviceDndRegistryValue[] = L"DeviceDndEnabled";
+constexpr wchar_t kAudioOutputRegistryValue[] = L"AudioOutputEndpoint";
+constexpr wchar_t kAudioInputRegistryValue[] = L"AudioInputEndpoint";
 constexpr char kVoipCloudVersion[] =
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MAJOR) "."
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MINOR) "."
@@ -147,6 +156,7 @@ using EncodableValue = flutter::EncodableValue;
 using MethodCall = flutter::MethodCall<EncodableValue>;
 using MethodResult = flutter::MethodResult<EncodableValue>;
 using EventSink = flutter::EventSink<EncodableValue>;
+using Microsoft::WRL::ComPtr;
 
 struct LinphoneFactory;
 struct LinphoneCore;
@@ -206,6 +216,166 @@ bool BoolArg(const EncodableMap& args, const char* key) {
     return *value;
   }
   return false;
+}
+
+std::string WideToUtf8(const std::wstring& value) {
+  if (value.empty()) return {};
+  const int length = WideCharToMultiByte(
+      CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0,
+      nullptr, nullptr);
+  if (length <= 0) return {};
+  std::string converted(length, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()),
+                      converted.data(), length, nullptr, nullptr);
+  return converted;
+}
+
+std::string NativeTextToUtf8(const char* raw_value) {
+  if (raw_value == nullptr || *raw_value == '\0') return {};
+  const std::string value(raw_value);
+  if (!Utf8ToWide(value).empty()) return value;
+
+  // Some Windows audio backends expose endpoint labels in the active ANSI
+  // code page even though liblinphone's cross-platform API normally returns
+  // UTF-8. Flutter's StandardMethodCodec rejects those bytes (for example the
+  // registered-symbol byte in Intel audio-device names), so normalize them at
+  // the native boundary before constructing EncodableValue strings.
+  const int wide_length = MultiByteToWideChar(
+      CP_ACP, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+  if (wide_length <= 0) return {};
+  std::wstring wide(static_cast<size_t>(wide_length), L'\0');
+  if (MultiByteToWideChar(CP_ACP, 0, value.data(),
+                          static_cast<int>(value.size()), wide.data(),
+                          wide_length) <= 0) {
+    return {};
+  }
+  return WideToUtf8(wide);
+}
+
+std::string LoadRegistryString(const wchar_t* name) {
+  DWORD size = 0;
+  if (RegGetValueW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, name,
+                   RRF_RT_REG_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS ||
+      size < sizeof(wchar_t)) {
+    return {};
+  }
+  std::wstring value(size / sizeof(wchar_t), L'\0');
+  if (RegGetValueW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, name,
+                   RRF_RT_REG_SZ, nullptr, value.data(), &size) !=
+      ERROR_SUCCESS) {
+    return {};
+  }
+  while (!value.empty() && value.back() == L'\0') value.pop_back();
+  return WideToUtf8(value);
+}
+
+void SaveRegistryString(const wchar_t* name, const std::string& value) {
+  const std::wstring wide = Utf8ToWide(value);
+  if (wide.empty()) return;
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, 0, nullptr,
+                      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS || key == nullptr) {
+    return;
+  }
+  RegSetValueExW(key, name, 0, REG_SZ,
+                 reinterpret_cast<const BYTE*>(wide.c_str()),
+                 static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t)));
+  RegCloseKey(key);
+}
+
+int IntArg(const EncodableMap& args, const char* key) {
+  const auto found = args.find(EncodableValue(std::string(key)));
+  if (found == args.end()) {
+    return 0;
+  }
+  if (const auto* value = std::get_if<int32_t>(&found->second)) {
+    return *value;
+  }
+  if (const auto* value = std::get_if<int64_t>(&found->second)) {
+    return static_cast<int>(*value);
+  }
+  return 0;
+}
+
+HICON CreateBadgeOverlayIcon(int raw_count) {
+  constexpr int kSize = 32;
+  BITMAPV5HEADER header{};
+  header.bV5Size = sizeof(header);
+  header.bV5Width = kSize;
+  header.bV5Height = -kSize;
+  header.bV5Planes = 1;
+  header.bV5BitCount = 32;
+  header.bV5Compression = BI_BITFIELDS;
+  header.bV5RedMask = 0x00FF0000;
+  header.bV5GreenMask = 0x0000FF00;
+  header.bV5BlueMask = 0x000000FF;
+  header.bV5AlphaMask = 0xFF000000;
+
+  void* pixels = nullptr;
+  HDC screen = GetDC(nullptr);
+  HBITMAP color = CreateDIBSection(
+      screen, reinterpret_cast<BITMAPINFO*>(&header), DIB_RGB_COLORS,
+      &pixels, nullptr, 0);
+  ReleaseDC(nullptr, screen);
+  if (color == nullptr || pixels == nullptr) {
+    if (color != nullptr) DeleteObject(color);
+    return nullptr;
+  }
+
+  auto* argb = static_cast<uint32_t*>(pixels);
+  std::fill(argb, argb + kSize * kSize, 0u);
+  constexpr int kCenter = kSize / 2;
+  constexpr int kRadius = 14;
+  for (int y = 0; y < kSize; ++y) {
+    for (int x = 0; x < kSize; ++x) {
+      const int dx = x - kCenter;
+      const int dy = y - kCenter;
+      if (dx * dx + dy * dy <= kRadius * kRadius) {
+        argb[y * kSize + x] = 0xFFE02032;
+      }
+    }
+  }
+
+  HDC memory = CreateCompatibleDC(nullptr);
+  HGDIOBJ old_bitmap = SelectObject(memory, color);
+  SetBkMode(memory, TRANSPARENT);
+  SetTextColor(memory, RGB(255, 255, 255));
+  const int shown_count = std::min(std::max(raw_count, 1), 99);
+  const std::wstring label = shown_count >= 99
+                                 ? L"99+"
+                                 : std::to_wstring(shown_count);
+  HFONT font = CreateFontW(
+      label.size() > 2 ? 15 : 20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+  HGDIOBJ old_font = SelectObject(memory, font);
+  RECT bounds{1, 1, kSize - 1, kSize - 1};
+  DrawTextW(memory, label.c_str(), -1, &bounds,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+  SelectObject(memory, old_font);
+  SelectObject(memory, old_bitmap);
+  DeleteObject(font);
+  DeleteDC(memory);
+
+  // GDI writes RGB for the glyphs but leaves their alpha unset. Promote any
+  // drawn pixel to opaque so the white count survives icon composition.
+  for (int index = 0; index < kSize * kSize; ++index) {
+    if ((argb[index] & 0x00FFFFFF) != 0) {
+      argb[index] |= 0xFF000000;
+    }
+  }
+
+  std::vector<BYTE> mask_bits((kSize * kSize) / 8, 0);
+  HBITMAP mask = CreateBitmap(kSize, kSize, 1, 1, mask_bits.data());
+  ICONINFO info{};
+  info.fIcon = TRUE;
+  info.hbmMask = mask;
+  info.hbmColor = color;
+  HICON icon = CreateIconIndirect(&info);
+  DeleteObject(mask);
+  DeleteObject(color);
+  return icon;
 }
 
 std::vector<std::string> StringListArg(const EncodableMap& args,
@@ -328,13 +498,18 @@ std::string CallStatus(int state) {
 
 class StreamHandler : public flutter::StreamHandler<EncodableValue> {
  public:
-  explicit StreamHandler(std::unique_ptr<EventSink>* sink) : sink_(sink) {}
+  explicit StreamHandler(std::unique_ptr<EventSink>* sink,
+                         std::function<void()> on_listen = {})
+      : sink_(sink), on_listen_(std::move(on_listen)) {}
 
  protected:
   std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> OnListenInternal(
       const EncodableValue* arguments,
       std::unique_ptr<EventSink>&& events) override {
     *sink_ = std::move(events);
+    if (on_listen_) {
+      on_listen_();
+    }
     return nullptr;
   }
 
@@ -346,6 +521,7 @@ class StreamHandler : public flutter::StreamHandler<EncodableValue> {
 
  private:
   std::unique_ptr<EventSink>* sink_;
+  std::function<void()> on_listen_;
 };
 
 class LinphoneApi {
@@ -510,6 +686,12 @@ class LinphoneApi {
     linphone_error_info_get_phrase =
         LoadSymbol<const char* (*)(const LinphoneErrorInfo*)>(
             "linphone_error_info_get_phrase");
+    linphone_call_get_error_info =
+        LoadSymbol<const LinphoneErrorInfo* (*)(const LinphoneCall*)>(
+            "linphone_call_get_error_info");
+    linphone_error_info_get_sub_error_info =
+        LoadSymbol<const LinphoneErrorInfo* (*)(const LinphoneErrorInfo*)>(
+            "linphone_error_info_get_sub_error_info");
     linphone_core_refresh_registers =
         LoadSymbol<void (*)(LinphoneCore*)>("linphone_core_refresh_registers");
     linphone_core_create_subscribe =
@@ -588,6 +770,9 @@ class LinphoneApi {
     linphone_core_set_capture_device =
         LoadSymbol<int (*)(LinphoneCore*, const char*)>(
             "linphone_core_set_capture_device");
+    linphone_core_set_ringer_device =
+        LoadSymbol<int (*)(LinphoneCore*, const char*)>(
+            "linphone_core_set_ringer_device");
     linphone_core_sound_device_can_capture =
         LoadSymbol<int (*)(LinphoneCore*, const char*)>(
             "linphone_core_sound_device_can_capture");
@@ -597,12 +782,23 @@ class LinphoneApi {
     linphone_core_get_output_audio_device =
         LoadSymbol<const LinphoneAudioDevice* (*)(const LinphoneCore*)>(
             "linphone_core_get_output_audio_device");
+    linphone_core_get_input_audio_device =
+        LoadSymbol<const LinphoneAudioDevice* (*)(const LinphoneCore*)>(
+            "linphone_core_get_input_audio_device");
     linphone_core_set_output_audio_device =
         LoadSymbol<void (*)(LinphoneCore*, LinphoneAudioDevice*)>(
             "linphone_core_set_output_audio_device");
     linphone_core_set_input_audio_device =
         LoadSymbol<void (*)(LinphoneCore*, LinphoneAudioDevice*)>(
             "linphone_core_set_input_audio_device");
+    linphone_core_set_ring = LoadSymbol<void (*)(LinphoneCore*, const char*)>(
+        "linphone_core_set_ring");
+    linphone_core_set_ring_during_incoming_early_media =
+        LoadSymbol<void (*)(LinphoneCore*, int)>(
+            "linphone_core_set_ring_during_incoming_early_media");
+    linphone_core_play_local =
+        LoadSymbol<int (*)(LinphoneCore*, const char*)>(
+            "linphone_core_play_local");
     linphone_audio_device_get_id =
         LoadSymbol<const char* (*)(const LinphoneAudioDevice*)>(
             "linphone_audio_device_get_id");
@@ -770,6 +966,10 @@ class LinphoneApi {
       nullptr;
   const char* (*linphone_error_info_get_phrase)(const LinphoneErrorInfo*) =
       nullptr;
+  const LinphoneErrorInfo* (*linphone_call_get_error_info)(
+      const LinphoneCall*) = nullptr;
+  const LinphoneErrorInfo* (*linphone_error_info_get_sub_error_info)(
+      const LinphoneErrorInfo*) = nullptr;
   void (*linphone_core_refresh_registers)(LinphoneCore*) = nullptr;
   LinphoneEvent* (*linphone_core_create_subscribe)(
       LinphoneCore*, const LinphoneAddress*, const char*, int) = nullptr;
@@ -811,16 +1011,23 @@ class LinphoneApi {
   const char* (*linphone_core_get_playback_device)(LinphoneCore*) = nullptr;
   int (*linphone_core_set_playback_device)(LinphoneCore*, const char*) = nullptr;
   int (*linphone_core_set_capture_device)(LinphoneCore*, const char*) = nullptr;
+  int (*linphone_core_set_ringer_device)(LinphoneCore*, const char*) = nullptr;
   int (*linphone_core_sound_device_can_capture)(LinphoneCore*, const char*) =
       nullptr;
   BctbxList* (*linphone_core_get_extended_audio_devices)(
       const LinphoneCore*) = nullptr;
   const LinphoneAudioDevice* (*linphone_core_get_output_audio_device)(
       const LinphoneCore*) = nullptr;
+  const LinphoneAudioDevice* (*linphone_core_get_input_audio_device)(
+      const LinphoneCore*) = nullptr;
   void (*linphone_core_set_output_audio_device)(LinphoneCore*,
                                                  LinphoneAudioDevice*) = nullptr;
   void (*linphone_core_set_input_audio_device)(LinphoneCore*,
                                                 LinphoneAudioDevice*) = nullptr;
+  void (*linphone_core_set_ring)(LinphoneCore*, const char*) = nullptr;
+  void (*linphone_core_set_ring_during_incoming_early_media)(LinphoneCore*,
+                                                             int) = nullptr;
+  int (*linphone_core_play_local)(LinphoneCore*, const char*) = nullptr;
   const char* (*linphone_audio_device_get_id)(const LinphoneAudioDevice*) =
       nullptr;
   const char* (*linphone_audio_device_get_device_name)(
@@ -888,7 +1095,8 @@ class LinphoneWindowsBridge::Impl {
 
     call_channel_ = std::make_unique<flutter::EventChannel<EncodableValue>>(
         messenger, "voipcloud/linphone/calls", codec);
-    call_channel_->SetStreamHandler(std::make_unique<StreamHandler>(&call_sink_));
+    call_channel_->SetStreamHandler(std::make_unique<StreamHandler>(
+        &call_sink_, [this]() { FlushPendingCallEvents(); }));
 
     message_channel_ =
         std::make_unique<flutter::EventChannel<EncodableValue>>(
@@ -908,12 +1116,31 @@ class LinphoneWindowsBridge::Impl {
   void SendEvent(const std::string& stream, const EncodableMap& payload) {
     if (stream == "registration" && registration_sink_) {
       registration_sink_->Success(EncodableValue(payload));
-    } else if (stream == "calls" && call_sink_) {
-      call_sink_->Success(EncodableValue(payload));
+    } else if (stream == "calls") {
+      if (call_sink_) {
+        call_sink_->Success(EncodableValue(payload));
+      } else {
+        constexpr size_t kDetachedCallEventCapacity = 64;
+        if (detached_call_events_.size() >= kDetachedCallEventCapacity) {
+          detached_call_events_.erase(detached_call_events_.begin());
+        }
+        detached_call_events_.push_back(payload);
+      }
     } else if (stream == "messages" && message_sink_) {
       message_sink_->Success(EncodableValue(payload));
     } else if (stream == "presence" && presence_sink_) {
       presence_sink_->Success(EncodableValue(payload));
+    }
+  }
+
+  void FlushPendingCallEvents() {
+    if (!call_sink_ || detached_call_events_.empty()) {
+      return;
+    }
+    auto pending = std::move(detached_call_events_);
+    detached_call_events_.clear();
+    for (const auto& payload : pending) {
+      call_sink_->Success(EncodableValue(payload));
     }
   }
 
@@ -951,6 +1178,9 @@ class LinphoneWindowsBridge::Impl {
       HasActiveCall(std::move(result));
     } else if (method == "setNativeDnd") {
       SetNativeDnd(BoolArg(ArgsMap(call), "enabled"), std::move(result));
+    } else if (method == "setAppBadgeCount") {
+      owner_->SetAppBadgeCount(IntArg(ArgsMap(call), "count"));
+      result->Success();
     } else if (method == "enterBackground" || method == "enterForeground") {
       result->Success();
     } else if (method == "unregister") {
@@ -960,15 +1190,18 @@ class LinphoneWindowsBridge::Impl {
     } else if (method == "makeCall") {
       MakeCall(StringArg(ArgsMap(call), "destination"), std::move(result));
     } else if (method == "acceptCall") {
-      AcceptCall(std::move(result));
+      AcceptCall(StringArg(ArgsMap(call), "callId"), std::move(result));
     } else if (method == "rejectCall") {
-      DeclineCall(std::move(result));
+      DeclineCall(StringArg(ArgsMap(call), "callId"), std::move(result));
     } else if (method == "endCall") {
-      WithCall(&LinphoneApi::linphone_call_terminate, std::move(result));
+      WithCall(StringArg(ArgsMap(call), "callId"),
+               &LinphoneApi::linphone_call_terminate, std::move(result));
     } else if (method == "hold") {
-      WithCall(&LinphoneApi::linphone_call_pause, std::move(result));
+      WithCall(StringArg(ArgsMap(call), "callId"),
+               &LinphoneApi::linphone_call_pause, std::move(result));
     } else if (method == "resume") {
-      WithCall(&LinphoneApi::linphone_call_resume, std::move(result));
+      WithCall(StringArg(ArgsMap(call), "callId"),
+               &LinphoneApi::linphone_call_resume, std::move(result));
     } else if (method == "mute") {
       SetMuted(BoolArg(ArgsMap(call), "enabled"), std::move(result));
     } else if (method == "setSpeaker" || method == "setBluetooth") {
@@ -988,6 +1221,18 @@ class LinphoneWindowsBridge::Impl {
       SetAudioRoute(StringArg(ArgsMap(call), "route"),
                     StringArg(ArgsMap(call), "endpointId"),
                     std::move(result));
+    } else if (method == "setAudioInputDevice") {
+      SetAudioInputDevice(StringArg(ArgsMap(call), "endpointId"),
+                          std::move(result));
+    } else if (method == "playAudioTestSound") {
+      PlayAudioTestSound(std::move(result));
+    } else if (method == "startAudioInputTest") {
+      StartAudioInputTest(std::move(result));
+    } else if (method == "getAudioInputLevel") {
+      GetAudioInputLevel(std::move(result));
+    } else if (method == "stopAudioInputTest") {
+      StopAudioInputTest();
+      result->Success();
     } else if (method == "sendDtmf") {
       SendDtmf(StringArg(ArgsMap(call), "value"), std::move(result));
     } else if (method == "sendMessage") {
@@ -1056,6 +1301,21 @@ class LinphoneWindowsBridge::Impl {
         api_.linphone_core_set_root_ca(core_, root_ca_path.c_str());
         TraceNative("EnsureReady set root CA complete");
       }
+      if (api_.linphone_core_set_ring != nullptr) {
+        const std::string ringtone_path = resources_directory +
+            "\\share\\sounds\\linphone\\rings\\oldphone-mono.wav";
+        const DWORD ringtone_attributes = GetFileAttributesA(ringtone_path.c_str());
+        if (ringtone_attributes != INVALID_FILE_ATTRIBUTES &&
+            (ringtone_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+          api_.linphone_core_set_ring(core_, ringtone_path.c_str());
+          TraceNative("EnsureReady packaged desktop ringtone configured");
+        } else {
+          TraceNative("EnsureReady packaged desktop ringtone is unavailable");
+        }
+      }
+      if (api_.linphone_core_set_ring_during_incoming_early_media != nullptr) {
+        api_.linphone_core_set_ring_during_incoming_early_media(core_, 1);
+      }
       active_impl_ = this;
       if (api_.linphone_factory_create_core_cbs != nullptr &&
           api_.linphone_core_cbs_set_registration_state_changed != nullptr &&
@@ -1092,6 +1352,7 @@ class LinphoneWindowsBridge::Impl {
         return false;
       }
       TraceNative("EnsureReady core start complete");
+      RestorePreferredAudioDevices();
       StartIterateLoop();
       TraceNative("EnsureReady iterate scheduling started");
       owner_->EnqueueEvent(
@@ -1356,12 +1617,13 @@ class LinphoneWindowsBridge::Impl {
     result->Success();
   }
 
-  void AcceptCall(std::unique_ptr<MethodResult> result) {
+  void AcceptCall(const std::string& call_id,
+                  std::unique_ptr<MethodResult> result) {
     std::lock_guard<std::mutex> lock(core_mutex_);
     if (!EnsureReady(result.get())) {
       return;
     }
-    LinphoneCall* call = CurrentCall();
+    LinphoneCall* call = FindCall(call_id);
     const int state = call != nullptr && api_.linphone_call_get_state != nullptr
                           ? api_.linphone_call_get_state(call)
                           : -1;
@@ -1428,28 +1690,41 @@ class LinphoneWindowsBridge::Impl {
     result->Success();
   }
 
-  void WithCall(int (*LinphoneApi::*operation)(LinphoneCall*),
+  void WithCall(const std::string& call_id,
+                int (*LinphoneApi::*operation)(LinphoneCall*),
                 std::unique_ptr<MethodResult> result) {
     std::lock_guard<std::mutex> lock(core_mutex_);
     if (!EnsureReady(result.get())) {
       return;
     }
-    LinphoneCall* call = CurrentCall();
+    LinphoneCall* call = FindCall(call_id);
     auto function = api_.*operation;
-    if (call != nullptr && function != nullptr) {
-      function(call);
+    if (call == nullptr) {
+      result->Error("CALL_ENDED", "The selected call is no longer available.");
+      return;
+    }
+    if (function == nullptr || function(call) != 0) {
+      result->Error("LINPHONE_ERROR", "Unable to update the selected call.");
+      return;
     }
     result->Success();
   }
 
-  void DeclineCall(std::unique_ptr<MethodResult> result) {
+  void DeclineCall(const std::string& call_id,
+                   std::unique_ptr<MethodResult> result) {
     std::lock_guard<std::mutex> lock(core_mutex_);
     if (!EnsureReady(result.get())) {
       return;
     }
-    LinphoneCall* call = CurrentCall();
-    if (call != nullptr && api_.linphone_call_decline != nullptr) {
-      api_.linphone_call_decline(call, 3);
+    LinphoneCall* call = FindCall(call_id);
+    if (call == nullptr) {
+      result->Error("CALL_ENDED", "This incoming call has already ended.");
+      return;
+    }
+    if (api_.linphone_call_decline == nullptr ||
+        api_.linphone_call_decline(call, 3) != 0) {
+      result->Error("LINPHONE_ERROR", "Unable to decline incoming call.");
+      return;
     }
     result->Success();
   }
@@ -1511,11 +1786,15 @@ class LinphoneWindowsBridge::Impl {
 
   struct AudioEndpoint {
     LinphoneAudioDevice* device = nullptr;
+    std::string native_id;
     std::string id;
     std::string label;
     std::string route;
     int capabilities = 0;
-    bool selected = false;
+    bool can_record = false;
+    bool can_play = false;
+    bool selected_input = false;
+    bool selected_output = false;
   };
 
   std::vector<AudioEndpoint> ModernAudioEndpoints() const {
@@ -1527,10 +1806,14 @@ class LinphoneWindowsBridge::Impl {
         api_.linphone_audio_device_get_capabilities == nullptr) {
       return endpoints;
     }
-    const LinphoneAudioDevice* active =
+    const LinphoneAudioDevice* active_output =
         api_.linphone_core_get_output_audio_device == nullptr
             ? nullptr
             : api_.linphone_core_get_output_audio_device(core_);
+    const LinphoneAudioDevice* active_input =
+        api_.linphone_core_get_input_audio_device == nullptr
+            ? nullptr
+            : api_.linphone_core_get_input_audio_device(core_);
     BctbxList* devices =
         api_.linphone_core_get_extended_audio_devices(core_);
     for (auto* item = devices; item != nullptr; item = item->next) {
@@ -1540,15 +1823,19 @@ class LinphoneWindowsBridge::Impl {
       }
       const int capabilities =
           api_.linphone_audio_device_get_capabilities(device);
+      constexpr int kCanRecord = 1 << 0;
       constexpr int kCanPlay = 1 << 1;
-      if ((capabilities & kCanPlay) == 0) {
+      const bool can_record = (capabilities & kCanRecord) != 0;
+      const bool can_play = (capabilities & kCanPlay) != 0;
+      if (!can_record && !can_play) {
         continue;
       }
       const char* raw_id = api_.linphone_audio_device_get_id(device);
       const char* raw_name =
           api_.linphone_audio_device_get_device_name(device);
-      std::string id = raw_id == nullptr ? "" : raw_id;
-      std::string label = raw_name == nullptr ? id : raw_name;
+      const std::string native_id = raw_id == nullptr ? "" : raw_id;
+      std::string id = NativeTextToUtf8(raw_id);
+      std::string label = NativeTextToUtf8(raw_name);
       if (id.empty()) {
         id = label;
       }
@@ -1560,11 +1847,15 @@ class LinphoneWindowsBridge::Impl {
                            : api_.linphone_audio_device_get_type(device);
       endpoints.push_back(AudioEndpoint{
           device,
+          native_id.empty() ? id : native_id,
           id,
           label.empty() ? id : label,
           AudioRouteForType(type, label),
           capabilities,
-          active == device,
+          can_record,
+          can_play,
+          active_input == device,
+          active_output == device,
       });
     }
     if (devices != nullptr && api_.bctbx_list_free != nullptr) {
@@ -1597,14 +1888,30 @@ class LinphoneWindowsBridge::Impl {
     const auto modern = ModernAudioEndpoints();
     if (!modern.empty()) {
       for (const auto& endpoint : modern) {
-        payload.emplace_back(EncodableMap{
-            {EncodableValue("id"),
-             EncodableValue("windows:" + endpoint.id)},
-            {EncodableValue("route"), EncodableValue(endpoint.route)},
-            {EncodableValue("label"), EncodableValue(endpoint.label)},
-            {EncodableValue("available"), EncodableValue(true)},
-            {EncodableValue("selected"), EncodableValue(endpoint.selected)},
-        });
+        if (endpoint.can_play) {
+          payload.emplace_back(EncodableMap{
+              {EncodableValue("id"),
+               EncodableValue("windows:output:" + endpoint.id)},
+              {EncodableValue("direction"), EncodableValue("output")},
+              {EncodableValue("route"), EncodableValue(endpoint.route)},
+              {EncodableValue("label"), EncodableValue(endpoint.label)},
+              {EncodableValue("available"), EncodableValue(true)},
+              {EncodableValue("selected"),
+               EncodableValue(endpoint.selected_output)},
+          });
+        }
+        if (endpoint.can_record) {
+          payload.emplace_back(EncodableMap{
+              {EncodableValue("id"),
+               EncodableValue("windows:input:" + endpoint.id)},
+              {EncodableValue("direction"), EncodableValue("input")},
+              {EncodableValue("route"), EncodableValue(endpoint.route)},
+              {EncodableValue("label"), EncodableValue(endpoint.label)},
+              {EncodableValue("available"), EncodableValue(true)},
+              {EncodableValue("selected"),
+               EncodableValue(endpoint.selected_input)},
+          });
+        }
       }
       return payload;
     }
@@ -1614,10 +1921,12 @@ class LinphoneWindowsBridge::Impl {
             : api_.linphone_core_get_playback_device(core_);
     const std::string active = active_value == nullptr ? "" : active_value;
     for (const auto& device : AudioDevices()) {
+      const std::string codec_device = NativeTextToUtf8(device.c_str());
+      if (codec_device.empty()) continue;
       payload.emplace_back(EncodableMap{
-          {EncodableValue("id"), EncodableValue("windows:" + device)},
+          {EncodableValue("id"), EncodableValue("windows:" + codec_device)},
           {EncodableValue("route"), EncodableValue(AudioRouteForDevice(device))},
-          {EncodableValue("label"), EncodableValue(device)},
+          {EncodableValue("label"), EncodableValue(codec_device)},
           {EncodableValue("available"), EncodableValue(true)},
           {EncodableValue("selected"), EncodableValue(device == active)},
       });
@@ -1627,7 +1936,7 @@ class LinphoneWindowsBridge::Impl {
 
   std::string CurrentAudioRoute() const {
     for (const auto& endpoint : ModernAudioEndpoints()) {
-      if (endpoint.selected) {
+      if (endpoint.selected_output) {
         return endpoint.route;
       }
     }
@@ -1753,20 +2062,21 @@ class LinphoneWindowsBridge::Impl {
     const auto modern = ModernAudioEndpoints();
     if (!modern.empty()) {
       std::string requested = endpoint_id;
-      constexpr char kPrefix[] = "windows:";
+      constexpr char kPrefix[] = "windows:output:";
       if (requested.rfind(kPrefix, 0) == 0) {
         requested.erase(0, sizeof(kPrefix) - 1);
       }
       auto selected = std::find_if(
           modern.begin(), modern.end(),
           [&requested](const AudioEndpoint& endpoint) {
-            return !requested.empty() && endpoint.id == requested;
+            return endpoint.can_play && !requested.empty() &&
+                   endpoint.id == requested;
           });
       if (selected == modern.end()) {
         selected = std::find_if(
             modern.begin(), modern.end(),
             [&route](const AudioEndpoint& endpoint) {
-              return endpoint.route == route;
+              return endpoint.can_play && endpoint.route == route;
             });
       }
       if (selected == modern.end()) {
@@ -1781,16 +2091,12 @@ class LinphoneWindowsBridge::Impl {
       } else if (api_.linphone_core_set_output_audio_device != nullptr) {
         api_.linphone_core_set_output_audio_device(core_, selected->device);
       }
-      constexpr int kCanRecord = 1 << 0;
-      if ((selected->capabilities & kCanRecord) != 0) {
-        if (call != nullptr &&
-            api_.linphone_call_set_input_audio_device != nullptr) {
-          api_.linphone_call_set_input_audio_device(call, selected->device);
-        } else if (api_.linphone_core_set_input_audio_device != nullptr) {
-          api_.linphone_core_set_input_audio_device(core_, selected->device);
-        }
+      if (api_.linphone_core_set_ringer_device != nullptr) {
+        api_.linphone_core_set_ringer_device(core_,
+                                              selected->native_id.c_str());
       }
       TraceNative("Audio route selected route=" + selected->route);
+      SaveRegistryString(kAudioOutputRegistryValue, selected->id);
       result->Success(EncodableValue(selected->route));
       return;
     }
@@ -1800,7 +2106,11 @@ class LinphoneWindowsBridge::Impl {
     if (requested.rfind(kPrefix, 0) == 0) {
       requested.erase(0, sizeof(kPrefix) - 1);
     }
-    auto selected = std::find(devices.begin(), devices.end(), requested);
+    auto selected = std::find_if(
+        devices.begin(), devices.end(), [&requested](const std::string& device) {
+          return device == requested ||
+                 NativeTextToUtf8(device.c_str()) == requested;
+        });
     if (selected == devices.end()) {
       selected = std::find_if(devices.begin(), devices.end(),
                               [&route](const std::string& device) {
@@ -1818,19 +2128,221 @@ class LinphoneWindowsBridge::Impl {
                     "Windows could not activate the selected audio device.");
       return;
     }
-    // A Bluetooth or USB headset is one logical user choice. Pair its capture
-    // side with playback when the SDK reports that the selected device can
-    // record, avoiding speaker audio with an unrelated laptop microphone.
-    if (api_.linphone_core_set_capture_device != nullptr &&
-        api_.linphone_core_sound_device_can_capture != nullptr &&
-        api_.linphone_core_sound_device_can_capture(core_, selected->c_str()) != 0 &&
-        api_.linphone_core_set_capture_device(core_, selected->c_str()) != 0) {
-      result->Error("AUDIO_ROUTE",
-                    "Windows activated playback but could not activate the "
-                    "matching microphone.");
+    if (api_.linphone_core_set_ringer_device != nullptr) {
+      api_.linphone_core_set_ringer_device(core_, selected->c_str());
+    }
+    SaveRegistryString(kAudioOutputRegistryValue, *selected);
+    result->Success(EncodableValue(AudioRouteForDevice(*selected)));
+  }
+
+  void SetAudioInputDevice(const std::string& endpoint_id,
+                           std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) {
       return;
     }
-    result->Success(EncodableValue(AudioRouteForDevice(*selected)));
+    const auto modern = ModernAudioEndpoints();
+    if (!modern.empty()) {
+      std::string requested = endpoint_id;
+      constexpr char kPrefix[] = "windows:input:";
+      if (requested.rfind(kPrefix, 0) == 0) {
+        requested.erase(0, sizeof(kPrefix) - 1);
+      }
+      const auto selected = std::find_if(
+          modern.begin(), modern.end(),
+          [&requested](const AudioEndpoint& endpoint) {
+            return endpoint.can_record && endpoint.id == requested;
+          });
+      if (selected == modern.end()) {
+        result->Error("AUDIO_INPUT",
+                      "The selected Windows microphone is unavailable.");
+        return;
+      }
+      LinphoneCall* call = CurrentCall();
+      if (call != nullptr && api_.linphone_call_set_input_audio_device != nullptr) {
+        api_.linphone_call_set_input_audio_device(call, selected->device);
+      } else if (api_.linphone_core_set_input_audio_device != nullptr) {
+        api_.linphone_core_set_input_audio_device(core_, selected->device);
+      }
+      TraceNative("Audio input selected");
+      SaveRegistryString(kAudioInputRegistryValue, selected->id);
+      result->Success(EncodableValue("windows:input:" + selected->id));
+      return;
+    }
+
+    std::string requested = endpoint_id;
+    constexpr char kPrefix[] = "windows:input:";
+    if (requested.rfind(kPrefix, 0) == 0) {
+      requested.erase(0, sizeof(kPrefix) - 1);
+    }
+    if (requested.empty() || api_.linphone_core_set_capture_device == nullptr ||
+        api_.linphone_core_set_capture_device(core_, requested.c_str()) != 0) {
+      result->Error("AUDIO_INPUT",
+                    "Windows could not activate the selected microphone.");
+      return;
+    }
+    SaveRegistryString(kAudioInputRegistryValue, requested);
+    result->Success(EncodableValue(endpoint_id));
+  }
+
+  void PlayAudioTestSound(std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    if (CurrentCall() != nullptr) {
+      result->Error("AUDIO_TEST_BUSY",
+                    "Finish the current call before testing audio.");
+      return;
+    }
+    if (api_.linphone_core_play_local == nullptr) {
+      result->Error("AUDIO_TEST_UNAVAILABLE",
+                    "Local audio playback is unavailable.");
+      return;
+    }
+    const std::string path = ExecutableDirectoryUtf8() +
+        "\\share\\sounds\\linphone\\incoming_chat.wav";
+    if (api_.linphone_core_play_local(core_, path.c_str()) != 0) {
+      result->Error("AUDIO_TEST_FAILED",
+                    "The selected speaker could not play the test sound.");
+      return;
+    }
+    result->Success();
+  }
+
+  ComPtr<IMMDevice> SelectedCaptureDevice() const {
+    ComPtr<IMMDeviceEnumerator> enumerator;
+    if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
+      return nullptr;
+    }
+    const LinphoneAudioDevice* input =
+        api_.linphone_core_get_input_audio_device == nullptr
+            ? nullptr
+            : api_.linphone_core_get_input_audio_device(core_);
+    if (input != nullptr && api_.linphone_audio_device_get_id != nullptr) {
+      const char* raw_id = api_.linphone_audio_device_get_id(input);
+      if (raw_id != nullptr && *raw_id != '\0') {
+        ComPtr<IMMDevice> selected;
+        const std::wstring id = Utf8ToWide(raw_id);
+        if (!id.empty() && SUCCEEDED(enumerator->GetDevice(id.c_str(),
+                                                            &selected))) {
+          return selected;
+        }
+      }
+    }
+    ComPtr<IMMDevice> fallback;
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(
+            eCapture, eCommunications, &fallback))) {
+      return fallback;
+    }
+    return nullptr;
+  }
+
+  void StartAudioInputTest(std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    if (CurrentCall() != nullptr) {
+      result->Error("AUDIO_TEST_BUSY",
+                    "Finish the current call before testing audio.");
+      return;
+    }
+    StopAudioInputTestLocked();
+    const auto device = SelectedCaptureDevice();
+    if (device == nullptr) {
+      result->Error("AUDIO_INPUT", "No microphone is available.");
+      return;
+    }
+    ComPtr<IAudioClient> client;
+    if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                &client))) {
+      result->Error("AUDIO_INPUT", "The microphone could not be opened.");
+      return;
+    }
+    WAVEFORMATEX* format = nullptr;
+    HRESULT status = client->GetMixFormat(&format);
+    if (SUCCEEDED(status)) {
+      status = client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0,
+                                  format, nullptr);
+    }
+    if (format != nullptr) CoTaskMemFree(format);
+    ComPtr<IAudioCaptureClient> capture;
+    ComPtr<IAudioMeterInformation> meter;
+    if (SUCCEEDED(status)) {
+      status = client->GetService(IID_PPV_ARGS(&capture));
+    }
+    if (SUCCEEDED(status)) {
+      status = device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL,
+                                nullptr, &meter);
+    }
+    if (SUCCEEDED(status)) status = client->Start();
+    if (FAILED(status)) {
+      result->Error("AUDIO_INPUT", "The microphone test could not start.");
+      return;
+    }
+    audio_test_client_ = std::move(client);
+    audio_test_capture_ = std::move(capture);
+    audio_test_meter_ = std::move(meter);
+    result->Success();
+  }
+
+  void GetAudioInputLevel(std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (audio_test_client_ == nullptr || audio_test_capture_ == nullptr ||
+        audio_test_meter_ == nullptr) {
+      result->Error("AUDIO_INPUT", "The microphone test is not running.");
+      return;
+    }
+    UINT32 packet_frames = 0;
+    while (SUCCEEDED(audio_test_capture_->GetNextPacketSize(&packet_frames)) &&
+           packet_frames > 0) {
+      BYTE* data = nullptr;
+      UINT32 frames = 0;
+      DWORD flags = 0;
+      if (FAILED(audio_test_capture_->GetBuffer(
+              &data, &frames, &flags, nullptr, nullptr))) {
+        break;
+      }
+      audio_test_capture_->ReleaseBuffer(frames);
+    }
+    float peak = 0;
+    if (FAILED(audio_test_meter_->GetPeakValue(&peak))) {
+      result->Error("AUDIO_INPUT", "The microphone level is unavailable.");
+      return;
+    }
+    result->Success(EncodableValue(static_cast<double>(
+        std::clamp(peak * 2.5f, 0.0f, 1.0f))));
+  }
+
+  void StopAudioInputTestLocked() {
+    if (audio_test_client_ != nullptr) audio_test_client_->Stop();
+    audio_test_meter_.Reset();
+    audio_test_capture_.Reset();
+    audio_test_client_.Reset();
+  }
+
+  void StopAudioInputTest() {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    StopAudioInputTestLocked();
+  }
+
+  void RestorePreferredAudioDevices() {
+    const std::string output_id = LoadRegistryString(kAudioOutputRegistryValue);
+    const std::string input_id = LoadRegistryString(kAudioInputRegistryValue);
+    if (output_id.empty() && input_id.empty()) return;
+    const auto endpoints = ModernAudioEndpoints();
+    for (const auto& endpoint : endpoints) {
+      if (!output_id.empty() && endpoint.can_play && endpoint.id == output_id &&
+          api_.linphone_core_set_output_audio_device != nullptr) {
+        api_.linphone_core_set_output_audio_device(core_, endpoint.device);
+        if (api_.linphone_core_set_ringer_device != nullptr) {
+          api_.linphone_core_set_ringer_device(core_,
+                                                endpoint.native_id.c_str());
+        }
+      }
+      if (!input_id.empty() && endpoint.can_record && endpoint.id == input_id &&
+          api_.linphone_core_set_input_audio_device != nullptr) {
+        api_.linphone_core_set_input_audio_device(core_, endpoint.device);
+      }
+    }
   }
 
   void SendDtmf(const std::string& value, std::unique_ptr<MethodResult> result) {
@@ -1998,7 +2510,27 @@ class LinphoneWindowsBridge::Impl {
     }
     return active_call_ != nullptr && !IsTerminalCall(active_call_)
                ? active_call_
-               : nullptr;
+               : FirstLiveCall();
+  }
+
+  LinphoneCall* FindCall(const std::string& call_id) {
+    if (!call_id.empty()) {
+      const auto found = live_calls_.find(call_id);
+      if (found != live_calls_.end() && !IsTerminalCall(found->second)) {
+        return found->second;
+      }
+      return nullptr;
+    }
+    return CurrentCall();
+  }
+
+  LinphoneCall* FirstLiveCall() {
+    for (const auto& [id, call] : live_calls_) {
+      if (call != nullptr && !IsTerminalCall(call)) {
+        return call;
+      }
+    }
+    return nullptr;
   }
 
   bool IsTerminalCall(const LinphoneCall* call) const {
@@ -2019,6 +2551,7 @@ class LinphoneWindowsBridge::Impl {
       iterate_thread_.join();
     }
     std::lock_guard<std::mutex> lock(core_mutex_);
+    StopAudioInputTestLocked();
     StopPresenceSubscriptionsLocked();
     if (core_ != nullptr) {
       TraceNative("Dispose core stop begin");
@@ -2031,6 +2564,7 @@ class LinphoneWindowsBridge::Impl {
     callbacks_ = nullptr;
     account_ = nullptr;
     active_call_ = nullptr;
+    live_calls_.clear();
     if (active_impl_ == this) {
       active_impl_ = nullptr;
     }
@@ -2117,7 +2651,7 @@ class LinphoneWindowsBridge::Impl {
                             int state,
                             const char* message) {
     if (active_impl_ != nullptr) {
-      active_impl_->EmitCall(call, state);
+      active_impl_->EmitCall(call, state, message);
     }
   }
 
@@ -2189,13 +2723,63 @@ class LinphoneWindowsBridge::Impl {
         SubscriptionStateName(state));
   }
 
-  EncodableMap BuildCallPayload(LinphoneCall* call, int state) {
+  std::string CallTerminationMessage(LinphoneCall* call,
+                                     const char* callback_message) const {
+    std::vector<std::string> messages;
+    const auto append = [&messages](const char* value) {
+      if (value == nullptr || *value == '\0') {
+        return;
+      }
+      const std::string message(value);
+      if (std::find(messages.begin(), messages.end(), message) ==
+          messages.end()) {
+        messages.push_back(message);
+      }
+    };
+    append(callback_message);
+    if (call != nullptr && api_.linphone_call_get_error_info != nullptr) {
+      const LinphoneErrorInfo* error_info =
+          api_.linphone_call_get_error_info(call);
+      if (error_info != nullptr &&
+          api_.linphone_error_info_get_phrase != nullptr) {
+        append(api_.linphone_error_info_get_phrase(error_info));
+      }
+      if (error_info != nullptr &&
+          api_.linphone_error_info_get_sub_error_info != nullptr) {
+        const LinphoneErrorInfo* sub_error_info =
+            api_.linphone_error_info_get_sub_error_info(error_info);
+        if (sub_error_info != nullptr &&
+            api_.linphone_error_info_get_phrase != nullptr) {
+          append(api_.linphone_error_info_get_phrase(sub_error_info));
+        }
+      }
+    }
+    std::string result;
+    for (const auto& message : messages) {
+      if (!result.empty()) {
+        result += " | ";
+      }
+      result += message;
+    }
+    return result;
+  }
+
+  EncodableMap BuildCallPayload(LinphoneCall* call,
+                                int state,
+                                const char* state_message = nullptr) {
     if (call == nullptr) {
       return {{EncodableValue("status"),
                EncodableValue(std::string("none"))}};
     }
     const bool terminal = state == 13 || state == 14 || state == 19;
-    active_call_ = terminal ? nullptr : call;
+    const std::string call_id = PointerId(call);
+    if (terminal) {
+      live_calls_.erase(call_id);
+      if (active_call_ == call) active_call_ = FirstLiveCall();
+    } else {
+      live_calls_[call_id] = call;
+      active_call_ = call;
+    }
     std::string remote_uri;
     std::string remote_name;
     const LinphoneAddress* remote_address = nullptr;
@@ -2236,6 +2820,15 @@ class LinphoneWindowsBridge::Impl {
       }
       const auto selected = endpoint->find(EncodableValue("selected"));
       const auto id = endpoint->find(EncodableValue("id"));
+      const auto endpoint_direction =
+          endpoint->find(EncodableValue("direction"));
+      if (endpoint_direction != endpoint->end()) {
+        const auto* value =
+            std::get_if<std::string>(&endpoint_direction->second);
+        if (value != nullptr && *value != "output") {
+          continue;
+        }
+      }
       if (selected != endpoint->end() && id != endpoint->end() &&
           std::get_if<bool>(&selected->second) != nullptr &&
           *std::get_if<bool>(&selected->second)) {
@@ -2246,7 +2839,9 @@ class LinphoneWindowsBridge::Impl {
       }
     }
     const auto call_status = CallStatus(state);
-    TraceNative("Call state id=" + PointerId(call) +
+    const auto termination_message =
+        CallTerminationMessage(call, state_message);
+    TraceNative("Call state id=" + call_id +
                 " direction=" + direction +
                 " state=" + std::to_string(state) +
                 " status=" + call_status);
@@ -2270,13 +2865,15 @@ class LinphoneWindowsBridge::Impl {
       dnd_declined_incoming_call_ = nullptr;
       owner_->ClearIncomingCallNotification();
     }
-    return EncodableMap{{EncodableValue("id"), EncodableValue(PointerId(call))},
+    return EncodableMap{{EncodableValue("id"), EncodableValue(call_id)},
                      {EncodableValue("remoteUri"), EncodableValue(remote_uri)},
                      {EncodableValue("remoteDisplayName"),
                       EncodableValue(remote_name)},
                      {EncodableValue("direction"),
                       EncodableValue(direction)},
                      {EncodableValue("status"), EncodableValue(call_status)},
+                     {EncodableValue("stateMessage"),
+                      EncodableValue(termination_message)},
                      {EncodableValue("isMuted"), EncodableValue(false)},
                      {EncodableValue("isSpeakerEnabled"),
                       EncodableValue(audio_route == "speaker")},
@@ -2290,11 +2887,14 @@ class LinphoneWindowsBridge::Impl {
                       EncodableValue(audio_endpoints)}};
   }
 
-  void EmitCall(LinphoneCall* call, int state) {
+  void EmitCall(LinphoneCall* call,
+                int state,
+                const char* state_message = nullptr) {
     if (call == nullptr) {
       return;
     }
-    owner_->EnqueueEvent("calls", BuildCallPayload(call, state));
+    owner_->EnqueueEvent("calls",
+                         BuildCallPayload(call, state, state_message));
   }
 
   LinphoneWindowsBridge* owner_;
@@ -2303,6 +2903,7 @@ class LinphoneWindowsBridge::Impl {
   LinphoneCoreCbs* callbacks_ = nullptr;
   LinphoneAccount* account_ = nullptr;
   LinphoneCall* active_call_ = nullptr;
+  std::unordered_map<std::string, LinphoneCall*> live_calls_;
   LinphoneCall* notified_incoming_call_ = nullptr;
   LinphoneCall* dnd_declined_incoming_call_ = nullptr;
   std::unordered_map<LinphoneEvent*,
@@ -2310,6 +2911,9 @@ class LinphoneWindowsBridge::Impl {
       presence_subscriptions_;
   std::string sip_domain_;
   std::mutex core_mutex_;
+  ComPtr<IAudioClient> audio_test_client_;
+  ComPtr<IAudioCaptureClient> audio_test_capture_;
+  ComPtr<IAudioMeterInformation> audio_test_meter_;
   bool first_iterate_completed_ = false;
   bool device_dnd_enabled_ = false;
   std::atomic<bool> iterate_running_{false};
@@ -2323,6 +2927,7 @@ class LinphoneWindowsBridge::Impl {
   std::unique_ptr<EventSink> call_sink_;
   std::unique_ptr<EventSink> message_sink_;
   std::unique_ptr<EventSink> presence_sink_;
+  std::vector<EncodableMap> detached_call_events_;
 };
 
 LinphoneWindowsBridge::Impl* LinphoneWindowsBridge::Impl::active_impl_ =
@@ -2399,7 +3004,9 @@ void LinphoneWindowsBridge::ShowIncomingCallNotification(
   notification.uFlags = NIF_INFO;
   // Do not use NIIF_RESPECT_QUIET_TIME for a real-time incoming call. Windows
   // discards (rather than queues) balloons suppressed by that flag.
-  notification.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON;
+  // Linphone owns the looping call ringtone. Keep the Windows notification
+  // visual-only so a one-shot system sound cannot overlap or mask it.
+  notification.dwInfoFlags = NIIF_USER | NIIF_LARGE_ICON | NIIF_NOSOUND;
   wcscpy_s(notification.szInfoTitle, L"Incoming VoipCloud call");
   const auto caller_wide = Utf8ToWide(caller);
   wcsncpy_s(notification.szInfo, caller_wide.c_str(), _TRUNCATE);
@@ -2430,4 +3037,33 @@ void LinphoneWindowsBridge::ClearIncomingCallNotification() {
   notification.szInfo[0] = L'\0';
   notification.szInfoTitle[0] = L'\0';
   Shell_NotifyIcon(NIM_MODIFY, &notification);
+}
+
+void LinphoneWindowsBridge::SetAppBadgeCount(int raw_count) {
+  if (window_ == nullptr) {
+    return;
+  }
+  ITaskbarList3* taskbar = nullptr;
+  const HRESULT created = CoCreateInstance(
+      CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+      IID_PPV_ARGS(&taskbar));
+  if (FAILED(created) || taskbar == nullptr) {
+    TraceNative("App badge taskbar interface unavailable");
+    return;
+  }
+  if (FAILED(taskbar->HrInit())) {
+    taskbar->Release();
+    TraceNative("App badge taskbar initialization failed");
+    return;
+  }
+
+  const int count = std::max(raw_count, 0);
+  HICON icon = count == 0 ? nullptr : CreateBadgeOverlayIcon(count);
+  const std::wstring description =
+      count == 0 ? L"" : std::to_wstring(count) + L" unread items";
+  taskbar->SetOverlayIcon(window_, icon, description.c_str());
+  taskbar->Release();
+  if (icon != nullptr) {
+    DestroyIcon(icon);
+  }
 }

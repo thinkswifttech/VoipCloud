@@ -9,9 +9,10 @@ import '../domain/call_history_item.dart';
 import '../domain/call_history_repository.dart';
 
 class LocalCallHistoryRepository implements CallHistoryRepository {
-  const LocalCallHistoryRepository(this._storage);
+  LocalCallHistoryRepository(this._storage);
 
   final SecureStorageService _storage;
+  Future<void> _writeSerial = Future<void>.value();
 
   @override
   Future<List<CallHistoryItem>> getCallHistory() async {
@@ -47,8 +48,36 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
   @override
   Future<CallHistoryItem> syncCallLog({
     required String remoteNumber,
+    String? remoteDisplayName,
     required CallDirection direction,
     required CallStatus status,
+    required CallHistoryDisposition disposition,
+    required DateTime startedAt,
+    DateTime? endedAt,
+    String? sipCallId,
+  }) {
+    final operation = _writeSerial.then(
+      (_) => _syncCallLog(
+        remoteNumber: remoteNumber,
+        remoteDisplayName: remoteDisplayName,
+        direction: direction,
+        status: status,
+        disposition: disposition,
+        startedAt: startedAt,
+        endedAt: endedAt,
+        sipCallId: sipCallId,
+      ),
+    );
+    _writeSerial = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
+  }
+
+  Future<CallHistoryItem> _syncCallLog({
+    required String remoteNumber,
+    String? remoteDisplayName,
+    required CallDirection direction,
+    required CallStatus status,
+    required CallHistoryDisposition disposition,
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
@@ -59,8 +88,10 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
     final item = CallHistoryItem(
       id: id,
       remoteNumber: remoteNumber,
+      remoteDisplayName: remoteDisplayName,
       direction: direction,
       status: status,
+      disposition: disposition,
       startedAt: startedAt,
       endedAt: endedAt,
     );
