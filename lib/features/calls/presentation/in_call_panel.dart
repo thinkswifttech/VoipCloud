@@ -196,6 +196,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                   call,
                   identity,
                   displayName,
+                  desktopLayout: acceptsKeyboardInput,
                   heldCall: heldCall,
                   heldIdentity: heldIdentity,
                 ),
@@ -209,6 +210,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     VoipCall call,
     CallerIdentity identity,
     String displayName, {
+    required bool desktopLayout,
     VoipCall? heldCall,
     CallerIdentity? heldIdentity,
   }) {
@@ -225,6 +227,12 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
         final veryShort = constraints.maxHeight < 500;
         final narrow = constraints.maxWidth < 380;
         final dense = short || narrow;
+        // A typical phone is narrower than 380 logical pixels, but that alone
+        // should not force call controls down to desktop-compact sizing. Keep
+        // the larger, touch-first controls unless vertical space is genuinely
+        // constrained.
+        final compactActions = desktopLayout ? dense : veryShort;
+        final prominentMobileActions = !desktopLayout && !veryShort;
         final actionGap = dense ? 8.0 : 14.0;
         final transferAvailable =
             ref.watch(sessionControllerProvider).value?.directoryAccess != null;
@@ -234,12 +242,14 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             icon: call.isMuted ? AppIcons.muteOff : AppIcons.muteOn,
             label: 'Mute',
             selected: call.isMuted,
-            compact: dense,
+            compact: compactActions,
+            prominent: prominentMobileActions,
             onPressed: () => unawaited(_setMuted(call)),
           ),
           _AudioRouteAction(
             route: call.audioRoute,
-            compact: dense,
+            compact: compactActions,
+            prominent: prominentMobileActions,
             onPressed: () => showAudioRoutePicker(
               context: context,
               ref: ref,
@@ -250,13 +260,15 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             icon: AppIcons.hold,
             label: 'Hold',
             selected: call.status == CallStatus.held,
-            compact: dense,
+            compact: compactActions,
+            prominent: prominentMobileActions,
             onPressed: () => unawaited(_toggleHold(context, call)),
           ),
           _CallAction(
             icon: AppIcons.navDialer,
             label: 'Dialpad',
-            compact: dense,
+            compact: compactActions,
+            prominent: prominentMobileActions,
             onPressed: () => setState(() {
               _showKeypad = true;
               _setProximity(false);
@@ -266,7 +278,8 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             _CallAction(
               icon: AppIcons.callForward,
               label: 'Transfer',
-              compact: dense,
+              compact: compactActions,
+              prominent: prominentMobileActions,
               onPressed: () {
                 ref.read(callTransferModeProvider.notifier).begin();
                 context.go(RoutePaths.directory);
@@ -364,13 +377,19 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                                   ),
                           ),
                           SizedBox(height: veryShort ? 10 : (short ? 16 : 30)),
-                          Wrap(
-                            alignment: WrapAlignment.center,
-                            runAlignment: WrapAlignment.center,
-                            spacing: actionGap,
-                            runSpacing: dense ? 10 : 18,
-                            children: actions,
-                          ),
+                          if (desktopLayout)
+                            Wrap(
+                              alignment: WrapAlignment.center,
+                              runAlignment: WrapAlignment.center,
+                              spacing: actionGap,
+                              runSpacing: dense ? 10 : 18,
+                              children: actions,
+                            )
+                          else
+                            _MobileCallActions(
+                              actions: actions,
+                              compact: compactActions,
+                            ),
                           if (!short) const Spacer(),
                         ],
                       ),
@@ -738,6 +757,45 @@ class _HeldCallCard extends StatelessWidget {
   }
 }
 
+/// Preserves the established phone control layout: three primary actions on
+/// the first row and the remaining actions centered below. Desktop keeps the
+/// adaptive wrap used for resizable windows and concurrent-call cards.
+class _MobileCallActions extends StatelessWidget {
+  const _MobileCallActions({required this.actions, required this.compact});
+
+  final List<Widget> actions;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final firstRow = actions.take(3).toList(growable: false);
+    final secondRow = actions.skip(3).toList(growable: false);
+    final spacing = compact ? 8.0 : 14.0;
+
+    Widget row(List<Widget> children) => Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (var index = 0; index < children.length; index++) ...[
+          if (index > 0) SizedBox(width: spacing),
+          children[index],
+        ],
+      ],
+    );
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        row(firstRow),
+        if (secondRow.isNotEmpty) ...[
+          SizedBox(height: compact ? 10 : 18),
+          row(secondRow),
+        ],
+      ],
+    );
+  }
+}
+
 class _CallQualityHeader extends StatelessWidget {
   const _CallQualityHeader({
     required this.bars,
@@ -932,6 +990,7 @@ class _CallAction extends StatelessWidget {
     required this.label,
     this.selected = false,
     this.compact = false,
+    this.prominent = false,
     required this.onPressed,
   });
 
@@ -939,21 +998,23 @@ class _CallAction extends StatelessWidget {
   final String label;
   final bool selected;
   final bool compact;
+  final bool prominent;
   final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    final buttonSize = compact ? 54.0 : 64.0;
+    final buttonSize = compact ? 54.0 : (prominent ? 76.0 : 64.0);
+    final itemWidth = compact ? 66.0 : (prominent ? 88.0 : 76.0);
     return SizedBox(
-      width: compact ? 66 : 76,
+      width: itemWidth,
       child: Column(
         children: [
           IconButton(
             tooltip: label,
             onPressed: onPressed,
-            icon: Icon(icon),
+            icon: Icon(icon, size: prominent ? 30 : null),
             style: IconButton.styleFrom(
               fixedSize: Size.square(buttonSize),
               backgroundColor: selected
@@ -969,10 +1030,14 @@ class _CallAction extends StatelessWidget {
             label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              letterSpacing: 0,
-            ),
+            style:
+                (prominent
+                        ? theme.textTheme.bodyMedium
+                        : theme.textTheme.labelMedium)
+                    ?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      letterSpacing: 0,
+                    ),
             textAlign: TextAlign.center,
           ),
         ],
@@ -989,20 +1054,23 @@ class _AudioRouteAction extends StatelessWidget {
     required this.route,
     required this.onPressed,
     this.compact = false,
+    this.prominent = false,
   });
 
   final AudioOutputRoute route;
   final VoidCallback onPressed;
   final bool compact;
+  final bool prominent;
 
   @override
   Widget build(BuildContext context) {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       final theme = Theme.of(context);
       final selected = route != AudioOutputRoute.earpiece;
-      final buttonSize = compact ? 54.0 : 64.0;
+      final buttonSize = compact ? 54.0 : (prominent ? 76.0 : 64.0);
+      final itemWidth = compact ? 66.0 : (prominent ? 88.0 : 76.0);
       return SizedBox(
-        width: compact ? 66 : 76,
+        width: itemWidth,
         child: Column(
           children: [
             SizedBox.square(
@@ -1014,7 +1082,10 @@ class _AudioRouteAction extends StatelessWidget {
                     child: IconButton(
                       tooltip: 'Audio',
                       onPressed: () {},
-                      icon: Icon(_audioRouteIcon(route)),
+                      icon: Icon(
+                        _audioRouteIcon(route),
+                        size: prominent ? 30 : null,
+                      ),
                       style: IconButton.styleFrom(
                         fixedSize: Size.square(buttonSize),
                         backgroundColor: selected
@@ -1034,10 +1105,14 @@ class _AudioRouteAction extends StatelessWidget {
             Text(
               'Audio',
               maxLines: 1,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                letterSpacing: 0,
-              ),
+              style:
+                  (prominent
+                          ? theme.textTheme.bodyMedium
+                          : theme.textTheme.labelMedium)
+                      ?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        letterSpacing: 0,
+                      ),
               textAlign: TextAlign.center,
             ),
           ],
@@ -1050,6 +1125,7 @@ class _AudioRouteAction extends StatelessWidget {
       label: 'Audio',
       selected: route != AudioOutputRoute.earpiece,
       compact: compact,
+      prominent: prominent,
       onPressed: onPressed,
     );
   }
