@@ -13,6 +13,8 @@ abstract interface class MessagingRepository {
   /// Maximum concatenated SMS segments accepted by the active carrier route.
   int get maxOutboundSmsSegments;
 
+  bool get outboundSmsUsesIndependentParts;
+
   int get maxOutboundAttachmentBytes;
 
   Set<String> get outboundAttachmentMimeTypes;

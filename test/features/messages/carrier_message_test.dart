@@ -2,6 +2,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/features/messages/domain/carrier_message.dart';
 
 void main() {
+  test('parses multipart sending progress', () {
+    final message = CarrierMessage.fromJson({
+      'id': 'message-1',
+      'direction': 'outbound',
+      'to_e164': '+14165550123',
+      'body': 'Long message',
+      'state': 'sending',
+      'segment_count': 5,
+      'segments_submitted': 2,
+      'created_at': '2026-09-22T16:00:00Z',
+    });
+
+    expect(message.segmentCount, 5);
+    expect(message.segmentsSubmitted, 2);
+  });
+
   test('parses an inbound server message and MMS metadata', () {
     final message = CarrierMessage.fromJson({
       'id': 'message-1',

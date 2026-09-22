@@ -99,6 +99,48 @@ void main() {
     },
   );
 
+  test(
+    'uses the safe logical-message ceiling when the server omits it',
+    () async {
+      final fixture = await _fixture(canSend: true, maxSmsSegments: null);
+      await fixture.repository.loadInbox(config: config);
+
+      expect(fixture.repository.maxOutboundSmsSegments, 10);
+      await fixture.repository.sendMessage(
+        config: config,
+        destination: '+14165550123',
+        text: 'a' * 161,
+        clientId: 'missing-limit-capability',
+      );
+      expect(fixture.adapter.lastPostPath, '/api/v1/messaging/messages');
+    },
+  );
+
+  test('uses independent-part accounting advertised by the server', () async {
+    final fixture = await _fixture(
+      canSend: true,
+      maxSmsSegments: 2,
+      independentSmsParts: true,
+    );
+    await fixture.repository.loadInbox(config: config);
+
+    expect(fixture.repository.outboundSmsUsesIndependentParts, isTrue);
+    await expectLater(
+      fixture.repository.sendMessage(
+        config: config,
+        destination: '+14165550123',
+        text: 'a' * 321,
+        clientId: 'independent-parts-over-limit',
+      ),
+      throwsA(
+        isA<MessagingSmsSegmentLimitExceeded>()
+            .having((error) => error.actualSegments, 'actualSegments', 3)
+            .having((error) => error.maximumSegments, 'maximumSegments', 2),
+      ),
+    );
+    expect(fixture.adapter.lastPostPath, isNull);
+  });
+
   test('MMS capability uses authenticated multipart upload endpoint', () async {
     final fixture = await _fixture(canSend: true, canSendMms: true);
     await fixture.repository.loadInbox(config: config);
@@ -343,6 +385,8 @@ void main() {
 Future<_Fixture> _fixture({
   required bool canSend,
   bool canSendMms = false,
+  int? maxSmsSegments = 8,
+  bool independentSmsParts = false,
   MessagingPushRegistration? pushRegistration,
   MessagingOutboxStore? outbox,
   MessagingConnectivity? connectivity,
@@ -351,6 +395,8 @@ Future<_Fixture> _fixture({
   final adapter = _MessagingAdapter(
     canSend: canSend,
     canSendMms: canSendMms,
+    maxSmsSegments: maxSmsSegments,
+    independentSmsParts: independentSmsParts,
     replayTombstones: replayTombstones,
   );
   final dio = Dio(BaseOptions(baseUrl: 'https://messaging.example.test'))
@@ -426,11 +472,15 @@ class _MessagingAdapter implements HttpClientAdapter {
   _MessagingAdapter({
     required this.canSend,
     required this.canSendMms,
+    required this.maxSmsSegments,
+    required this.independentSmsParts,
     required this.replayTombstones,
   });
 
   final bool canSend;
   final bool canSendMms;
+  final int? maxSmsSegments;
+  final bool independentSmsParts;
   final bool replayTombstones;
   int missingMessageLookupCount = 0;
   Object? lastPostData;
@@ -464,7 +514,10 @@ class _MessagingAdapter implements HttpClientAdapter {
         'data': {
           'can_send': canSend,
           'can_send_mms': canSendMms,
-          'outbound_sms_max_segments': 8,
+          if (maxSmsSegments != null)
+            'outbound_sms_max_segments': maxSmsSegments,
+          'outbound_sms_independent_parts': independentSmsParts,
+          'outbound_sms_numbered_parts': false,
           'outbound_mms_max_attachment_bytes': 1300000,
           'outbound_mms_allowed_mime_types': ['image/jpeg', 'image/png'],
         },

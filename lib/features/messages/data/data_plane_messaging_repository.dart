@@ -70,6 +70,7 @@ class DataPlaneMessagingRepository implements MessagingRepository {
   bool _canSend = false;
   bool _canSendMms = false;
   int _maxOutboundSmsSegments = 10;
+  bool _outboundSmsUsesIndependentParts = false;
   int _maxOutboundAttachmentBytes = 1000000;
   Set<String> _outboundAttachmentMimeTypes = const {'image/jpeg'};
 
@@ -84,6 +85,9 @@ class DataPlaneMessagingRepository implements MessagingRepository {
 
   @override
   int get maxOutboundSmsSegments => _maxOutboundSmsSegments;
+
+  @override
+  bool get outboundSmsUsesIndependentParts => _outboundSmsUsesIndependentParts;
 
   @override
   int get maxOutboundAttachmentBytes => _maxOutboundAttachmentBytes;
@@ -136,6 +140,9 @@ class DataPlaneMessagingRepository implements MessagingRepository {
             1,
             255,
           );
+      _outboundSmsUsesIndependentParts =
+          capabilityData['outbound_sms_independent_parts'] == true ||
+          capabilityData['outbound_sms_numbered_parts'] == true;
       _maxOutboundAttachmentBytes =
           _int(capabilityData['outbound_mms_max_attachment_bytes']) ?? 1000000;
       final mimeTypes = capabilityData['outbound_mms_allowed_mime_types'];
@@ -328,8 +335,11 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     OutboundMessageAttachment? attachment,
     void Function(int sent, int total)? onSendProgress,
   }) async {
+    final effectiveText = attachment == null ? smartEncodeSmsText(text) : text;
     if (attachment == null) {
-      final segments = analyzeSmsSegments(text);
+      final segments = _outboundSmsUsesIndependentParts
+          ? analyzeIndependentSmsParts(effectiveText)
+          : analyzeSmsSegments(effectiveText);
       if (!segments.fitsWithin(_maxOutboundSmsSegments)) {
         throw MessagingSmsSegmentLimitExceeded(
           actualSegments: segments.segmentCount,
@@ -353,7 +363,7 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     final item = MessagingOutboxItem(
       clientId: clientId,
       destination: destination,
-      text: text,
+      text: effectiveText,
       createdAt: DateTime.now(),
       attachment: attachment,
     );

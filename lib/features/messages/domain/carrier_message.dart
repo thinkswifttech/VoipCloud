@@ -10,6 +10,8 @@ class CarrierMessage {
     required this.createdAt,
     this.clientId,
     this.errorCode,
+    this.segmentCount = 1,
+    this.segmentsSubmitted = 0,
     this.attachments = const [],
   });
 
@@ -28,6 +30,9 @@ class CarrierMessage {
       id: _string(json['id']),
       clientId: _nullableString(json['clientId'] ?? json['client_id']),
       errorCode: _nullableString(json['errorCode'] ?? json['error_code']),
+      segmentCount: _int(json['segmentCount'] ?? json['segment_count']) ?? 1,
+      segmentsSubmitted:
+          _int(json['segmentsSubmitted'] ?? json['segments_submitted']) ?? 0,
       remoteNumber: explicitRemote.isNotEmpty
           ? explicitRemote
           : _remoteNumber(
@@ -59,6 +64,8 @@ class CarrierMessage {
   final String id;
   final String? clientId;
   final String? errorCode;
+  final int segmentCount;
+  final int segmentsSubmitted;
   final String remoteNumber;
   final MessageDirection direction;
   final String text;

@@ -105,7 +105,13 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final isBlocked = messaging.isBlocked(widget.remoteNumber);
     final draftText = _outboundText(_controller.text.trim(), _replyingTo);
     final smsSegments = _attachment == null && draftText.isNotEmpty
-        ? analyzeSmsSegments(expandSmsEmojiShortcodes(draftText))
+        ? messaging.outboundSmsUsesIndependentParts
+              ? analyzeIndependentSmsParts(
+                  smartEncodeSmsText(expandSmsEmojiShortcodes(draftText)),
+                )
+              : analyzeSmsSegments(
+                  smartEncodeSmsText(expandSmsEmojiShortcodes(draftText)),
+                )
         : null;
     final exceedsSmsLimit =
         smsSegments != null &&
@@ -475,9 +481,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                           duration: const Duration(milliseconds: 180),
                           child: _SmsSegmentCounter(
                             key: ValueKey(
-                              '${smsSegments?.encoding.name}-'
                               '${smsSegments?.segmentCount}-'
-                              '${smsSegments?.unitsRemaining}-'
                               '$exceedsSmsLimit',
                             ),
                             info: smsSegments,
@@ -558,7 +562,10 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            error is AppException
+            error is MessagingSmsSegmentLimitExceeded
+                ? 'This message is too long for the carrier. Keep it within '
+                      '${error.maximumSegments} SMS segment.'
+                : error is AppException
                 ? error.userMessage
                 : 'This message could not be safely retried.',
           ),
@@ -880,15 +887,17 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final attachment = _attachment;
     if (_isSending || (typedText.isEmpty && attachment == null)) return;
     if (attachment == null) {
-      final segments = analyzeSmsSegments(expandSmsEmojiShortcodes(text));
-      final maximum = ref
-          .read(messagesControllerProvider)
-          .maxOutboundSmsSegments;
+      final state = ref.read(messagesControllerProvider);
+      final encoded = smartEncodeSmsText(expandSmsEmojiShortcodes(text));
+      final segments = state.outboundSmsUsesIndependentParts
+          ? analyzeIndependentSmsParts(encoded)
+          : analyzeSmsSegments(encoded);
+      final maximum = state.maxOutboundSmsSegments;
       if (!segments.fitsWithin(maximum)) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              'This message is too long. Keep it within $maximum SMS segments.',
+              'This message is too long. Keep it within $maximum SMS parts.',
             ),
           ),
         );
@@ -934,7 +943,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
           content: Text(
             error is MessagingSmsSegmentLimitExceeded
                 ? 'This message is too long. Keep it within '
-                      '${error.maximumSegments} SMS segments.'
+                      '${error.maximumSegments} SMS parts.'
                 : error is AppException
                 ? error.userMessage
                 : attachment == null
@@ -1012,17 +1021,17 @@ class _SmsSegmentCounter extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final value = info;
-    final shouldShow =
-        value != null && (value.segmentCount > 1 || value.unitsRemaining <= 20);
-    if (!shouldShow) return const SizedBox.shrink();
+    if (value == null || value.segmentCount < 1) {
+      return const SizedBox.shrink();
+    }
 
     final exceedsLimit = !value.fitsWithin(maximumSegments);
     final theme = Theme.of(context);
     final message = exceedsLimit
         ? 'Message is too long (${value.segmentCount} of '
-              '$maximumSegments SMS segments).'
-        : '${value.segmentCount} SMS segments · '
-              '${value.unitsRemaining} remaining in this segment';
+              '$maximumSegments SMS parts).'
+        : '${value.segmentCount} SMS '
+              '${value.segmentCount == 1 ? 'part' : 'parts'}';
     return Padding(
       padding: const EdgeInsets.only(top: 5, right: 52),
       child: Align(
@@ -2102,6 +2111,17 @@ class _MessageMeta extends StatelessWidget {
         ),
         if (status case final value?) ...[
           const SizedBox(width: 4),
+          if (message.status == MessageStatus.sending &&
+              message.segmentCount > 1) ...[
+            Text(
+              '${message.segmentsSubmitted}/${message.segmentCount}',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: foreground,
+                letterSpacing: 0,
+              ),
+            ),
+            const SizedBox(width: 2),
+          ],
           AnimatedSwitcher(
             duration: const Duration(milliseconds: 180),
             transitionBuilder: (child, animation) => FadeTransition(
@@ -2109,7 +2129,11 @@ class _MessageMeta extends StatelessWidget {
               child: ScaleTransition(scale: animation, child: child),
             ),
             child: Tooltip(
-              key: ValueKey(message.status),
+              key: ValueKey((
+                message.status,
+                message.segmentsSubmitted,
+                message.segmentCount,
+              )),
               message: value.label,
               child: Semantics(
                 label: value.label,
@@ -2130,7 +2154,12 @@ class _MessageMeta extends StatelessWidget {
       icon: Icons.hourglass_empty_rounded,
       label: 'Queued',
     ),
-    MessageStatus.sending => (icon: Icons.send_rounded, label: 'Sending'),
+    MessageStatus.sending => (
+      icon: Icons.send_rounded,
+      label: message.segmentCount > 1
+          ? 'Sending ${message.segmentsSubmitted} of ${message.segmentCount}'
+          : 'Sending',
+    ),
     MessageStatus.submitted => (icon: Icons.check, label: 'Submitted'),
     MessageStatus.sent => (icon: Icons.check, label: 'Sent'),
     MessageStatus.delivered => (icon: Icons.done_all, label: 'Delivered'),

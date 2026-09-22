@@ -74,14 +74,38 @@ line, and the response; no private attachment URL or app token is exposed.
 
 A long SMS remains one logical VoIPCloud message. The client submits the full
 body once with one idempotency ID; it must never split the body into separate
-API requests. The carrier adapter/provider applies standard concatenated-SMS
-headers and the recipient handset normally reassembles the transport segments.
-This preserves ordering, retry safety, cross-device synchronization, aggregate
-status, and one bubble in the app.
+API requests. For adapters such as VoIP.ms that accept only one 160-character
+SMS per API submission, the server adapter creates a durable child-part ledger
+and sends unnumbered parts in sequence. It wraps at the last complete word that
+fits; only a single word longer than the provider ceiling may be split. Other
+adapters can retain native concatenated-SMS behavior. The app always presents
+the aggregate as one bubble.
 
 Before enqueueing, the client calculates GSM-7 septets (including extension
-table escapes) or UCS-2/UTF-16 units and applies the standard 160/153 and 70/67
-single/concatenated capacities. The capability response may advertise
-`outbound_sms_max_segments`; the compatibility default is 10. The client
-disables sending above that ceiling, while the server remains authoritative
-and must enforce the same adapter-specific limit before carrier dispatch.
+table escapes) or UCS-2/UTF-16 units. The capability response advertises both
+`outbound_sms_max_segments`, `outbound_sms_independent_parts`, and the legacy
+`outbound_sms_numbered_parts` compatibility flag. This lets the client use the
+same per-request ceilings as the server without adding visible part labels. The
+compatibility default is 10 parts. The server repeats the exact calculation
+before enqueueing and remains authoritative.
+
+Both boundaries apply the same conservative smart encoding before counting or
+storing an SMS. Visually equivalent typography and invisible formatting (for
+example non-breaking spaces, curly quotes, long dashes, and ellipses) are
+converted to GSM-7-safe equivalents. Meaningful Unicode such as emoji,
+accented letters, and non-Latin scripts is preserved. This prevents pasted
+text from needlessly expanding into several UCS-2 submissions without changing
+what the recipient reads.
+
+Each child part has its own stable UUID and encrypted body. The UUID is also
+the control-plane idempotency key. Parts are submitted strictly in order and a
+retry skips every part already accepted by the provider, preventing duplicates
+after a partial outage. Delivery receipts and polling update individual parts
+and project one aggregate status back to the logical message. Provider/carrier
+delivery order cannot be absolutely guaranteed, so submissions remain strictly
+sequential even though their labels are hidden.
+While dispatch is in progress, the server publishes body-free per-part progress
+and the client renders `Sending 2 of 5` on the single logical bubble. Submission
+remains sequential so retries cannot duplicate or reorder already accepted
+parts; smart encoding is the safe latency optimization for ordinary pasted
+text.
