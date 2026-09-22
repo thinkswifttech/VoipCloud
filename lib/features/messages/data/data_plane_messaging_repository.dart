@@ -7,6 +7,7 @@ import '../../../core/errors/app_exception.dart';
 import '../domain/carrier_message.dart';
 import '../domain/carrier_messaging_config.dart';
 import '../domain/messaging_repository.dart';
+import '../domain/sms_segment_info.dart';
 import 'messaging_api_client.dart';
 import 'messaging_attachment_cache.dart';
 import 'messaging_connectivity.dart';
@@ -68,6 +69,7 @@ class DataPlaneMessagingRepository implements MessagingRepository {
   bool _realtimeStarted = false;
   bool _canSend = false;
   bool _canSendMms = false;
+  int _maxOutboundSmsSegments = 10;
   int _maxOutboundAttachmentBytes = 1000000;
   Set<String> _outboundAttachmentMimeTypes = const {'image/jpeg'};
 
@@ -79,6 +81,9 @@ class DataPlaneMessagingRepository implements MessagingRepository {
 
   @override
   bool get canSendMms => _canSendMms;
+
+  @override
+  int get maxOutboundSmsSegments => _maxOutboundSmsSegments;
 
   @override
   int get maxOutboundAttachmentBytes => _maxOutboundAttachmentBytes;
@@ -126,6 +131,11 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     _canSendMms =
         capabilityData is Map && capabilityData['can_send_mms'] == true;
     if (capabilityData is Map) {
+      _maxOutboundSmsSegments =
+          (_int(capabilityData['outbound_sms_max_segments']) ?? 10).clamp(
+            1,
+            255,
+          );
       _maxOutboundAttachmentBytes =
           _int(capabilityData['outbound_mms_max_attachment_bytes']) ?? 1000000;
       final mimeTypes = capabilityData['outbound_mms_allowed_mime_types'];
@@ -318,6 +328,15 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     OutboundMessageAttachment? attachment,
     void Function(int sent, int total)? onSendProgress,
   }) async {
+    if (attachment == null) {
+      final segments = analyzeSmsSegments(text);
+      if (!segments.fitsWithin(_maxOutboundSmsSegments)) {
+        throw MessagingSmsSegmentLimitExceeded(
+          actualSegments: segments.segmentCount,
+          maximumSegments: _maxOutboundSmsSegments,
+        );
+      }
+    }
     if (!_canSend) throw const MessagingOutboundUnavailable();
     if (attachment != null && !_canSendMms) {
       throw const MessagingOutboundUnavailable();

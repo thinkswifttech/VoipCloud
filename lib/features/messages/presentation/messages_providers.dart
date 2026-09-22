@@ -9,6 +9,7 @@ import '../domain/carrier_messaging_config.dart';
 import '../domain/messaging_platform.dart';
 import '../domain/messaging_repository.dart';
 import '../domain/sms_compatibility.dart';
+import '../domain/sms_segment_info.dart';
 import 'initial_inbox_reconciler.dart';
 import 'refreshed_conversation_reconciler.dart';
 
@@ -33,6 +34,7 @@ class MessagesState {
     this.blocksByRemoteNumber = const {},
     this.transportCanSend = false,
     this.transportCanSendMms = false,
+    this.maxOutboundSmsSegments = 10,
     this.maxOutboundAttachmentBytes = 1000000,
     this.outboundAttachmentMimeTypes = const {'image/jpeg'},
     this.nextConversationCursor,
@@ -50,6 +52,7 @@ class MessagesState {
   final Map<String, MessagingBlock> blocksByRemoteNumber;
   final bool transportCanSend;
   final bool transportCanSendMms;
+  final int maxOutboundSmsSegments;
   final int maxOutboundAttachmentBytes;
   final Set<String> outboundAttachmentMimeTypes;
   final String? nextConversationCursor;
@@ -75,6 +78,7 @@ class MessagesState {
     Map<String, MessagingBlock>? blocksByRemoteNumber,
     bool? transportCanSend,
     bool? transportCanSendMms,
+    int? maxOutboundSmsSegments,
     int? maxOutboundAttachmentBytes,
     Set<String>? outboundAttachmentMimeTypes,
     String? nextConversationCursor,
@@ -94,6 +98,8 @@ class MessagesState {
       blocksByRemoteNumber: blocksByRemoteNumber ?? this.blocksByRemoteNumber,
       transportCanSend: transportCanSend ?? this.transportCanSend,
       transportCanSendMms: transportCanSendMms ?? this.transportCanSendMms,
+      maxOutboundSmsSegments:
+          maxOutboundSmsSegments ?? this.maxOutboundSmsSegments,
       maxOutboundAttachmentBytes:
           maxOutboundAttachmentBytes ?? this.maxOutboundAttachmentBytes,
       outboundAttachmentMimeTypes:
@@ -175,6 +181,7 @@ class MessagesController extends Notifier<MessagesState> {
           : availability,
       transportCanSend: repository.canSend,
       transportCanSendMms: repository.canSendMms,
+      maxOutboundSmsSegments: repository.maxOutboundSmsSegments,
       maxOutboundAttachmentBytes: repository.maxOutboundAttachmentBytes,
       outboundAttachmentMimeTypes: repository.outboundAttachmentMimeTypes,
     );
@@ -443,6 +450,15 @@ class MessagesController extends Notifier<MessagesState> {
     if (normalizedDestination.isEmpty ||
         (trimmed.isEmpty && attachment == null)) {
       throw const FormatException('A valid public phone number is required.');
+    }
+    if (attachment == null) {
+      final segments = analyzeSmsSegments(trimmed);
+      if (!segments.fitsWithin(state.maxOutboundSmsSegments)) {
+        throw MessagingSmsSegmentLimitExceeded(
+          actualSegments: segments.segmentCount,
+          maximumSegments: state.maxOutboundSmsSegments,
+        );
+      }
     }
 
     final effectiveClientId =
@@ -749,6 +765,7 @@ class MessagesController extends Notifier<MessagesState> {
         blocksByRemoteNumber: inbox.blocksByRemoteNumber,
         transportCanSend: repository.canSend,
         transportCanSendMms: repository.canSendMms,
+        maxOutboundSmsSegments: repository.maxOutboundSmsSegments,
         maxOutboundAttachmentBytes: repository.maxOutboundAttachmentBytes,
         outboundAttachmentMimeTypes: repository.outboundAttachmentMimeTypes,
         nextConversationCursor: inbox.nextCursor,

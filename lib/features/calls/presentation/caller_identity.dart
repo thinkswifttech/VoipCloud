@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../../contacts/domain/contact.dart';
+import '../../contacts/domain/quick_dial_entry.dart';
 import '../../directory/domain/directory_entry.dart';
 import '../domain/voip_call.dart';
 
@@ -60,6 +61,7 @@ CallerIdentity resolveRemoteIdentity({
   String? remoteDisplayName,
   required List<Contact> contacts,
   required List<DirectoryEntry> directory,
+  List<QuickDialEntry> quickDial = const [],
 }) {
   final remoteDisplay = remoteDisplayName?.trim() ?? '';
   final number = _identityNumber(
@@ -87,6 +89,25 @@ CallerIdentity resolveRemoteIdentity({
             label: number,
             number: number,
             photo: contact.photo,
+          );
+        }
+      }
+    }
+
+    for (final entry in quickDial) {
+      final normalized = _identityNumber(entry.number);
+      if (normalized.isNotEmpty && _numbersMatch(number, normalized)) {
+        final name = entry.displayName.trim();
+        if (name.isNotEmpty) {
+          return CallerIdentity(
+            label: _withQueuePrefix(
+              name,
+              number,
+              sourceDisplayName: remoteDisplay,
+            ),
+            number: number,
+            isResolvedName: true,
+            photo: entry.photoBytes,
           );
         }
       }

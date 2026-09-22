@@ -132,6 +132,21 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   }
 }
 
+private enum DesktopAudioVolumeStore {
+  static let microphoneKey = "voipcloud_microphone_volume"
+  static let callAudioKey = "voipcloud_call_audio_volume"
+  static let ringtoneKey = "voipcloud_ringtone_volume"
+
+  static func level(for key: String) -> Int {
+    guard UserDefaults.standard.object(forKey: key) != nil else { return 100 }
+    return min(100, max(0, UserDefaults.standard.integer(forKey: key)))
+  }
+
+  static func set(_ level: Int, for key: String) {
+    UserDefaults.standard.set(min(100, max(0, level)), forKey: key)
+  }
+}
+
 private protocol LinphoneController {
   func handle(call: FlutterMethodCall, result: @escaping FlutterResult)
 }
@@ -181,6 +196,8 @@ private final class UnavailableLinphoneController: LinphoneController {
          "getAudioRoutes",
          "setAudioRoute",
          "setAudioInputDevice",
+         "getAudioVolumeLevels",
+         "setAudioVolume",
          "playAudioTestSound",
          "startAudioInputTest",
          "getAudioInputLevel",
@@ -353,6 +370,11 @@ private final class NativeLinphoneController: LinphoneController {
         result(try setAudioInputEndpoint(
           endpointId: args?["endpointId"] as? String
         ))
+      case "getAudioVolumeLevels":
+        result(audioVolumeLevels())
+      case "setAudioVolume":
+        try setAudioVolume(call: call)
+        result(nil)
       case "playAudioTestSound":
         try playAudioTestSound()
         result(nil)
@@ -424,6 +446,7 @@ private final class NativeLinphoneController: LinphoneController {
     newCore.micEnabled = true
     newCore.config?.setInt(section: "sip", key: "inactive_audio_on_pause", value: 0)
     newCore.avpfMode = .Disabled
+    restoreAudioVolumes(on: newCore)
 
     let newDelegate = CoreDelegateStub(
       onCallStateChanged: { [weak self] _, call, state, message in
@@ -1218,6 +1241,70 @@ private final class NativeLinphoneController: LinphoneController {
       selectedAudioInputEndpointId = preferredInput
       currentCore.defaultInputAudioDevice = device
       currentCore.inputAudioDevice = device
+    }
+  }
+
+  private func gainDb(for level: Int) -> Float {
+    let clamped = min(100, max(0, level))
+    guard clamped > 0 else { return -80 }
+    return 20 * log10(Float(clamped) / 100)
+  }
+
+  private func audioVolumeLevels() -> [String: Int] {
+    return [
+      "microphone": DesktopAudioVolumeStore.level(
+        for: DesktopAudioVolumeStore.microphoneKey
+      ),
+      "callAudio": DesktopAudioVolumeStore.level(
+        for: DesktopAudioVolumeStore.callAudioKey
+      ),
+      "ringtone": DesktopAudioVolumeStore.level(
+        for: DesktopAudioVolumeStore.ringtoneKey
+      )
+    ]
+  }
+
+  private func restoreAudioVolumes(on currentCore: Core) {
+    currentCore.micGainDb = gainDb(for: DesktopAudioVolumeStore.level(
+      for: DesktopAudioVolumeStore.microphoneKey
+    ))
+    currentCore.playbackGainDb = gainDb(for: DesktopAudioVolumeStore.level(
+      for: DesktopAudioVolumeStore.callAudioKey
+    ))
+    currentCore.config?.setInt(
+      section: "sound",
+      key: "ring_level",
+      value: DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.ringtoneKey)
+    )
+  }
+
+  private func setAudioVolume(call: FlutterMethodCall) throws {
+    guard let currentCore = core else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1402,
+        userInfo: [NSLocalizedDescriptionKey: "The audio engine is unavailable."]
+      )
+    }
+    let args = call.arguments as? [String: Any] ?? [:]
+    let kind = args["kind"] as? String ?? ""
+    let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue ?? 100))
+    switch kind {
+    case "microphone":
+      DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.microphoneKey)
+      currentCore.micGainDb = gainDb(for: level)
+    case "callAudio":
+      DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.callAudioKey)
+      currentCore.playbackGainDb = gainDb(for: level)
+    case "ringtone":
+      DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.ringtoneKey)
+      currentCore.config?.setInt(section: "sound", key: "ring_level", value: level)
+    default:
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1403,
+        userInfo: [NSLocalizedDescriptionKey: "Unknown desktop audio volume control."]
+      )
     }
   }
 

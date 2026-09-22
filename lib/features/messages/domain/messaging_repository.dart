@@ -10,6 +10,9 @@ abstract interface class MessagingRepository {
 
   bool get canSendMms;
 
+  /// Maximum concatenated SMS segments accepted by the active carrier route.
+  int get maxOutboundSmsSegments;
+
   int get maxOutboundAttachmentBytes;
 
   Set<String> get outboundAttachmentMimeTypes;
@@ -163,4 +166,18 @@ class MessagingOutboundUnavailable implements Exception {
 
   @override
   String toString() => 'Outbound carrier messaging is not enabled.';
+}
+
+class MessagingSmsSegmentLimitExceeded implements Exception {
+  const MessagingSmsSegmentLimitExceeded({
+    required this.actualSegments,
+    required this.maximumSegments,
+  });
+
+  final int actualSegments;
+  final int maximumSegments;
+
+  @override
+  String toString() =>
+      'Message needs $actualSegments SMS segments; maximum is $maximumSegments.';
 }

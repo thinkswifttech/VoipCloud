@@ -15,6 +15,9 @@ class UnconfiguredMessagingRepository implements MessagingRepository {
   bool get canSendMms => false;
 
   @override
+  int get maxOutboundSmsSegments => 10;
+
+  @override
   int get maxOutboundAttachmentBytes => 1000000;
 
   @override

@@ -1,17 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Fragment>
-    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" />
-    <Property Id="LAUNCH_VOIPCLOUD" Value="1" />
-    <Property Id="OFFER_TASKBAR_PIN" Value="1" />
+    <!-- Install-time choices must cross the elevated MSI boundary. -->
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes" />
+    <Property Id="START_WITH_WINDOWS" Value="1" Secure="yes" />
 
-    <CustomAction
-      Id="LaunchVoipCloud"
-      FileKey="CM_FP_VoipCloud.exe"
-      ExeCommand=""
-      Execute="immediate"
-      Impersonate="yes"
-      Return="asyncNoWait" />
+    <!-- WiX renders this standard option on the completed page. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property
+      Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+      Value="Launch VoipCloud" />
+
     <CustomAction
       Id="LaunchVoipCloudWithPinOffer"
       FileKey="CM_FP_VoipCloud.exe"
@@ -31,13 +30,21 @@
       <DialogRef Id="BrowseDlg" />
       <DialogRef Id="DiskCostDlg" />
       <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="ExitDialog" />
       <DialogRef Id="FatalError" />
       <DialogRef Id="FilesInUse" />
+      <DialogRef Id="InstallDirDlg" />
+      <DialogRef Id="InvalidDirDlg" />
+      <DialogRef Id="MaintenanceTypeDlg" />
+      <DialogRef Id="MaintenanceWelcomeDlg" />
       <DialogRef Id="MsiRMFilesInUse" />
       <DialogRef Id="PrepareDlg" />
       <DialogRef Id="ProgressDlg" />
       <DialogRef Id="ResumeDlg" />
       <DialogRef Id="UserExit" />
+      <DialogRef Id="VerifyReadyDlg" />
+      <DialogRef Id="WaitForCostingDlg" />
+      <DialogRef Id="WelcomeDlg" />
 
       <Dialog
         Id="VoipCloudOptionsDlg"
@@ -64,7 +71,7 @@
           Height="24"
           Transparent="yes"
           NoPrefix="yes"
-          Text="Choose how VoipCloud should be set up. These options are selected by default." />
+          Text="Choose shortcut and Windows sign-in behavior. You can launch VoipCloud after setup from the completed page." />
         <Control
           Id="DesktopShortcut"
           Type="CheckBox"
@@ -76,25 +83,15 @@
           CheckBoxValue="1"
           Text="Create a desktop shortcut" />
         <Control
-          Id="LaunchApplication"
+          Id="StartWithWindows"
           Type="CheckBox"
           X="30"
           Y="105"
           Width="310"
           Height="18"
-          Property="LAUNCH_VOIPCLOUD"
+          Property="START_WITH_WINDOWS"
           CheckBoxValue="1"
-          Text="Launch VoipCloud after installation" />
-        <Control
-          Id="OfferTaskbarPin"
-          Type="CheckBox"
-          X="30"
-          Y="135"
-          Width="310"
-          Height="18"
-          Property="OFFER_TASKBAR_PIN"
-          CheckBoxValue="1"
-          Text="Offer to pin VoipCloud to the taskbar after launch" />
+          Text="Start VoipCloud when I sign in to Windows" />
         <Control
           Id="Back"
           Type="PushButton"
@@ -132,8 +129,7 @@
       <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath" Order="3">1</Publish>
       <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
 
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloudWithPinOffer" Order="1"><![CDATA[REMOVE <> "ALL" AND OFFER_TASKBAR_PIN = "1"]]></Publish>
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloud" Order="2"><![CDATA[REMOVE <> "ALL" AND OFFER_TASKBAR_PIN <> "1" AND LAUNCH_VOIPCLOUD = "1"]]></Publish>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchVoipCloudWithPinOffer" Order="1"><![CDATA[NOT Installed AND REMOVE <> "ALL" AND WIXUI_EXITDIALOGOPTIONALCHECKBOX = "1"]]></Publish>
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
 
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg">NOT Installed</Publish>
@@ -160,5 +156,32 @@
     </UI>
 
     <UIRef Id="WixUI_Common" />
+
+    <!--
+      A per-user Run entry is more reliable than trying to launch an elevated
+      installer process at sign-in. The background launch argument keeps the
+      app in the tray while preserving SIP registration and incoming-call
+      availability. Keep this component in the UI-rooted fragment so WiX does
+      not discard it as an unreferenced section.
+    -->
+    <DirectoryRef Id="INSTALL_ROOT">
+      <Component
+        Id="VoipCloudAutoStart"
+        Guid="5D1A9B6E-12E2-4A7F-B00D-07C7784E1C84"
+        Win64="yes">
+        <Condition>START_WITH_WINDOWS = "1"</Condition>
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="VoipCloud"
+          Type="string"
+          Value="&quot;[INSTALL_ROOT]VoipCloud.exe&quot; --background"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <FeatureRef Id="ProductFeature">
+      <ComponentRef Id="VoipCloudAutoStart" />
+    </FeatureRef>
   </Fragment>
 </Wix>

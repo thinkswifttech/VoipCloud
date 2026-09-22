@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/audio_output_route.dart';
+import '../domain/audio_volume_levels.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
 import 'desktop_audio_test_dialog.dart';
@@ -62,11 +63,17 @@ class _AudioRoutePickerSheetState
   var _reloadInFlight = false;
   String? _selectingDeviceKey;
   Timer? _refreshTimer;
+  Timer? _volumeCommitTimer;
+  AudioVolumeLevels? _volumeLevels;
+  bool _volumeLoadFailed = false;
 
   @override
   void initState() {
     super.initState();
     unawaited(_reloadRoutes());
+    if (widget.choosingDefaults && (Platform.isWindows || Platform.isMacOS)) {
+      unawaited(_loadVolumeLevels());
+    }
     // Refresh while open so Bluetooth connect/disconnect appears live.
     _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       unawaited(_reloadRoutes(silent: true));
@@ -76,7 +83,22 @@ class _AudioRoutePickerSheetState
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _volumeCommitTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadVolumeLevels() async {
+    try {
+      final levels = await ref.read(sipServiceProvider).getAudioVolumeLevels();
+      if (!mounted) return;
+      setState(() {
+        _volumeLevels = levels;
+        _volumeLoadFailed = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _volumeLoadFailed = true);
+    }
   }
 
   Future<void> _reloadRoutes({bool silent = false}) async {
@@ -217,6 +239,51 @@ class _AudioRoutePickerSheetState
                       ),
                     if (widget.choosingDefaults) ...[
                       const Divider(),
+                      if (Platform.isWindows || Platform.isMacOS) ...[
+                        const _AudioDeviceSectionLabel('Volume'),
+                        if (_volumeLevels case final levels?)
+                          _DesktopVolumeControls(
+                            levels: levels,
+                            onChanged: _changeVolume,
+                            onChangeEnd: _commitVolume,
+                          )
+                        else if (_volumeLoadFailed)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'Unable to load volume controls.',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.copyWith(
+                                          color: Theme.of(
+                                            context,
+                                          ).colorScheme.onSurfaceVariant,
+                                        ),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () {
+                                    setState(() => _volumeLoadFailed = false);
+                                    unawaited(_loadVolumeLevels());
+                                  },
+                                  child: const Text('Retry'),
+                                ),
+                              ],
+                            ),
+                          )
+                        else
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 20),
+                            child: Center(
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        const Divider(),
+                      ],
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 6, 16, 2),
                         child: OutlinedButton.icon(
@@ -275,6 +342,173 @@ class _AudioRoutePickerSheetState
         ),
       );
     }
+  }
+
+  void _changeVolume(AudioVolumeKind kind, double value) {
+    final current = _volumeLevels;
+    if (current == null) return;
+    final level = value.round().clamp(0, 100);
+    setState(() {
+      _volumeLevels = switch (kind) {
+        AudioVolumeKind.microphone => AudioVolumeLevels(
+          microphone: level,
+          callAudio: current.callAudio,
+          ringtone: current.ringtone,
+        ),
+        AudioVolumeKind.callAudio => AudioVolumeLevels(
+          microphone: current.microphone,
+          callAudio: level,
+          ringtone: current.ringtone,
+        ),
+        AudioVolumeKind.ringtone => AudioVolumeLevels(
+          microphone: current.microphone,
+          callAudio: current.callAudio,
+          ringtone: level,
+        ),
+      };
+    });
+    _volumeCommitTimer?.cancel();
+    _volumeCommitTimer = Timer(
+      const Duration(milliseconds: 100),
+      () => unawaited(_saveVolume(kind, level)),
+    );
+  }
+
+  void _commitVolume(AudioVolumeKind kind, double value) {
+    _volumeCommitTimer?.cancel();
+    unawaited(_saveVolume(kind, value.round().clamp(0, 100)));
+  }
+
+  Future<void> _saveVolume(AudioVolumeKind kind, int level) async {
+    try {
+      await ref.read(sipServiceProvider).setAudioVolume(kind, level);
+    } catch (_) {
+      if (!mounted) return;
+      widget.messenger.showSnackBar(
+        const SnackBar(content: Text('Unable to save that volume level.')),
+      );
+      await _loadVolumeLevels();
+    }
+  }
+}
+
+class _DesktopVolumeControls extends StatelessWidget {
+  const _DesktopVolumeControls({
+    required this.levels,
+    required this.onChanged,
+    required this.onChangeEnd,
+  });
+
+  final AudioVolumeLevels levels;
+  final void Function(AudioVolumeKind kind, double value) onChanged;
+  final void Function(AudioVolumeKind kind, double value) onChangeEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        _VolumeSlider(
+          icon: Icons.mic_rounded,
+          label: 'Microphone',
+          description: 'How loudly other people hear you',
+          value: levels.microphone,
+          onChanged: (value) => onChanged(AudioVolumeKind.microphone, value),
+          onChangeEnd: (value) =>
+              onChangeEnd(AudioVolumeKind.microphone, value),
+        ),
+        _VolumeSlider(
+          icon: Icons.headphones_rounded,
+          label: 'Call audio',
+          description: 'Speaker or headset volume during calls',
+          value: levels.callAudio,
+          onChanged: (value) => onChanged(AudioVolumeKind.callAudio, value),
+          onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.callAudio, value),
+        ),
+        _VolumeSlider(
+          icon: Icons.notifications_active_rounded,
+          label: 'Incoming call ringtone',
+          description: 'Ringing volume before you answer',
+          value: levels.ringtone,
+          onChanged: (value) => onChanged(AudioVolumeKind.ringtone, value),
+          onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.ringtone, value),
+        ),
+      ],
+    );
+  }
+}
+
+class _VolumeSlider extends StatelessWidget {
+  const _VolumeSlider({
+    required this.icon,
+    required this.label,
+    required this.description,
+    required this.value,
+    required this.onChanged,
+    required this.onChangeEnd,
+  });
+
+  final IconData icon;
+  final String label;
+  final String description;
+  final int value;
+  final ValueChanged<double> onChanged;
+  final ValueChanged<double> onChangeEnd;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 2, 8, 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 8),
+            child: Icon(icon, color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: Theme.of(context).textTheme.bodyLarge,
+                      ),
+                    ),
+                    Text(
+                      '$value%',
+                      style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: colors.onSurfaceVariant,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
+                Text(
+                  description,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+                Slider(
+                  value: value.toDouble(),
+                  min: 0,
+                  max: 100,
+                  divisions: 20,
+                  label: '$value%',
+                  onChanged: onChanged,
+                  onChangeEnd: onChangeEnd,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

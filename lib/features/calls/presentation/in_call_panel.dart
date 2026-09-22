@@ -219,179 +219,214 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     final qualityLabel = quality?.qualityLabel ?? 'Checking…';
     final bars = _qualityBars(qualityScore);
 
-    return Stack(
-      children: [
-        Column(
-          children: [
-            const SizedBox(height: 40),
-            const Spacer(flex: 2),
-            CallerAvatar(identity: identity, radius: 56),
-            const SizedBox(height: 22),
-            Text(
-              displayName,
-              textAlign: TextAlign.center,
-              style: theme.textTheme.headlineMedium?.copyWith(
-                fontFamily: AppTheme.bodyFontFamily,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0,
-              ),
-            ),
-            if (identity.isResolvedName &&
-                identity.number.isNotEmpty &&
-                identity.number != displayName) ...[
-              const SizedBox(height: 6),
-              Text(
-                identity.number,
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: AppTheme.numberStyle(
-                  theme.textTheme.titleMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ],
-            const SizedBox(height: 8),
-            Text(
-              _statusLabel(call.status),
-              style: theme.textTheme.labelLarge?.copyWith(
-                color: theme.colorScheme.primary,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0,
-              ),
-            ),
-            if (heldCall != null && heldIdentity != null) ...[
-              const SizedBox(height: 14),
-              _HeldCallCard(
-                label: heldIdentity.label,
-                onSwap: () => unawaited(_swapToCall(heldCall.id)),
-              ),
-            ],
-            const Spacer(flex: 2),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _CallAction(
-                  icon: call.isMuted ? AppIcons.muteOff : AppIcons.muteOn,
-                  label: 'Mute',
-                  selected: call.isMuted,
-                  onPressed: () => unawaited(_setMuted(call)),
-                ),
-                const SizedBox(width: 22),
-                _AudioRouteAction(
-                  route: call.audioRoute,
-                  onPressed: () => showAudioRoutePicker(
-                    context: context,
-                    ref: ref,
-                    selectedRoute: call.audioRoute,
-                  ),
-                ),
-                const SizedBox(width: 22),
-                _CallAction(
-                  icon: AppIcons.hold,
-                  label: 'Hold',
-                  selected: call.status == CallStatus.held,
-                  onPressed: () async {
-                    final service = ref.read(sipServiceProvider);
-                    final messenger = ScaffoldMessenger.of(context);
-                    final resuming = call.status == CallStatus.held;
-                    try {
-                      if (resuming) {
-                        await service.resume(call.id);
-                      } else {
-                        await service.hold(call.id);
-                      }
-                    } catch (_) {
-                      messenger.showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            resuming
-                                ? 'Unable to resume call.'
-                                : 'Unable to hold call.',
-                          ),
-                        ),
-                      );
-                      await service.syncCurrentCall();
-                    }
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 22),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _CallAction(
-                  icon: AppIcons.navDialer,
-                  label: 'Dialpad',
-                  onPressed: () => setState(() {
-                    _showKeypad = true;
-                    _setProximity(false);
-                  }),
-                ),
-                if (ref
-                        .watch(sessionControllerProvider)
-                        .value
-                        ?.directoryAccess !=
-                    null) ...[
-                  const SizedBox(width: 22),
-                  _CallAction(
-                    icon: AppIcons.callForward,
-                    label: 'Transfer',
-                    onPressed: () {
-                      ref.read(callTransferModeProvider.notifier).begin();
-                      context.go(RoutePaths.directory);
-                    },
-                  ),
-                ],
-              ],
-            ),
-            const Spacer(flex: 2),
-            _EndCallButton(onPressed: () => unawaited(_endCall(call))),
-            const Spacer(),
-          ],
-        ),
-        Positioned(
-          top: 8,
-          left: 0,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _SignalBars(
-                activeBars: bars,
-                color: qualityColor,
-                inactiveColor: theme.colorScheme.onSurfaceVariant.withValues(
-                  alpha: 0.28,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                qualityLabel,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  color: qualityColor,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0,
-                ),
-              ),
-            ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final short = constraints.maxHeight < 650;
+        final veryShort = constraints.maxHeight < 500;
+        final narrow = constraints.maxWidth < 380;
+        final dense = short || narrow;
+        final actionGap = dense ? 8.0 : 14.0;
+        final transferAvailable =
+            ref.watch(sessionControllerProvider).value?.directoryAccess != null;
+
+        final actions = <Widget>[
+          _CallAction(
+            icon: call.isMuted ? AppIcons.muteOff : AppIcons.muteOn,
+            label: 'Mute',
+            selected: call.isMuted,
+            compact: dense,
+            onPressed: () => unawaited(_setMuted(call)),
           ),
-        ),
-        Positioned(
-          top: 0,
-          right: 0,
-          child: IconButton(
-            tooltip: 'Call quality details',
-            onPressed: () => showCallQualitySheet(
+          _AudioRouteAction(
+            route: call.audioRoute,
+            compact: dense,
+            onPressed: () => showAudioRoutePicker(
               context: context,
               ref: ref,
-              callId: call.id,
+              selectedRoute: call.audioRoute,
             ),
-            icon: const Icon(AppIcons.info),
+          ),
+          _CallAction(
+            icon: AppIcons.hold,
+            label: 'Hold',
+            selected: call.status == CallStatus.held,
+            compact: dense,
+            onPressed: () => unawaited(_toggleHold(context, call)),
+          ),
+          _CallAction(
+            icon: AppIcons.navDialer,
+            label: 'Dialpad',
+            compact: dense,
+            onPressed: () => setState(() {
+              _showKeypad = true;
+              _setProximity(false);
+            }),
+          ),
+          if (transferAvailable)
+            _CallAction(
+              icon: AppIcons.callForward,
+              label: 'Transfer',
+              compact: dense,
+              onPressed: () {
+                ref.read(callTransferModeProvider.notifier).begin();
+                context.go(RoutePaths.directory);
+              },
+            ),
+        ];
+
+        return Column(
+          children: [
+            Expanded(
+              child: CustomScrollView(
+                slivers: [
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        top: dense ? 4 : 8,
+                        bottom: dense ? 8 : 16,
+                      ),
+                      child: Column(
+                        children: [
+                          _CallQualityHeader(
+                            bars: bars,
+                            color: qualityColor,
+                            label: qualityLabel,
+                            onDetails: () => showCallQualitySheet(
+                              context: context,
+                              ref: ref,
+                              callId: call.id,
+                            ),
+                          ),
+                          SizedBox(height: veryShort ? 6 : (short ? 12 : 28)),
+                          CallerAvatar(
+                            identity: identity,
+                            radius: veryShort ? 34 : (short ? 42 : 56),
+                          ),
+                          SizedBox(height: veryShort ? 8 : (short ? 12 : 20)),
+                          Text(
+                            displayName,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style:
+                                (dense
+                                        ? theme.textTheme.headlineSmall
+                                        : theme.textTheme.headlineMedium)
+                                    ?.copyWith(
+                                      fontFamily: AppTheme.bodyFontFamily,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0,
+                                    ),
+                          ),
+                          if (identity.isResolvedName &&
+                              identity.number.isNotEmpty &&
+                              identity.number != displayName) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              identity.number,
+                              textAlign: TextAlign.center,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTheme.numberStyle(
+                                theme.textTheme.titleMedium?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 6),
+                          Text(
+                            _statusLabel(call.status),
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              color: theme.colorScheme.primary,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                          AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 220),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            child: heldCall == null || heldIdentity == null
+                                ? const SizedBox(key: ValueKey('no-held-call'))
+                                : Padding(
+                                    key: ValueKey('held-${heldCall.id}'),
+                                    padding: EdgeInsets.only(
+                                      top: dense ? 10 : 16,
+                                    ),
+                                    child: _HeldCallCard(
+                                      identity: heldIdentity,
+                                      compact: dense,
+                                      onSwap: () =>
+                                          unawaited(_swapToCall(heldCall.id)),
+                                    ),
+                                  ),
+                          ),
+                          SizedBox(height: veryShort ? 10 : (short ? 16 : 30)),
+                          Wrap(
+                            alignment: WrapAlignment.center,
+                            runAlignment: WrapAlignment.center,
+                            spacing: actionGap,
+                            runSpacing: dense ? 10 : 18,
+                            children: actions,
+                          ),
+                          if (!short) const Spacer(),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface,
+                border: Border(
+                  top: BorderSide(
+                    color: theme.colorScheme.outlineVariant.withValues(
+                      alpha: 0.65,
+                    ),
+                  ),
+                ),
+              ),
+              child: SafeArea(
+                top: false,
+                minimum: EdgeInsets.symmetric(vertical: dense ? 6 : 10),
+                child: Center(
+                  child: _EndCallButton(
+                    compact: dense,
+                    onPressed: () => unawaited(_endCall(call)),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _toggleHold(BuildContext context, VoipCall call) async {
+    final service = ref.read(sipServiceProvider);
+    final messenger = ScaffoldMessenger.of(context);
+    final resuming = call.status == CallStatus.held;
+    try {
+      if (resuming) {
+        await service.resume(call.id);
+      } else {
+        await service.hold(call.id);
+      }
+    } catch (_) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            resuming ? 'Unable to resume call.' : 'Unable to hold call.',
           ),
         ),
-      ],
-    );
+      );
+      await service.syncCurrentCall();
+    }
   }
 
   Widget _buildKeypad(BuildContext context, VoipCall call, String displayName) {
@@ -586,10 +621,15 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
 }
 
 class _HeldCallCard extends StatelessWidget {
-  const _HeldCallCard({required this.label, required this.onSwap});
+  const _HeldCallCard({
+    required this.identity,
+    required this.onSwap,
+    required this.compact,
+  });
 
-  final String label;
+  final CallerIdentity identity;
   final VoidCallback onSwap;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -603,11 +643,27 @@ class _HeldCallCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(16),
           onTap: onSwap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 12 : 16,
+              vertical: compact ? 9 : 12,
+            ),
             child: Row(
               children: [
-                Icon(AppIcons.hold, color: theme.colorScheme.primary),
-                const SizedBox(width: 12),
+                Container(
+                  width: compact ? 36 : 42,
+                  height: compact ? 36 : 42,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer,
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    AppIcons.hold,
+                    size: compact ? 18 : 20,
+                    color: theme.colorScheme.onPrimaryContainer,
+                  ),
+                ),
+                SizedBox(width: compact ? 10 : 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -615,24 +671,62 @@ class _HeldCallCard extends StatelessWidget {
                     children: [
                       Text('On hold', style: theme.textTheme.labelMedium),
                       Text(
-                        label,
+                        identity.label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.titleSmall?.copyWith(
                           fontWeight: FontWeight.w700,
                         ),
                       ),
+                      if (identity.isResolvedName &&
+                          identity.number.isNotEmpty &&
+                          identity.number != identity.label)
+                        Text(
+                          identity.number,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 12),
-                Icon(AppIcons.swapCalls, color: theme.colorScheme.primary),
-                const SizedBox(width: 6),
-                Text(
-                  'Swap',
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    color: theme.colorScheme.primary,
-                    fontWeight: FontWeight.w700,
+                SizedBox(width: compact ? 6 : 12),
+                Semantics(
+                  button: true,
+                  label: 'Swap to ${identity.label}',
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primaryContainer,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: compact ? 10 : 12,
+                        vertical: 9,
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            AppIcons.swapCalls,
+                            size: 20,
+                            color: theme.colorScheme.onPrimaryContainer,
+                          ),
+                          if (!compact) ...[
+                            const SizedBox(width: 6),
+                            Text(
+                              'Swap',
+                              style: theme.textTheme.labelLarge?.copyWith(
+                                color: theme.colorScheme.onPrimaryContainer,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -640,6 +734,54 @@ class _HeldCallCard extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _CallQualityHeader extends StatelessWidget {
+  const _CallQualityHeader({
+    required this.bars,
+    required this.color,
+    required this.label,
+    required this.onDetails,
+  });
+
+  final int bars;
+  final Color color;
+  final String label;
+  final VoidCallback onDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        _SignalBars(
+          activeBars: bars,
+          color: color,
+          inactiveColor: theme.colorScheme.onSurfaceVariant.withValues(
+            alpha: 0.28,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: color,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0,
+            ),
+          ),
+        ),
+        IconButton(
+          tooltip: 'Call quality details',
+          onPressed: onDetails,
+          icon: const Icon(AppIcons.info),
+        ),
+      ],
     );
   }
 }
@@ -705,11 +847,12 @@ class _SignalBars extends StatelessWidget {
 }
 
 class _EndCallButton extends StatelessWidget {
-  const _EndCallButton({required this.onPressed});
+  const _EndCallButton({required this.onPressed, this.compact = false});
 
   static const _endCallRed = Color(0xFFDC2626);
 
   final VoidCallback onPressed;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -720,7 +863,7 @@ class _EndCallButton extends StatelessWidget {
         foregroundColor: Colors.white,
         disabledBackgroundColor: _endCallRed.withValues(alpha: 0.45),
         disabledForegroundColor: Colors.white,
-        minimumSize: const Size(72, 72),
+        minimumSize: Size.square(compact ? 60 : 72),
         shape: const CircleBorder(),
       ),
       child: const Icon(AppIcons.callEnd, size: 28),
@@ -788,20 +931,23 @@ class _CallAction extends StatelessWidget {
     required this.icon,
     required this.label,
     this.selected = false,
+    this.compact = false,
     required this.onPressed,
   });
 
   final IconData icon;
   final String label;
   final bool selected;
+  final bool compact;
   final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
+    final buttonSize = compact ? 54.0 : 64.0;
     return SizedBox(
-      width: 76,
+      width: compact ? 66 : 76,
       child: Column(
         children: [
           IconButton(
@@ -809,7 +955,7 @@ class _CallAction extends StatelessWidget {
             onPressed: onPressed,
             icon: Icon(icon),
             style: IconButton.styleFrom(
-              fixedSize: const Size(64, 64),
+              fixedSize: Size.square(buttonSize),
               backgroundColor: selected
                   ? theme.colorScheme.primary
                   : AppTheme.sheetControlBackground(theme.brightness),
@@ -818,7 +964,7 @@ class _CallAction extends StatelessWidget {
                   : theme.colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: compact ? 5 : 8),
           Text(
             label,
             maxLines: 1,
@@ -839,22 +985,28 @@ class _CallAction extends StatelessWidget {
 /// non-subclassed AVRoutePickerView is the actual tap target, so Apple owns the
 /// output list and route transition while Flutter owns only the artwork.
 class _AudioRouteAction extends StatelessWidget {
-  const _AudioRouteAction({required this.route, required this.onPressed});
+  const _AudioRouteAction({
+    required this.route,
+    required this.onPressed,
+    this.compact = false,
+  });
 
   final AudioOutputRoute route;
   final VoidCallback onPressed;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       final theme = Theme.of(context);
       final selected = route != AudioOutputRoute.earpiece;
+      final buttonSize = compact ? 54.0 : 64.0;
       return SizedBox(
-        width: 76,
+        width: compact ? 66 : 76,
         child: Column(
           children: [
             SizedBox.square(
-              dimension: 64,
+              dimension: buttonSize,
               child: Stack(
                 fit: StackFit.expand,
                 children: [
@@ -864,7 +1016,7 @@ class _AudioRouteAction extends StatelessWidget {
                       onPressed: () {},
                       icon: Icon(_audioRouteIcon(route)),
                       style: IconButton.styleFrom(
-                        fixedSize: const Size(64, 64),
+                        fixedSize: Size.square(buttonSize),
                         backgroundColor: selected
                             ? theme.colorScheme.primary
                             : AppTheme.sheetControlBackground(theme.brightness),
@@ -878,7 +1030,7 @@ class _AudioRouteAction extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 8),
+            SizedBox(height: compact ? 5 : 8),
             Text(
               'Audio',
               maxLines: 1,
@@ -897,6 +1049,7 @@ class _AudioRouteAction extends StatelessWidget {
       icon: _audioRouteIcon(route),
       label: 'Audio',
       selected: route != AudioOutputRoute.earpiece,
+      compact: compact,
       onPressed: onPressed,
     );
   }

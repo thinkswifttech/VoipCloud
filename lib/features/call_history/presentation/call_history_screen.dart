@@ -9,7 +9,9 @@ import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/domain/contact.dart';
+import '../../../features/contacts/domain/quick_dial_entry.dart';
 import '../../../features/contacts/presentation/contacts_providers.dart';
+import '../../../features/contacts/presentation/quick_dial_providers.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../features/directory/domain/directory_entry.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
@@ -72,6 +74,8 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
   Widget build(BuildContext context) {
     final history = ref.watch(callHistoryProvider);
     final contacts = ref.watch(contactsProvider).value ?? const <Contact>[];
+    final quickDial =
+        ref.watch(quickDialProvider).value ?? const <QuickDialEntry>[];
     final directory =
         ref.watch(directoryProvider).value ?? const <DirectoryEntry>[];
 
@@ -111,11 +115,7 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
                 final item = (entry as _HistoryRow).item;
                 return _CallHistoryTile(
                   item: item,
-                  party: _partyForCaller(
-                    _callerNumber(item),
-                    contacts,
-                    directory,
-                  ),
+                  party: _partyForCaller(item, contacts, quickDial, directory),
                   onDial: (destination) {
                     ref
                         .read(dialerControllerProvider.notifier)
@@ -409,22 +409,23 @@ class _HistoryAvatar extends StatelessWidget {
 }
 
 _HistoryParty _partyForCaller(
-  String callerNumber,
+  CallHistoryItem item,
   List<Contact> contacts,
+  List<QuickDialEntry> quickDial,
   List<DirectoryEntry> directory,
 ) {
-  if (callerNumber.isEmpty) {
-    return const _HistoryParty(number: '', isKnown: false);
-  }
-
-  // Same matcher as in-call / messages: all dialable phones + NANP last-10.
+  // Resolve the stored SIP display name as well as the dialable identity. Queue
+  // labels are commonly carried only as display text (for example
+  // "SUP: Abdul"), including for callers not saved anywhere in the app.
   final identity = resolveRemoteIdentity(
-    remoteUri: callerNumber,
+    remoteUri: item.remoteNumber,
+    remoteDisplayName: item.remoteDisplayName,
     contacts: contacts,
+    quickDial: quickDial,
     directory: directory,
   );
   return _HistoryParty(
-    number: identity.number.isNotEmpty ? identity.number : callerNumber,
+    number: identity.number,
     isKnown: identity.isResolvedName || identity.photo != null,
     displayName: identity.isResolvedName ? identity.label : null,
     photo: identity.photo,
@@ -495,15 +496,6 @@ String _durationLabel(Duration? duration) {
   return '$minutes:$seconds';
 }
 
-String _callerNumber(CallHistoryItem item) {
-  final number = _pstnNumber(item.remoteNumber);
-  if (number.isNotEmpty) {
-    return number;
-  }
-  final display = _pstnNumber(item.remoteDisplayName);
-  return display.isEmpty ? item.remoteNumber : display;
-}
-
 String _initials(String value) {
   final parts = value
       .trim()
@@ -534,52 +526,3 @@ String _initials(String value) {
   final last = parts.last.substring(0, 1);
   return '$first$last'.toUpperCase();
 }
-
-String _pstnNumber(String? value) {
-  var text = value?.trim() ?? '';
-  if (text.isEmpty) {
-    return '';
-  }
-
-  final lower = text.toLowerCase();
-  final sipsIndex = lower.indexOf('sips:');
-  final sipIndex = lower.indexOf('sip:');
-  if (sipsIndex >= 0) {
-    text = text.substring(sipsIndex + 5);
-  } else if (sipIndex >= 0) {
-    text = text.substring(sipIndex + 4);
-  }
-
-  text = text
-      .replaceAll('<', '')
-      .replaceAll('>', '')
-      .replaceAll('"', '')
-      .split(';')
-      .first
-      .split('?')
-      .first
-      .trim();
-  if (text.contains('@')) {
-    text = text.split('@').first.trim();
-  }
-
-  try {
-    text = Uri.decodeComponent(text);
-  } on ArgumentError {
-    // Preserve malformed SIP user parts best-effort.
-  } on FormatException {
-    // Preserve malformed SIP user parts best-effort.
-  }
-
-  final compact = text.replaceAll(RegExp(r'\s+'), '');
-  if (_prefixedHistoryIdentifier.hasMatch(compact)) {
-    return compact;
-  }
-
-  final allowed = RegExp(r'[0-9+*#,]');
-  return compact.split('').where((char) => allowed.hasMatch(char)).join();
-}
-
-final _prefixedHistoryIdentifier = RegExp(
-  r'^[A-Za-z][A-Za-z0-9._-]*:[+*#0-9][A-Za-z0-9+*#,._-]*$',
-);

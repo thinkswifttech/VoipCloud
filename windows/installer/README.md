@@ -14,12 +14,19 @@ existing process to restore and activate its window. The handoff waits briefly
 for a first launch that is still creating its Flutter window, so repeated clicks
 immediately after installation cannot create multiple SIP cores.
 
-The MSI presents a final options page before installation with these choices
-selected by default:
+Before installation, the MSI presents the choices that affect installed
+Windows resources. Both are selected by default:
 
 - create a desktop shortcut;
-- launch VoipCloud after installation; and
-- offer to pin VoipCloud to the taskbar after launch.
+- start VoipCloud in the notification area when the current user signs in to
+  Windows.
+
+The completed page presents the standard preselected **Launch VoipCloud**
+checkbox. Launching from that page also displays the app-owned, dismissible
+taskbar pin offer. Install-time properties are marked secure so desktop and
+sign-in choices survive MSI elevation. The sign-in entry is owned by the MSI,
+removed on uninstall, and uses `--background` so it keeps SIP registered
+without opening the main window.
 
 The MSI does not present a separate license page. Like every other platform,
 Windows displays the current ThinkSwift Master Services Agreement after a
@@ -27,9 +34,9 @@ successful provisioning and before SIP is activated. The agreement is loaded
 from the versioned, checksummed VoIPCloud legal endpoint configured through
 `LEGAL_TERMS_URL`; it is not compiled into the installer.
 
-The pin option launches or activates VoipCloud with a one-time, dismissible
-in-app banner, including when an existing tray instance receives the installer
-handoff.
+The completed-page launch starts or activates VoipCloud with a one-time,
+dismissible in-app pin banner, including when an existing tray instance
+receives the installer handoff.
 Only clicking **Pin to taskbar** in that banner calls `TaskbarManager`, which
 then shows Windows' native confirmation. The app hides the banner when the API
 is unavailable or disabled by policy. Windows does not permit an installer to

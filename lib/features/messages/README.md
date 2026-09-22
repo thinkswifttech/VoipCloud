@@ -69,3 +69,19 @@ quote is an in-thread anchor: selecting it scrolls to the nearest matching
 earlier message and briefly highlights that bubble. Photo replies show a local
 photo icon while keeping the external carrier payload as `"Photo"`, a blank
 line, and the response; no private attachment URL or app token is exposed.
+
+## Concatenated SMS
+
+A long SMS remains one logical VoIPCloud message. The client submits the full
+body once with one idempotency ID; it must never split the body into separate
+API requests. The carrier adapter/provider applies standard concatenated-SMS
+headers and the recipient handset normally reassembles the transport segments.
+This preserves ordering, retry safety, cross-device synchronization, aggregate
+status, and one bubble in the app.
+
+Before enqueueing, the client calculates GSM-7 septets (including extension
+table escapes) or UCS-2/UTF-16 units and applies the standard 160/153 and 70/67
+single/concatenated capacities. The capability response may advertise
+`outbound_sms_max_segments`; the compatibility default is 10. The client
+disables sending above that ceiling, while the server remains authoritative
+and must enforce the same adapter-specific limit before carrier dispatch.

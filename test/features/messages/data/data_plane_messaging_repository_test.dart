@@ -76,6 +76,29 @@ void main() {
     });
   });
 
+  test(
+    'rejects text beyond the carrier segment ceiling before transport',
+    () async {
+      final fixture = await _fixture(canSend: true);
+      await fixture.repository.loadInbox(config: config);
+
+      await expectLater(
+        fixture.repository.sendMessage(
+          config: config,
+          destination: '+14165550123',
+          text: 'a' * (153 * 8 + 1),
+          clientId: 'too-long-message',
+        ),
+        throwsA(
+          isA<MessagingSmsSegmentLimitExceeded>()
+              .having((error) => error.actualSegments, 'actualSegments', 9)
+              .having((error) => error.maximumSegments, 'maximumSegments', 8),
+        ),
+      );
+      expect(fixture.adapter.lastPostPath, isNull);
+    },
+  );
+
   test('MMS capability uses authenticated multipart upload endpoint', () async {
     final fixture = await _fixture(canSend: true, canSendMms: true);
     await fixture.repository.loadInbox(config: config);
@@ -93,6 +116,7 @@ void main() {
     );
 
     expect(fixture.repository.canSendMms, isTrue);
+    expect(fixture.repository.maxOutboundSmsSegments, 8);
     expect(fixture.repository.maxOutboundAttachmentBytes, 1300000);
     expect(fixture.repository.outboundAttachmentMimeTypes, {
       'image/jpeg',
@@ -440,6 +464,7 @@ class _MessagingAdapter implements HttpClientAdapter {
         'data': {
           'can_send': canSend,
           'can_send_mms': canSendMms,
+          'outbound_sms_max_segments': 8,
           'outbound_mms_max_attachment_bytes': 1300000,
           'outbound_mms_allowed_mime_types': ['image/jpeg', 'image/png'],
         },

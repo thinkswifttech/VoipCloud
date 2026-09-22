@@ -15,6 +15,7 @@ import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../features/messages/domain/carrier_message.dart';
 import '../../../features/messages/domain/messaging_repository.dart';
 import '../../../features/messages/domain/sms_compatibility.dart';
+import '../../../features/messages/domain/sms_segment_info.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/platform/desktop_platform.dart';
 import '../data/message_image_normalizer.dart';
@@ -102,6 +103,13 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final messagesById = {for (final message in messages) message.id: message};
     final desktopInteractions = isSupportedDesktopPlatform();
     final isBlocked = messaging.isBlocked(widget.remoteNumber);
+    final draftText = _outboundText(_controller.text.trim(), _replyingTo);
+    final smsSegments = _attachment == null && draftText.isNotEmpty
+        ? analyzeSmsSegments(expandSmsEmojiShortcodes(draftText))
+        : null;
+    final exceedsSmsLimit =
+        smsSegments != null &&
+        !smsSegments.fitsWithin(messaging.maxOutboundSmsSegments);
     final contactsState = ref.watch(contactsProvider);
     final contacts = contactsState.value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
@@ -438,7 +446,10 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                             IconButton.filled(
                               tooltip: _isSending ? 'Sending' : 'Send',
                               onPressed:
-                                  messaging.canSend && !isBlocked && !_isSending
+                                  messaging.canSend &&
+                                      !isBlocked &&
+                                      !_isSending &&
+                                      !exceedsSmsLimit
                                   ? _send
                                   : null,
                               icon: _isSending
@@ -459,6 +470,19 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                               ),
                             ),
                           ],
+                        ),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 180),
+                          child: _SmsSegmentCounter(
+                            key: ValueKey(
+                              '${smsSegments?.encoding.name}-'
+                              '${smsSegments?.segmentCount}-'
+                              '${smsSegments?.unitsRemaining}-'
+                              '$exceedsSmsLimit',
+                            ),
+                            info: smsSegments,
+                            maximumSegments: messaging.maxOutboundSmsSegments,
+                          ),
                         ),
                       ],
                     ),
@@ -509,7 +533,10 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
   }
 
   void _draftChanged() {
-    if (!_isSending) _draftClientId = null;
+    if (!mounted) return;
+    setState(() {
+      if (!_isSending) _draftClientId = null;
+    });
   }
 
   void _loadOlderIfNeeded() {
@@ -849,14 +876,25 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
   Future<void> _send() async {
     final typedText = _controller.text.trim();
     final reply = _replyingTo;
-    final text = reply == null
-        ? typedText
-        : formatSmsQuotedReply(
-            quotedText: smsReplyTargetText(reply),
-            response: typedText,
-          );
+    final text = _outboundText(typedText, reply);
     final attachment = _attachment;
     if (_isSending || (typedText.isEmpty && attachment == null)) return;
+    if (attachment == null) {
+      final segments = analyzeSmsSegments(expandSmsEmojiShortcodes(text));
+      final maximum = ref
+          .read(messagesControllerProvider)
+          .maxOutboundSmsSegments;
+      if (!segments.fitsWithin(maximum)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'This message is too long. Keep it within $maximum SMS segments.',
+            ),
+          ),
+        );
+        return;
+      }
+    }
     final clientId =
         _draftClientId ?? 'app-${DateTime.now().microsecondsSinceEpoch}';
     _draftClientId = clientId;
@@ -894,7 +932,10 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            error is AppException
+            error is MessagingSmsSegmentLimitExceeded
+                ? 'This message is too long. Keep it within '
+                      '${error.maximumSegments} SMS segments.'
+                : error is AppException
                 ? error.userMessage
                 : attachment == null
                 ? 'Message could not be sent. Tap send to retry.'
@@ -906,6 +947,13 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       if (mounted) setState(() => _isSending = false);
     }
   }
+
+  String _outboundText(String typedText, CarrierMessage? reply) => reply == null
+      ? typedText
+      : formatSmsQuotedReply(
+          quotedText: smsReplyTargetText(reply),
+          response: typedText,
+        );
 
   Future<void> _scrollToMessage(
     String messageId,
@@ -947,6 +995,52 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
       alignment: 0.45,
+    );
+  }
+}
+
+class _SmsSegmentCounter extends StatelessWidget {
+  const _SmsSegmentCounter({
+    required this.info,
+    required this.maximumSegments,
+    super.key,
+  });
+
+  final SmsSegmentInfo? info;
+  final int maximumSegments;
+
+  @override
+  Widget build(BuildContext context) {
+    final value = info;
+    final shouldShow =
+        value != null && (value.segmentCount > 1 || value.unitsRemaining <= 20);
+    if (!shouldShow) return const SizedBox.shrink();
+
+    final exceedsLimit = !value.fitsWithin(maximumSegments);
+    final theme = Theme.of(context);
+    final message = exceedsLimit
+        ? 'Message is too long (${value.segmentCount} of '
+              '$maximumSegments SMS segments).'
+        : '${value.segmentCount} SMS segments · '
+              '${value.unitsRemaining} remaining in this segment';
+    return Padding(
+      padding: const EdgeInsets.only(top: 5, right: 52),
+      child: Align(
+        alignment: Alignment.centerRight,
+        child: Semantics(
+          liveRegion: true,
+          child: Text(
+            message,
+            textAlign: TextAlign.end,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: exceedsLimit
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.onSurfaceVariant,
+              fontWeight: exceedsLimit ? FontWeight.w600 : null,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

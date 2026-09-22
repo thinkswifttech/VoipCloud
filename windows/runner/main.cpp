@@ -49,6 +49,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   const bool offer_taskbar_pin =
       std::find(command_line_arguments.begin(), command_line_arguments.end(),
                 "--offer-taskbar-pin") != command_line_arguments.end();
+  const bool start_hidden =
+      std::find(command_line_arguments.begin(), command_line_arguments.end(),
+                "--background") != command_line_arguments.end();
 
   HANDLE single_instance_mutex =
       CreateMutex(nullptr, TRUE, kSingleInstanceMutexName);
@@ -57,7 +60,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     return EXIT_FAILURE;
   }
   if (mutex_error == ERROR_ALREADY_EXISTS) {
-    ActivateExistingInstance(offer_taskbar_pin);
+    // A sign-in launch should never interrupt an instance the user already
+    // opened. Interactive launches still restore the existing tray process.
+    if (!start_hidden) {
+      ActivateExistingInstance(offer_taskbar_pin);
+    }
     CloseHandle(single_instance_mutex);
     return EXIT_SUCCESS;
   }
@@ -76,7 +83,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
-  FlutterWindow window(project);
+  FlutterWindow window(project, start_hidden);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"VoipCloud", origin, size)) {

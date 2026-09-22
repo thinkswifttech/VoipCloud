@@ -10,6 +10,7 @@ import '../../../voip/platform/voip_platform_channel.dart';
 import '../../call_history/domain/call_history_classification.dart';
 import '../../call_history/domain/call_history_repository.dart';
 import '../../calls/domain/audio_output_route.dart';
+import '../../calls/domain/audio_volume_levels.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_quality_info.dart';
 import '../../calls/domain/call_status.dart';
@@ -669,6 +670,20 @@ class LinphoneSipService implements SipService {
     });
     _audioRouteSerial = operation.then<void>((_) {}, onError: (_, _) {});
     return operation;
+  }
+
+  @override
+  Future<AudioVolumeLevels> getAudioVolumeLevels() async {
+    final levels = await _platformChannel.getAudioVolumeLevels();
+    return AudioVolumeLevels.fromPlatform(levels);
+  }
+
+  @override
+  Future<void> setAudioVolume(AudioVolumeKind kind, int level) {
+    return _platformChannel.setAudioVolume(
+      kind.platformValue,
+      level.clamp(0, 100),
+    );
   }
 
   @override

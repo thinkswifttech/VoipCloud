@@ -245,6 +245,22 @@ class VoipPlatformChannel {
     });
   }
 
+  Future<Map<String, dynamic>> getAudioVolumeLevels() async {
+    final result = await _channel.invokeMethod<dynamic>('getAudioVolumeLevels');
+    if (result is! Map) return const {};
+    return {
+      for (final entry in result.entries)
+        if (entry.key is String) entry.key as String: entry.value,
+    };
+  }
+
+  Future<void> setAudioVolume(String kind, int level) {
+    return _channel.invokeMethod<void>('setAudioVolume', {
+      'kind': kind,
+      'level': level.clamp(0, 100),
+    });
+  }
+
   Future<void> playAudioTestSound() {
     return _channel.invokeMethod<void>('playAudioTestSound');
   }

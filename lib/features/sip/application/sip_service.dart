@@ -1,4 +1,5 @@
 import '../../calls/domain/audio_output_route.dart';
+import '../../calls/domain/audio_volume_levels.dart';
 import '../../calls/domain/call_quality_info.dart';
 import '../../calls/domain/voip_call.dart';
 import '../domain/sip_message.dart';
@@ -74,6 +75,12 @@ abstract class SipService {
   Future<void> setAudioRoute(AudioOutputRoute route, {String? endpointId});
 
   Future<void> setAudioInputDevice(String endpointId);
+
+  /// Returns VoipCloud's app-local desktop audio levels (0...100).
+  Future<AudioVolumeLevels> getAudioVolumeLevels();
+
+  /// Changes one app-local desktop audio level without changing system volume.
+  Future<void> setAudioVolume(AudioVolumeKind kind, int level);
 
   /// Plays a short, local sound through the configured desktop output.
   Future<void> playAudioTestSound();

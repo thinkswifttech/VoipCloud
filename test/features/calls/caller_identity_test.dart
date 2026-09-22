@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/features/calls/presentation/caller_identity.dart';
 import 'package:phone_app/features/contacts/domain/contact.dart';
+import 'package:phone_app/features/contacts/domain/quick_dial_entry.dart';
 import 'package:phone_app/features/directory/domain/directory_entry.dart';
 
 void main() {
@@ -110,6 +111,39 @@ void main() {
     );
 
     expect(identity.label, 'Support Queue: Example Agent');
+  });
+
+  test('preserves a queue prefix for a caller not saved anywhere', () {
+    final identity = resolveRemoteIdentity(
+      remoteUri: 'sip:14165550123@tenant.example.test',
+      remoteDisplayName: 'SUP: Abdul',
+      contacts: const [],
+      directory: const [],
+    );
+
+    expect(identity.label, 'SUP: Abdul');
+    expect(identity.number, '14165550123');
+  });
+
+  test('preserves a queue prefix when resolving a Quick Dial entry', () {
+    final identity = resolveRemoteIdentity(
+      remoteUri: 'sip:14165550123@tenant.example.test',
+      remoteDisplayName: 'SUP: External caller',
+      contacts: const [],
+      quickDial: [
+        QuickDialEntry(
+          id: 'quick-1',
+          displayName: 'Abdul',
+          number: '+1 416 555 0123',
+          source: QuickDialSource.custom,
+          createdAt: DateTime.utc(2026, 9, 20),
+        ),
+      ],
+      directory: const [],
+    );
+
+    expect(identity.label, 'SUP: Abdul');
+    expect(identity.number, '14165550123');
   });
 
   test('continues to normalize ordinary telephone callers', () {

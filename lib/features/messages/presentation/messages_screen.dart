@@ -9,7 +9,9 @@ import '../../../core/errors/app_exception.dart';
 import '../../../features/calls/presentation/caller_avatar.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/domain/contact.dart';
+import '../../../features/contacts/domain/quick_dial_entry.dart';
 import '../../../features/contacts/presentation/contacts_providers.dart';
+import '../../../features/contacts/presentation/quick_dial_providers.dart';
 import '../../../features/directory/domain/directory_entry.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../features/messages/domain/carrier_message.dart';
@@ -818,6 +820,7 @@ class _NewMessageSourceSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final desktop = isSupportedDesktopPlatform();
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -839,30 +842,56 @@ class _NewMessageSourceSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(
-              AppIcons.navContacts,
-              color: theme.colorScheme.primary,
+          if (desktop)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                AppIcons.quickDial,
+                color: theme.colorScheme.primary,
+              ),
+              title: const Text('From Quick Dial'),
+              subtitle: const Text('Message someone saved to Quick Dial'),
+              trailing: const Icon(AppIcons.chevronRight),
+              onTap: () async {
+                Navigator.of(context).pop();
+                final destination = await showModalBottomSheet<String>(
+                  context: context,
+                  isScrollControlled: true,
+                  useSafeArea: true,
+                  showDragHandle: true,
+                  backgroundColor: theme.colorScheme.surface,
+                  builder: (_) => const _PickQuickDialForMessageSheet(),
+                );
+                if (destination != null && destination.isNotEmpty) {
+                  onSelected(destination);
+                }
+              },
+            )
+          else
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                AppIcons.navContacts,
+                color: theme.colorScheme.primary,
+              ),
+              title: const Text('From contacts'),
+              subtitle: const Text('Message someone from your phone contacts'),
+              trailing: const Icon(AppIcons.chevronRight),
+              onTap: () async {
+                Navigator.of(context).pop();
+                final destination = await showModalBottomSheet<String>(
+                  context: context,
+                  isScrollControlled: true,
+                  useSafeArea: true,
+                  showDragHandle: true,
+                  backgroundColor: theme.colorScheme.surface,
+                  builder: (_) => const _PickContactForMessageSheet(),
+                );
+                if (destination != null && destination.isNotEmpty) {
+                  onSelected(destination);
+                }
+              },
             ),
-            title: const Text('From contacts'),
-            subtitle: const Text('Message someone from your phone contacts'),
-            trailing: const Icon(AppIcons.chevronRight),
-            onTap: () async {
-              Navigator.of(context).pop();
-              final destination = await showModalBottomSheet<String>(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                showDragHandle: true,
-                backgroundColor: theme.colorScheme.surface,
-                builder: (_) => const _PickContactForMessageSheet(),
-              );
-              if (destination != null && destination.isNotEmpty) {
-                onSelected(destination);
-              }
-            },
-          ),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: Icon(AppIcons.add, color: theme.colorScheme.primary),
@@ -887,6 +916,152 @@ class _NewMessageSourceSheet extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _PickQuickDialForMessageSheet extends ConsumerStatefulWidget {
+  const _PickQuickDialForMessageSheet();
+
+  @override
+  ConsumerState<_PickQuickDialForMessageSheet> createState() =>
+      _PickQuickDialForMessageSheetState();
+}
+
+class _PickQuickDialForMessageSheetState
+    extends ConsumerState<_PickQuickDialForMessageSheet> {
+  final _queryController = TextEditingController();
+  String _query = '';
+
+  @override
+  void dispose() {
+    _queryController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final quickDial = ref.watch(quickDialProvider);
+
+    return SizedBox(
+      height: MediaQuery.sizeOf(context).height * 0.75,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'From Quick Dial',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _queryController,
+              autofocus: true,
+              onChanged: (value) => setState(() => _query = value.trim()),
+              onTapOutside: (_) =>
+                  FocusManager.instance.primaryFocus?.unfocus(),
+              decoration: InputDecoration(
+                hintText: 'Search Quick Dial',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        onPressed: () {
+                          _queryController.clear();
+                          setState(() => _query = '');
+                        },
+                        icon: const Icon(AppIcons.close),
+                      ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: quickDial.when(
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (_, _) => EmptyState(
+                  framed: false,
+                  icon: AppIcons.quickDial,
+                  title: 'Quick Dial unavailable',
+                  message: 'We could not load your Quick Dial list.',
+                  action: OutlinedButton.icon(
+                    onPressed: () =>
+                        ref.read(quickDialProvider.notifier).refresh(),
+                    icon: const Icon(AppIcons.refresh, size: AppIconSize.sm),
+                    label: const Text('Try again'),
+                  ),
+                ),
+                data: (entries) {
+                  final filtered = _filterQuickDial(entries, _query);
+                  if (filtered.isEmpty) {
+                    return EmptyState(
+                      framed: false,
+                      icon: AppIcons.quickDial,
+                      title: entries.isEmpty
+                          ? 'No Quick Dial contacts'
+                          : 'No matches',
+                      message: entries.isEmpty
+                          ? 'Add someone to Quick Dial, or enter a new number.'
+                          : 'Try a different search.',
+                    );
+                  }
+                  return ListView.separated(
+                    itemCount: filtered.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final entry = filtered[index];
+                      final name = entry.displayName.trim();
+                      final identity = CallerIdentity(
+                        label: name.isEmpty ? entry.number : name,
+                        number: entry.number,
+                        isResolvedName: name.isNotEmpty,
+                        photo: entry.photoBytes,
+                      );
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: CallerAvatar(identity: identity, radius: 20),
+                        title: Text(identity.label),
+                        subtitle: Text(
+                          entry.number,
+                          style: AppTheme.numberStyle(
+                            Theme.of(context).textTheme.bodyMedium,
+                          ),
+                        ),
+                        onTap: () {
+                          final destination = ref
+                              .read(messagesControllerProvider.notifier)
+                              .destinationForRaw(entry.number);
+                          if (destination.isNotEmpty) {
+                            Navigator.of(context).pop(destination);
+                          }
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<QuickDialEntry> _filterQuickDial(
+    List<QuickDialEntry> entries,
+    String query,
+  ) {
+    final controller = ref.read(messagesControllerProvider.notifier);
+    final usable = entries
+        .where((entry) => controller.destinationForRaw(entry.number).isNotEmpty)
+        .toList(growable: false);
+    if (query.isEmpty) return usable;
+    final lower = query.toLowerCase();
+    return usable
+        .where((entry) {
+          return entry.displayName.toLowerCase().contains(lower) ||
+              entry.number.toLowerCase().contains(lower);
+        })
+        .toList(growable: false);
   }
 }
 

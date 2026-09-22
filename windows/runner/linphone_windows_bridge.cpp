@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -41,6 +42,9 @@ constexpr wchar_t kVoipCloudRegistryPath[] =
 constexpr wchar_t kDeviceDndRegistryValue[] = L"DeviceDndEnabled";
 constexpr wchar_t kAudioOutputRegistryValue[] = L"AudioOutputEndpoint";
 constexpr wchar_t kAudioInputRegistryValue[] = L"AudioInputEndpoint";
+constexpr wchar_t kMicrophoneVolumeRegistryValue[] = L"MicrophoneVolume";
+constexpr wchar_t kCallAudioVolumeRegistryValue[] = L"CallAudioVolume";
+constexpr wchar_t kRingtoneVolumeRegistryValue[] = L"RingtoneVolume";
 constexpr char kVoipCloudVersion[] =
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MAJOR) "."
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MINOR) "."
@@ -282,6 +286,37 @@ void SaveRegistryString(const wchar_t* name, const std::string& value) {
                  reinterpret_cast<const BYTE*>(wide.c_str()),
                  static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t)));
   RegCloseKey(key);
+}
+
+int LoadRegistryLevel(const wchar_t* name) {
+  DWORD value = 100;
+  DWORD size = sizeof(value);
+  if (RegGetValueW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, name,
+                   RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS) {
+    return 100;
+  }
+  return std::clamp(static_cast<int>(value), 0, 100);
+}
+
+bool SaveRegistryLevel(const wchar_t* name, int level) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, 0, nullptr,
+                      REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS || key == nullptr) {
+    return false;
+  }
+  const DWORD value = static_cast<DWORD>(std::clamp(level, 0, 100));
+  const LSTATUS status = RegSetValueExW(
+      key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value),
+      sizeof(value));
+  RegCloseKey(key);
+  return status == ERROR_SUCCESS;
+}
+
+float VolumePercentToGainDb(int level) {
+  const int clamped = std::clamp(level, 0, 100);
+  if (clamped == 0) return -80.0f;
+  return 20.0f * std::log10(static_cast<float>(clamped) / 100.0f);
 }
 
 int IntArg(const EncodableMap& args, const char* key) {
@@ -773,6 +808,15 @@ class LinphoneApi {
     linphone_core_set_ringer_device =
         LoadSymbol<int (*)(LinphoneCore*, const char*)>(
             "linphone_core_set_ringer_device");
+    linphone_core_set_mic_gain_db =
+        LoadSymbol<void (*)(LinphoneCore*, float)>(
+            "linphone_core_set_mic_gain_db");
+    linphone_core_set_playback_gain_db =
+        LoadSymbol<void (*)(LinphoneCore*, float)>(
+            "linphone_core_set_playback_gain_db");
+    linphone_core_set_ring_level =
+        LoadSymbol<void (*)(LinphoneCore*, int)>(
+            "linphone_core_set_ring_level");
     linphone_core_sound_device_can_capture =
         LoadSymbol<int (*)(LinphoneCore*, const char*)>(
             "linphone_core_sound_device_can_capture");
@@ -1012,6 +1056,9 @@ class LinphoneApi {
   int (*linphone_core_set_playback_device)(LinphoneCore*, const char*) = nullptr;
   int (*linphone_core_set_capture_device)(LinphoneCore*, const char*) = nullptr;
   int (*linphone_core_set_ringer_device)(LinphoneCore*, const char*) = nullptr;
+  void (*linphone_core_set_mic_gain_db)(LinphoneCore*, float) = nullptr;
+  void (*linphone_core_set_playback_gain_db)(LinphoneCore*, float) = nullptr;
+  void (*linphone_core_set_ring_level)(LinphoneCore*, int) = nullptr;
   int (*linphone_core_sound_device_can_capture)(LinphoneCore*, const char*) =
       nullptr;
   BctbxList* (*linphone_core_get_extended_audio_devices)(
@@ -1224,6 +1271,11 @@ class LinphoneWindowsBridge::Impl {
     } else if (method == "setAudioInputDevice") {
       SetAudioInputDevice(StringArg(ArgsMap(call), "endpointId"),
                           std::move(result));
+    } else if (method == "getAudioVolumeLevels") {
+      GetAudioVolumeLevels(std::move(result));
+    } else if (method == "setAudioVolume") {
+      SetAudioVolume(StringArg(ArgsMap(call), "kind"),
+                     IntArg(ArgsMap(call), "level"), std::move(result));
     } else if (method == "playAudioTestSound") {
       PlayAudioTestSound(std::move(result));
     } else if (method == "startAudioInputTest") {
@@ -2200,6 +2252,66 @@ class LinphoneWindowsBridge::Impl {
     result->Success(EncodableValue(endpoint_id));
   }
 
+  void ApplyAudioVolume(const std::string& kind, int level) {
+    const int clamped = std::clamp(level, 0, 100);
+    if (kind == "microphone" && api_.linphone_core_set_mic_gain_db != nullptr) {
+      api_.linphone_core_set_mic_gain_db(core_, VolumePercentToGainDb(clamped));
+    } else if (kind == "callAudio" &&
+               api_.linphone_core_set_playback_gain_db != nullptr) {
+      api_.linphone_core_set_playback_gain_db(
+          core_, VolumePercentToGainDb(clamped));
+    } else if (kind == "ringtone" &&
+               api_.linphone_core_set_ring_level != nullptr) {
+      api_.linphone_core_set_ring_level(core_, clamped);
+    }
+  }
+
+  void RestoreAudioVolumeLevels() {
+    ApplyAudioVolume("microphone",
+                     LoadRegistryLevel(kMicrophoneVolumeRegistryValue));
+    ApplyAudioVolume("callAudio",
+                     LoadRegistryLevel(kCallAudioVolumeRegistryValue));
+    ApplyAudioVolume("ringtone",
+                     LoadRegistryLevel(kRingtoneVolumeRegistryValue));
+  }
+
+  void GetAudioVolumeLevels(std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    result->Success(EncodableValue(EncodableMap{
+        {EncodableValue("microphone"),
+         EncodableValue(LoadRegistryLevel(kMicrophoneVolumeRegistryValue))},
+        {EncodableValue("callAudio"),
+         EncodableValue(LoadRegistryLevel(kCallAudioVolumeRegistryValue))},
+        {EncodableValue("ringtone"),
+         EncodableValue(LoadRegistryLevel(kRingtoneVolumeRegistryValue))},
+    }));
+  }
+
+  void SetAudioVolume(const std::string& kind, int level,
+                      std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    const int clamped = std::clamp(level, 0, 100);
+    const wchar_t* registry_value = nullptr;
+    if (kind == "microphone") {
+      registry_value = kMicrophoneVolumeRegistryValue;
+    } else if (kind == "callAudio") {
+      registry_value = kCallAudioVolumeRegistryValue;
+    } else if (kind == "ringtone") {
+      registry_value = kRingtoneVolumeRegistryValue;
+    } else {
+      result->Error("AUDIO_VOLUME", "Unknown desktop audio volume control.");
+      return;
+    }
+    ApplyAudioVolume(kind, clamped);
+    if (!SaveRegistryLevel(registry_value, clamped)) {
+      result->Error("AUDIO_VOLUME", "Unable to save the audio volume.");
+      return;
+    }
+    result->Success();
+  }
+
   void PlayAudioTestSound(std::unique_ptr<MethodResult> result) {
     std::lock_guard<std::mutex> lock(core_mutex_);
     if (!EnsureReady(result.get())) return;
@@ -2340,6 +2452,7 @@ class LinphoneWindowsBridge::Impl {
   }
 
   void RestorePreferredAudioDevices() {
+    RestoreAudioVolumeLevels();
     const std::string output_id = LoadRegistryString(kAudioOutputRegistryValue);
     const std::string input_id = LoadRegistryString(kAudioInputRegistryValue);
     if (output_id.empty() && input_id.empty()) return;
