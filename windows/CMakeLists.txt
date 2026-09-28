@@ -97,6 +97,14 @@ endif()
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${INSTALL_BUNDLE_ROOT}"
   COMPONENT Runtime)
 
+# Keep the updater independent of Flutter and the installed directory. A copy
+# runs from the user's temporary directory while Windows replaces VoipCloud.
+add_executable(VoipCloudUpdater WIN32 "runner/update_helper.cpp")
+apply_standard_settings(VoipCloudUpdater)
+target_link_libraries(VoipCloudUpdater PRIVATE "bcrypt.lib" "shell32.lib")
+install(TARGETS VoipCloudUpdater RUNTIME DESTINATION "${INSTALL_BUNDLE_ROOT}"
+  COMPONENT Runtime)
+
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 

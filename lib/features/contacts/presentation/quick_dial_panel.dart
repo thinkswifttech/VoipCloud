@@ -139,6 +139,8 @@ class QuickDialPanel extends ConsumerWidget {
       );
       if (!context.mounted) return;
       messenger.showSnackBar(SnackBar(content: Text('Saved to $location')));
+    } on FileSaveCancelled {
+      return;
     } on PlatformException catch (error) {
       if (!context.mounted) return;
       messenger.showSnackBar(

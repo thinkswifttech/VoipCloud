@@ -158,6 +158,27 @@ void main() {
         expect(history.items.single.direction, CallDirection.incoming);
       },
     );
+
+    test('native per-device rejection remains declined in history', () async {
+      platform.emitCall(_event('native-decline', 'ringing'));
+      await _flushEvents();
+
+      platform.emitCall(
+        _event(
+          'native-decline',
+          'ended',
+          stateMessage: 'Busy Here | Locally declined',
+        ),
+      );
+      await _flushEvents();
+      await _flushEvents();
+
+      expect(history.items, hasLength(1));
+      expect(
+        history.items.single.effectiveDisposition,
+        CallHistoryDisposition.declined,
+      );
+    });
   });
 }
 

@@ -4,13 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../core/files/downloads_saver.dart';
 import '../../../features/calls/presentation/caller_avatar.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/presentation/contacts_providers.dart';
+import '../../../features/contacts/domain/contact.dart';
+import '../../../features/contacts/data/device_contacts_repository.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../features/messages/domain/carrier_message.dart';
 import '../../../features/messages/domain/messaging_repository.dart';
@@ -124,11 +128,15 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       contacts: contacts,
       directory: directory,
     );
-    final isSavedContact = contacts.any(
-      (contact) => contactMatchesRemoteIdentity(contact, widget.remoteNumber),
-    );
+    Contact? savedContact;
+    for (final contact in contacts) {
+      if (contactMatchesRemoteIdentity(contact, widget.remoteNumber)) {
+        savedContact = contact;
+        break;
+      }
+    }
     final canAddContact =
-        !isSavedContact &&
+        savedContact == null &&
         contactsState.hasValue &&
         identity.number.isNotEmpty &&
         ref.read(deviceContactsRepositoryProvider).isSupported;
@@ -146,47 +154,59 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
             icon: const Icon(AppIcons.back),
           ),
           titleSpacing: 0,
-          title: Row(
-            children: [
-              CallerAvatar(
-                identity: identity,
-                radius: 18,
-                backgroundColor: theme.brightness == Brightness.dark
-                    ? const Color(0xFF303641)
-                    : Colors.white,
-                foregroundColor: theme.colorScheme.onSurface,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      identity.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    if (identity.number.isNotEmpty &&
-                        identity.number != identity.label)
+          title: InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: identity.number.isEmpty || !contactsState.hasValue
+                ? null
+                : () => _openContactCard(savedContact, identity.number),
+            child: Row(
+              children: [
+                CallerAvatar(
+                  identity: identity,
+                  radius: 18,
+                  backgroundColor: theme.brightness == Brightness.dark
+                      ? const Color(0xFF303641)
+                      : Colors.white,
+                  foregroundColor: theme.colorScheme.onSurface,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                       Text(
-                        identity.number,
+                        identity.label,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: AppTheme.numberStyle(
-                          theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
-                  ],
+                      if (identity.number.isNotEmpty &&
+                          identity.number != identity.label)
+                        Text(
+                          identity.number,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTheme.numberStyle(
+                            theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
           actions: [
+            if (identity.number.isNotEmpty)
+              IconButton(
+                tooltip: 'Call ${identity.label}',
+                onPressed: () => _openDialer(identity.number),
+                icon: const Icon(AppIcons.call),
+              ),
             if (desktopInteractions)
               IconButton(
                 tooltip: 'Refresh conversation (F5)',
@@ -630,6 +650,12 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Contact added')));
+      try {
+        await ref.read(contactsProvider.notifier).viewContact(createdId);
+      } catch (_) {
+        // The contact was saved; failing to show the optional viewer must not
+        // imply that creation failed.
+      }
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -638,6 +664,130 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
         ),
       );
     }
+  }
+
+  Future<void> _openContactCard(Contact? saved, String phoneNumber) async {
+    if (saved != null) {
+      try {
+        await ref.read(contactsProvider.notifier).viewContact(saved.id);
+      } catch (_) {
+        if (mounted) _showContactError('Could not open this contact.');
+      }
+      return;
+    }
+    final supported = ref.read(deviceContactsRepositoryProvider).isSupported;
+    final choice = await showModalBottomSheet<_ContactCardAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(phoneNumber),
+              subtitle: const Text('Not saved in contacts'),
+            ),
+            if (supported) ...[
+              ListTile(
+                leading: const Icon(Icons.person_add_alt_1_outlined),
+                title: const Text('Create new contact'),
+                onTap: () =>
+                    Navigator.pop(sheetContext, _ContactCardAction.create),
+              ),
+              ListTile(
+                leading: const Icon(Icons.person_add_outlined),
+                title: const Text('Add to existing contact'),
+                onTap: () =>
+                    Navigator.pop(sheetContext, _ContactCardAction.addExisting),
+              ),
+            ],
+            ListTile(
+              leading: const Icon(Icons.copy_outlined),
+              title: const Text('Copy number'),
+              onTap: () => Navigator.pop(sheetContext, _ContactCardAction.copy),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case _ContactCardAction.create:
+        await _addRemoteContact(phoneNumber);
+        break;
+      case _ContactCardAction.addExisting:
+        await _addToExistingContact(phoneNumber);
+        break;
+      case _ContactCardAction.copy:
+        await Clipboard.setData(ClipboardData(text: phoneNumber));
+        break;
+      case null:
+        break;
+    }
+  }
+
+  Future<void> _addToExistingContact(String phoneNumber) async {
+    try {
+      final contacts = ref.read(contactsProvider.notifier);
+      final picked = await contacts.pickContact();
+      if (!mounted || picked == null) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Add number to contact?'),
+          content: Text('Add $phoneNumber to ${picked.name}?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Add number'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      final added = await contacts.addPhoneToExistingContact(
+        picked.id,
+        phoneNumber,
+      );
+      if (!mounted) return;
+      if (!added) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('This contact already has the number.')),
+        );
+      }
+      try {
+        await contacts.viewContact(picked.id);
+      } catch (_) {
+        // Adding the number succeeded even if the native viewer cannot open.
+      }
+    } on ContactsAccessException {
+      if (mounted) {
+        _showContactError('Allow contacts access to add this number.');
+      }
+    } catch (_) {
+      if (mounted) _showContactError('Could not update this contact.');
+    }
+  }
+
+  void _showContactError(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _openDialer(String phoneNumber) {
+    final router = GoRouter.of(context);
+    Navigator.of(context, rootNavigator: true).pop();
+    router.go(
+      Uri(
+        path: RoutePaths.dialer,
+        queryParameters: {'to': phoneNumber},
+      ).toString(),
+    );
   }
 
   Future<void> _showMessageActions(CarrierMessage message) async {
@@ -1847,6 +1997,8 @@ class _MessageAttachmentViewState
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Saved to $location')));
+    } on FileSaveCancelled {
+      return;
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -2176,5 +2328,7 @@ class _MessageMeta extends StatelessWidget {
 }
 
 enum _ThreadAction { addContact, block, unblock }
+
+enum _ContactCardAction { create, addExisting, copy }
 
 enum _MessageAction { reply, copy, delete }

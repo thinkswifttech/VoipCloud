@@ -1,7 +1,7 @@
 name: phone_app
 description: "ThinkSwift VoipCloud softphone app."
 publish_to: "none"
-version: 1.0.1+32
+version: 1.0.1+33
 
 environment:
   sdk: ^3.11.5
@@ -33,7 +33,9 @@ dependencies:
   zxing2: ^0.2.4
   connectivity_plus: ^6.1.5
   cryptography: ^2.9.0
+  crypto: ^3.0.7
   path_provider: ^2.1.6
+  share_plus: ^13.3.0
 
 dev_dependencies:
   flutter_test:

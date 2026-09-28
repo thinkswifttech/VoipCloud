@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 class CarrierMessage {
@@ -42,7 +43,11 @@ class CarrierMessage {
               localNumber: localNumber,
             ),
       direction: direction,
-      text: _string(json['text'] ?? json['body']),
+      text: _inboundMmsCaption(
+        _string(json['text'] ?? json['body']),
+        direction: direction,
+        hasAttachments: attachments is List && attachments.isNotEmpty,
+      ),
       status: MessageStatusCodec.parse(
         _string(json['status'] ?? json['state']),
       ),
@@ -81,6 +86,56 @@ class CarrierMessage {
           (attachments.length == 1 &&
               attachments.single.state == MessageAttachmentState.ready &&
               attachments.single.downloadUri != null));
+}
+
+// Older carrier events can contain a quoted-printable MMS caption even though
+// the API body is JSON. Keep this narrow: ordinary SMS and intentional literal
+// `=XX` text must not be rewritten.
+String _inboundMmsCaption(
+  String value, {
+  required MessageDirection direction,
+  required bool hasAttachments,
+}) {
+  if (direction != MessageDirection.incoming ||
+      !hasAttachments ||
+      !RegExp(r'(?:=[0-9A-Fa-f]{2}){2,}').hasMatch(value)) {
+    return value;
+  }
+
+  final source = utf8.encode(value);
+  final decoded = <int>[];
+  for (var index = 0; index < source.length; index++) {
+    if (source[index] == 0x3d && index + 2 < source.length) {
+      final high = _hexDigit(source[index + 1]);
+      final low = _hexDigit(source[index + 2]);
+      if (high >= 0 && low >= 0) {
+        decoded.add((high << 4) | low);
+        index += 2;
+        continue;
+      }
+      if (source[index + 1] == 0x0a) {
+        index++;
+        continue;
+      }
+      if (source[index + 1] == 0x0d && source[index + 2] == 0x0a) {
+        index += 2;
+        continue;
+      }
+    }
+    decoded.add(source[index]);
+  }
+  try {
+    return utf8.decode(decoded, allowMalformed: false);
+  } on FormatException {
+    return value;
+  }
+}
+
+int _hexDigit(int value) {
+  if (value >= 0x30 && value <= 0x39) return value - 0x30;
+  if (value >= 0x41 && value <= 0x46) return value - 0x41 + 10;
+  if (value >= 0x61 && value <= 0x66) return value - 0x61 + 10;
+  return -1;
 }
 
 class MessageAttachment {

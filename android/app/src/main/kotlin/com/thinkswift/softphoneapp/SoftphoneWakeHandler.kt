@@ -153,7 +153,7 @@ internal object SoftphoneWakeHandler {
             else -> NotificationCompat.PRIORITY_HIGH
         }
         val builder = NotificationCompat.Builder(context, notificationChannelId)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_call_answer)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(notificationPriority)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -290,6 +290,7 @@ internal object SoftphoneWakeHandler {
                 ).apply {
                     description = "New carrier SMS and MMS notifications"
                     lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+                    setShowBadge(true)
                 }
             )
         }
@@ -326,13 +327,13 @@ internal object SoftphoneWakeHandler {
             sender
         )
         val publicNotification = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle("New message")
             .setContentText("Open VoIPCloud to view it")
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .build()
         val notification = NotificationCompat.Builder(context, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_message)
             .setContentTitle(senderName)
             .setContentText(preview)
             .setStyle(messagingStyle)

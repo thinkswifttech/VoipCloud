@@ -38,6 +38,45 @@ private func nativeCallTrace(
   )
 }
 
+private enum IOSAppBadge {
+  private static var requestedCount = 0
+
+  static func setCount(_ count: Int) {
+    DispatchQueue.main.async {
+      requestedCount = max(0, count)
+      applyCurrentCount()
+    }
+  }
+
+  static func refresh() {
+    DispatchQueue.main.async { applyCurrentCount() }
+  }
+
+  private static func applyCurrentCount() {
+    let count = requestedCount
+    UNUserNotificationCenter.current().getNotificationSettings { settings in
+      DispatchQueue.main.async {
+        // An earlier asynchronous settings query must not replace a newer
+        // missed-call or unread-message count.
+        guard count == requestedCount else { return }
+        guard settings.badgeSetting == .enabled else {
+          NSLog("Softphone/AppBadge badges are disabled in iOS notification settings")
+          return
+        }
+        if #available(iOS 16.0, *) {
+          UNUserNotificationCenter.current().setBadgeCount(count) { error in
+            if let error {
+              NSLog("Softphone/AppBadge update failed: %@", error.localizedDescription)
+            }
+          }
+        } else {
+          UIApplication.shared.applicationIconBadgeNumber = count
+        }
+      }
+    }
+  }
+}
+
 #if canImport(linphonesw)
 import linphonesw
 #endif
@@ -72,6 +111,7 @@ import linphonesw
   }
 
   override func applicationWillEnterForeground(_ application: UIApplication) {
+    IOSAppBadge.refresh()
     LinphoneFlutterBridge.shared?.handleEnterForeground()
     super.applicationWillEnterForeground(application)
   }
@@ -138,6 +178,7 @@ import linphonesw
       }
       NSLog("Softphone/Notifications authorization granted=%@", granted ? "true" : "false")
       DispatchQueue.main.async {
+        IOSAppBadge.refresh()
         application.registerForRemoteNotifications()
       }
     }
@@ -508,17 +549,7 @@ final class LinphoneFlutterBridge {
       if call.method == "setAppBadgeCount" {
         let arguments = call.arguments as? [String: Any]
         let count = max(0, (arguments?["count"] as? NSNumber)?.intValue ?? 0)
-        if #available(iOS 16.0, *) {
-          UNUserNotificationCenter.current().setBadgeCount(count) { error in
-            if let error {
-              NSLog("Softphone/AppBadge update failed: %@", error.localizedDescription)
-            }
-          }
-        } else {
-          DispatchQueue.main.async {
-            UIApplication.shared.applicationIconBadgeNumber = count
-          }
-        }
+        IOSAppBadge.setCount(count)
         result(nil)
         return
       }
@@ -1381,10 +1412,12 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
   private var pushOnlyCallKitUuids: Set<UUID> = []
   private var pushCallIdByUuid: [UUID: String] = [:]
   private var rejectedPushCallIds: Set<String> = []
+  private var locallyDeclinedCallIds: Set<String> = []
   private var pendingAnswerCallUuids = Set<UUID>()
   private var answerAcceptanceStarted: Set<UUID> = []
   private var pendingResumeAttempts: [ObjectIdentifier: Int] = [:]
   private var rejectNextIncomingSipCall = false
+  private var locallyDeclineNextIncomingSipCall = false
   private struct PendingOutgoingCall {
     let startSipCall: () throws -> Call
     let completion: (Result<Call, Error>) -> Void
@@ -1652,6 +1685,10 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     switch state {
     case .PushIncomingReceived:
       if rejectedPushCallIds.contains(linphoneId) || rejectNextIncomingSipCall {
+        if locallyDeclineNextIncomingSipCall {
+          locallyDeclinedCallIds.insert(linphoneId)
+          locallyDeclineNextIncomingSipCall = false
+        }
         end(call: call)
         endCallKitCall(linphoneId: linphoneId)
         return
@@ -1664,6 +1701,10 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
       // still be linked to it so caller details and a pending lock-screen answer
       // apply to the authoritative SIP call.
       if rejectedPushCallIds.remove(linphoneId) != nil || rejectNextIncomingSipCall {
+        if locallyDeclineNextIncomingSipCall {
+          locallyDeclinedCallIds.insert(linphoneId)
+          locallyDeclineNextIncomingSipCall = false
+        }
         rejectNextIncomingSipCall = false
         end(call: call)
         endCallKitCall(linphoneId: linphoneId)
@@ -1957,10 +1998,12 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     pushOnlyCallKitUuids.removeAll()
     pushCallIdByUuid.removeAll()
     rejectedPushCallIds.removeAll()
+    locallyDeclinedCallIds.removeAll()
     pendingAnswerCallUuids.removeAll()
     answerAcceptanceStarted.removeAll()
     pendingResumeAttempts.removeAll()
     rejectNextIncomingSipCall = false
+    locallyDeclineNextIncomingSipCall = false
     audioSessionActivated = false
     outgoingAudioSessionManaged = false
     NSLog("Softphone/CallKit provider reset; terminated all SIP calls")
@@ -2054,6 +2097,10 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     failPendingAnswer(uuid: action.callUUID)
     if let linphoneId = linphoneIdByCallKitUuid[action.callUUID],
        let call = findCallByLinphoneId?(linphoneId) {
+      if call.dir == .Incoming &&
+         (call.state == .IncomingReceived || call.state == .IncomingEarlyMedia) {
+        locallyDeclinedCallIds.insert(linphoneId)
+      }
       end(call: call)
     } else if pushOnlyCallKitUuids.remove(action.callUUID) != nil {
       // The user rejected the PushKit placeholder before the SIP INVITE was
@@ -2061,13 +2108,16 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
       // it arrives instead of presenting a second incoming-call screen.
       if let callId = pushCallIdByUuid.removeValue(forKey: action.callUUID) {
         rejectedPushCallIds.insert(callId)
+        locallyDeclinedCallIds.insert(callId)
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
           self?.rejectedPushCallIds.remove(callId)
         }
       } else {
         rejectNextIncomingSipCall = true
+        locallyDeclineNextIncomingSipCall = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
           self?.rejectNextIncomingSipCall = false
+          self?.locallyDeclineNextIncomingSipCall = false
         }
       }
     }
@@ -2497,7 +2547,8 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
   private func end(call: Call) {
     do {
       if call.state == .IncomingReceived || call.state == .IncomingEarlyMedia {
-        try call.decline(reason: .Declined)
+        // Reject only this device; a global decline would stop other forks.
+        try call.decline(reason: .Busy)
       } else {
         try call.terminate()
       }
@@ -2511,6 +2562,14 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
     return normalized.contains("call completed elsewhere")
       || normalized.contains("answered elsewhere")
       || normalized.contains("completed elsewhere")
+  }
+
+  func wasLocallyDeclined(linphoneId: String) -> Bool {
+    locallyDeclinedCallIds.contains(linphoneId)
+  }
+
+  func clearLocalDecline(linphoneId: String) {
+    locallyDeclinedCallIds.remove(linphoneId)
   }
 
   fileprivate static func callTerminationMessage(
@@ -3068,7 +3127,7 @@ private final class NativeLinphoneController: LinphoneController {
                  do {
                    if activeCall.state == .IncomingReceived ||
                       activeCall.state == .IncomingEarlyMedia {
-                     try activeCall.decline(reason: .Declined)
+                     try activeCall.decline(reason: .Busy)
                    } else {
                      try activeCall.terminate()
                    }
@@ -3091,7 +3150,7 @@ private final class NativeLinphoneController: LinphoneController {
            ) {
           return
         }
-        try findCall(id: argument(call, "callId"))?.decline(reason: .Declined)
+        try findCall(id: argument(call, "callId"))?.decline(reason: .Busy)
         result(nil)
       case "endCall":
         if let activeCall = findCall(id: argument(call, "callId")),
@@ -4741,10 +4800,15 @@ private final class NativeLinphoneController: LinphoneController {
       calls[id] = call
     }
     let status = callStatus(state)
-    let diagnosticMessage = SoftphoneCallKitController.callTerminationMessage(
+    let baseDiagnosticMessage = SoftphoneCallKitController.callTerminationMessage(
       call: call,
       callbackMessage: stateMessage
     )
+    let localDecline = terminal &&
+      SoftphoneCallKitController.shared.wasLocallyDeclined(linphoneId: id)
+    let diagnosticMessage = localDecline
+      ? [baseDiagnosticMessage, "Locally declined"].filter { !$0.isEmpty }.joined(separator: " | ")
+      : baseDiagnosticMessage
     let answeredElsewhere = call.dir == .Incoming
       && SoftphoneCallKitController.isAnsweredElsewhereReason(diagnosticMessage)
     nativeCallTrace(
@@ -4822,6 +4886,7 @@ private final class NativeLinphoneController: LinphoneController {
       "answeredElsewhere": answeredElsewhere
     ])
     if terminal {
+      SoftphoneCallKitController.shared.clearLocalDecline(linphoneId: id)
       DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
         self?.callStartedAtByObject.removeValue(forKey: objectId)
         self?.callStartedAtById.removeValue(forKey: id)

@@ -2,6 +2,39 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/features/messages/domain/carrier_message.dart';
 
 void main() {
+  test('decodes quoted-printable UTF-8 in an inbound MMS caption', () {
+    final message = CarrierMessage.fromJson({
+      'id': 'mms-caption',
+      'direction': 'inbound',
+      'body': 'I=E2=80=99m so cute =F0=9F=98=89',
+      'attachments': [
+        {'id': 'photo', 'mime_type': 'image/jpeg'},
+      ],
+    });
+
+    expect(message.text, 'I’m so cute 😉');
+  });
+
+  test('does not reinterpret ordinary SMS or invalid MMS escapes', () {
+    const literal = 'Literal =E2=80=99 text';
+    final sms = CarrierMessage.fromJson({
+      'id': 'sms',
+      'direction': 'inbound',
+      'body': literal,
+    });
+    final invalidMms = CarrierMessage.fromJson({
+      'id': 'invalid-mms',
+      'direction': 'inbound',
+      'body': 'bad =F0=9F escape',
+      'attachments': [
+        {'id': 'photo'},
+      ],
+    });
+
+    expect(sms.text, literal);
+    expect(invalidMms.text, 'bad =F0=9F escape');
+  });
+
   test('parses multipart sending progress', () {
     final message = CarrierMessage.fromJson({
       'id': 'message-1',

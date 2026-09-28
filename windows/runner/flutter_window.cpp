@@ -26,6 +26,11 @@ UINT ActivateExistingMessage() {
   static const UINT message = RegisterWindowMessage(kActivateExistingMessageName);
   return message;
 }
+
+UINT TaskbarButtonCreatedMessage() {
+  static const UINT message = RegisterWindowMessageW(L"TaskbarButtonCreated");
+  return message;
+}
 }  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project,
@@ -56,6 +61,10 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger(), GetHandle());
   taskbar_pin_bridge_ = std::make_unique<TaskbarPinBridge>(
       flutter_controller_->engine()->messenger());
+  windows_update_bridge_ = std::make_unique<WindowsUpdateBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
+  windows_email_bridge_ = std::make_unique<WindowsEmailBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   AddTrayIcon();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -77,6 +86,8 @@ void FlutterWindow::OnDestroy() {
   SaveWindowBounds();
   RemoveTrayIcon();
   taskbar_pin_bridge_ = nullptr;
+  windows_update_bridge_ = nullptr;
+  windows_email_bridge_ = nullptr;
   linphone_bridge_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -95,6 +106,10 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       taskbar_pin_bridge_->OfferPin();
     }
     return 1;
+  }
+  if (message == TaskbarButtonCreatedMessage()) {
+    if (linphone_bridge_) linphone_bridge_->ReapplyAppBadge();
+    return 0;
   }
 
   // These private messages drive Linphone iteration and deliver queued SIP

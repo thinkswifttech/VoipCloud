@@ -10,6 +10,8 @@
 #include "win32_window.h"
 #include "linphone_windows_bridge.h"
 #include "taskbar_pin_bridge.h"
+#include "windows_update_bridge.h"
+#include "windows_email_bridge.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -41,6 +43,8 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<LinphoneWindowsBridge> linphone_bridge_;
   std::unique_ptr<TaskbarPinBridge> taskbar_pin_bridge_;
+  std::unique_ptr<WindowsUpdateBridge> windows_update_bridge_;
+  std::unique_ptr<WindowsEmailBridge> windows_email_bridge_;
   NOTIFYICONDATA tray_icon_{};
   bool tray_icon_added_ = false;
   bool quitting_ = false;

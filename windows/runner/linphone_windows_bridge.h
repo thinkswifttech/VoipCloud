@@ -19,6 +19,7 @@ class LinphoneWindowsBridge {
   LinphoneWindowsBridge& operator=(const LinphoneWindowsBridge&) = delete;
 
   bool ProcessWindowMessage(UINT message);
+  void ReapplyAppBadge();
 
  private:
   struct PendingEvent {
@@ -32,6 +33,7 @@ class LinphoneWindowsBridge {
   std::unique_ptr<Impl> impl_;
   std::mutex pending_mutex_;
   std::vector<PendingEvent> pending_events_;
+  int app_badge_count_ = 0;
 
   void EnqueueEvent(std::string stream, flutter::EncodableMap payload);
   void DrainPendingEvents();

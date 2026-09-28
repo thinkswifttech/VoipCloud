@@ -7,6 +7,13 @@ import 'package:phone_app/features/session/domain/app_session.dart';
 import 'package:phone_app/features/session/presentation/session_controller.dart';
 
 void main() {
+  test('badge counts unread messages across conversations', () {
+    expect(
+      unreadMessageBadgeCount({'first': 2, 'second': 3, 'invalid': -1}),
+      5,
+    );
+  });
+
   test(
     'badge provider starts messaging discovery before entitlement is known',
     () {

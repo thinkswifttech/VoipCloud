@@ -170,6 +170,68 @@ class DeviceContactsRepository {
     return native.FlutterContacts.native.showEditor(id);
   }
 
+  Future<void> openNativeContactViewer(String id) async {
+    _ensureMobilePlatform();
+    await native.FlutterContacts.native.showViewer(id);
+  }
+
+  Future<({String id, String name})?> pickNativeContact() async {
+    _ensureMobilePlatform();
+    final picked = await native.FlutterContacts.native.showPicker();
+    final id = picked?.id?.trim() ?? '';
+    if (id.isEmpty) return null;
+    return (id: id, name: picked?.displayName?.trim() ?? 'Contact');
+  }
+
+  /// Adds a number only after the user explicitly chooses an existing card.
+  /// Fetching every property preserves its other fields on update.
+  Future<bool> addPhoneToExistingContact(String id, String phoneNumber) async {
+    _ensureMobilePlatform();
+    final number = phoneNumber.trim();
+    if (id.trim().isEmpty || number.isEmpty) {
+      throw const FormatException('A contact and number are required.');
+    }
+    await _ensureReadPermission();
+    var status = await native.FlutterContacts.permissions.check(
+      native.PermissionType.readWrite,
+    );
+    if (status == native.PermissionStatus.notDetermined ||
+        status == native.PermissionStatus.denied) {
+      status = await native.FlutterContacts.permissions.request(
+        native.PermissionType.readWrite,
+      );
+    }
+    if (status != native.PermissionStatus.granted &&
+        status != native.PermissionStatus.limited) {
+      throw ContactsAccessException(
+        canOpenSettings:
+            status == native.PermissionStatus.permanentlyDenied ||
+            status == native.PermissionStatus.restricted,
+      );
+    }
+    final contact = await native.FlutterContacts.get(
+      id,
+      properties: native.ContactProperties.allProperties,
+    );
+    if (contact == null) {
+      throw const FormatException('This contact is no longer available.');
+    }
+    if (contact.phones.any(
+      (phone) => contactPhoneNumbersMatch(phone.number, number),
+    )) {
+      return false;
+    }
+    await native.FlutterContacts.update(
+      contact.copyWith(
+        phones: [
+          ...contact.phones,
+          native.Phone(number: number),
+        ],
+      ),
+    );
+    return true;
+  }
+
   Future<void> openSettings() =>
       native.FlutterContacts.permissions.openSettings();
 
@@ -391,6 +453,16 @@ class DeviceContactsRepository {
     final text = value?.trim() ?? '';
     return text.isEmpty ? null : text;
   }
+}
+
+bool contactPhoneNumbersMatch(String left, String right) {
+  final a = left.replaceAll(RegExp(r'\D'), '');
+  final b = right.replaceAll(RegExp(r'\D'), '');
+  if (a.isEmpty || b.isEmpty) return false;
+  if (a == b) return true;
+  return a.length >= 10 &&
+      b.length >= 10 &&
+      a.substring(a.length - 10) == b.substring(b.length - 10);
 }
 
 List<bool> _contactNumbersEligibility(List<List<String>> numberLists) {

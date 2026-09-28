@@ -11,6 +11,8 @@ add_executable(${BINARY_NAME} WIN32
   "linphone_windows_bridge.cpp"
   "main.cpp"
   "taskbar_pin_bridge.cpp"
+  "windows_update_bridge.cpp"
+  "windows_email_bridge.cpp"
   "utils.cpp"
   "win32_window.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"

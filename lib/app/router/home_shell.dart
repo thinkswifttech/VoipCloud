@@ -38,12 +38,17 @@ final appBadgeCountsProvider = Provider<AppBadgeCounts>((ref) {
   if (!isCarrierMessagingEnabled(appSession?.carrierMessaging)) {
     return (missedCalls: missedCalls, unreadMessages: 0);
   }
-  final unreadMessages = messaging.unreadByRemoteNumber.values.fold<int>(
-    0,
-    (total, count) => total + (count < 0 ? 0 : count),
+  final unreadMessages = unreadMessageBadgeCount(
+    messaging.unreadByRemoteNumber,
   );
   return (missedCalls: missedCalls, unreadMessages: unreadMessages);
 });
+
+int unreadMessageBadgeCount(Map<String, int> unreadByRemoteNumber) =>
+    unreadByRemoteNumber.values.fold<int>(
+      0,
+      (total, count) => total + (count < 0 ? 0 : count),
+    );
 
 class HomeShell extends ConsumerWidget {
   const HomeShell({required this.child, required this.location, super.key});
@@ -85,6 +90,11 @@ class HomeShell extends ConsumerWidget {
 
     return _NativeAppBadgeSync(
       counts: badgeCounts,
+      onResume: () {
+        if (showCarrierMessaging) {
+          unawaited(ref.read(messagesControllerProvider.notifier).refresh());
+        }
+      },
       child: LayoutBuilder(
         builder: (context, constraints) {
           final showRail = constraints.maxWidth >= 780;
@@ -286,20 +296,43 @@ class HomeShell extends ConsumerWidget {
 const _badgePlatformChannel = VoipPlatformChannel();
 
 class _NativeAppBadgeSync extends StatefulWidget {
-  const _NativeAppBadgeSync({required this.counts, required this.child});
+  const _NativeAppBadgeSync({
+    required this.counts,
+    required this.onResume,
+    required this.child,
+  });
 
   final AppBadgeCounts counts;
+  final VoidCallback onResume;
   final Widget child;
 
   @override
   State<_NativeAppBadgeSync> createState() => _NativeAppBadgeSyncState();
 }
 
-class _NativeAppBadgeSyncState extends State<_NativeAppBadgeSync> {
+class _NativeAppBadgeSyncState extends State<_NativeAppBadgeSync>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scheduleSync();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      widget.onResume();
+      // The OS may discard a taskbar or launcher badge while the app is
+      // suspended even when its unread counts have not changed.
+      _scheduleSync();
+    }
   }
 
   @override

@@ -19,10 +19,11 @@ bool ActivateExistingInstance(bool offer_taskbar_pin) {
       RegisterWindowMessage(kActivateExistingMessageName);
   if (activation_message == 0) return false;
 
-  // The first process may own the mutex just before its top-level window is
-  // created. Retry briefly so rapid Start-menu clicks still activate that
-  // process instead of appearing to do nothing.
-  for (int attempt = 0; attempt < 40; ++attempt) {
+  // An installer launch can overlap the existing process's startup. Wait for
+  // its window and confirm that it actually handled the activation request;
+  // merely finding the window does not mean it was ready to restore itself.
+  const ULONGLONG deadline = GetTickCount64() + 10000;
+  do {
     HWND existing = FindWindow(kFlutterWindowClassName, L"VoipCloud");
     if (existing != nullptr) {
       DWORD process_id = 0;
@@ -30,14 +31,17 @@ bool ActivateExistingInstance(bool offer_taskbar_pin) {
       if (process_id != 0) {
         AllowSetForegroundWindow(process_id);
       }
-      DWORD_PTR ignored = 0;
-      SendMessageTimeout(existing, activation_message,
-                         offer_taskbar_pin ? 1 : 0, 0,
-                         SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &ignored);
-      return true;
+      DWORD_PTR handled = 0;
+      if (SendMessageTimeout(existing, activation_message,
+                             offer_taskbar_pin ? 1 : 0, 0,
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 250,
+                             &handled) != 0 &&
+          handled == 1) {
+        return true;
+      }
     }
     Sleep(50);
-  }
+  } while (GetTickCount64() < deadline);
   return false;
 }
 }  // namespace
@@ -63,7 +67,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     // A sign-in launch should never interrupt an instance the user already
     // opened. Interactive launches still restore the existing tray process.
     if (!start_hidden) {
-      ActivateExistingInstance(offer_taskbar_pin);
+      const bool activated = ActivateExistingInstance(offer_taskbar_pin);
+      CloseHandle(single_instance_mutex);
+      return activated ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     CloseHandle(single_instance_mutex);
     return EXIT_SUCCESS;

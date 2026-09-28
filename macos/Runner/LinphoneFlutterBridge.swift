@@ -136,6 +136,7 @@ private enum DesktopAudioVolumeStore {
   static let microphoneKey = "voipcloud_microphone_volume"
   static let callAudioKey = "voipcloud_call_audio_volume"
   static let ringtoneKey = "voipcloud_ringtone_volume"
+  static let ringbackKey = "voipcloud_ringback_volume"
 
   static func level(for key: String) -> Int {
     guard UserDefaults.standard.object(forKey: key) != nil else { return 100 }
@@ -242,8 +243,11 @@ private final class NativeLinphoneController: LinphoneController {
   private let audioInputLevelLock = NSLock()
   private var audioInputLevel: Double = 0
   private var audioTestToneURL: URL?
+  private var ringtoneSourceURL: URL?
+  private var ringbackSourceURL: URL?
   private var desktopNotificationCallIds = Set<String>()
   private var dndDeclinedCalls = Set<ObjectIdentifier>()
+  private var locallyDeclinedCallIds = Set<String>()
   private var deviceDndEnabled = DesktopDndStore.isEnabled
   private var notificationObservers: [NSObjectProtocol] = []
 
@@ -331,7 +335,7 @@ private final class NativeLinphoneController: LinphoneController {
         try incomingCall.accept()
         result(nil)
       case "rejectCall":
-        try findCall(id: argument(call, "callId"))?.decline(reason: .Declined)
+        try findCall(id: argument(call, "callId"))?.decline(reason: .Busy)
         result(nil)
       case "endCall":
         try findCall(id: argument(call, "callId"))?.terminate()
@@ -446,6 +450,7 @@ private final class NativeLinphoneController: LinphoneController {
     newCore.micEnabled = true
     newCore.config?.setInt(section: "sip", key: "inactive_audio_on_pause", value: 0)
     newCore.avpfMode = .Disabled
+    configureDesktopCallSounds(on: newCore)
     restoreAudioVolumes(on: newCore)
 
     let newDelegate = CoreDelegateStub(
@@ -872,7 +877,7 @@ private final class NativeLinphoneController: LinphoneController {
     guard dndDeclinedCalls.insert(key).inserted else { return }
     clearDesktopCallNotification(callId: callId(call))
     do {
-      try call.decline(reason: .Declined)
+      try call.decline(reason: .Busy)
     } catch {
       NSLog("VoIPCloud/macOS device DND decline failed: %@", error.localizedDescription)
     }
@@ -1260,6 +1265,9 @@ private final class NativeLinphoneController: LinphoneController {
       ),
       "ringtone": DesktopAudioVolumeStore.level(
         for: DesktopAudioVolumeStore.ringtoneKey
+      ),
+      "ringback": DesktopAudioVolumeStore.level(
+        for: DesktopAudioVolumeStore.ringbackKey
       )
     ]
   }
@@ -1271,11 +1279,162 @@ private final class NativeLinphoneController: LinphoneController {
     currentCore.playbackGainDb = gainDb(for: DesktopAudioVolumeStore.level(
       for: DesktopAudioVolumeStore.callAudioKey
     ))
-    currentCore.config?.setInt(
-      section: "sound",
-      key: "ring_level",
-      value: DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.ringtoneKey)
+    do {
+      try applyRingtoneVolume(
+        on: currentCore,
+        level: DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.ringtoneKey)
+      )
+    } catch {
+      NSLog("Softphone/Audio ringtone level could not be restored: %@", error.localizedDescription)
+    }
+    do {
+      try applyRingbackVolume(
+        on: currentCore,
+        level: DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.ringbackKey)
+      )
+    } catch {
+      NSLog("Softphone/Audio ringback level could not be restored: %@", error.localizedDescription)
+    }
+  }
+
+  private func configureDesktopCallSounds(on currentCore: Core) {
+    let existingRing = currentCore.ring
+    ringtoneSourceURL = desktopSoundURL(
+      relativePath: "rings/oldphone-mono.wav",
+      preferredPath: existingRing
     )
+    if let ringtoneSourceURL { currentCore.ring = ringtoneSourceURL.path }
+    ringbackSourceURL = desktopSoundURL(
+      relativePath: "ringback.wav",
+      preferredPath: currentCore.ringback
+    ) ?? (try? makeDesktopRingbackTone())
+    if let ringbackURL = ringbackSourceURL {
+      currentCore.ringback = ringbackURL.path
+    } else {
+      NSLog("Softphone/Audio outgoing ringback could not be prepared")
+    }
+  }
+
+  private func makeDesktopRingbackTone() throws -> URL {
+    // North American ringback cadence: two seconds of tone, four seconds quiet.
+    let sampleRate = 8_000
+    let sampleCount = sampleRate * 6
+    var samples = Data(capacity: sampleCount * 2)
+    for index in 0..<sampleCount {
+      let time = Double(index) / Double(sampleRate)
+      let value: Int16
+      if time < 2 {
+        let edge = min(1, min(time / 0.01, (2 - time) / 0.01))
+        let tone = (sin(2 * .pi * 440 * time) + sin(2 * .pi * 480 * time)) * 0.13
+        value = Int16(tone * edge * 32767)
+      } else {
+        value = 0
+      }
+      samples.appendLittleEndian(value)
+    }
+    var wave = Data()
+    wave.append(contentsOf: "RIFF".utf8)
+    wave.appendLittleEndian(UInt32(36 + samples.count))
+    wave.append(contentsOf: "WAVEfmt ".utf8)
+    wave.appendLittleEndian(UInt32(16))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt32(sampleRate))
+    wave.appendLittleEndian(UInt32(sampleRate * 2))
+    wave.appendLittleEndian(UInt16(2))
+    wave.appendLittleEndian(UInt16(16))
+    wave.append(contentsOf: "data".utf8)
+    wave.appendLittleEndian(UInt32(samples.count))
+    wave.append(samples)
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("VoipCloud-ringback-\(ProcessInfo.processInfo.processIdentifier).wav")
+    try wave.write(to: url, options: .atomic)
+    return url
+  }
+
+  private func desktopSoundURL(relativePath: String, preferredPath: String?) -> URL? {
+    let files = FileManager.default
+    if let preferredPath, !preferredPath.isEmpty,
+      files.fileExists(atPath: preferredPath) {
+      return URL(fileURLWithPath: preferredPath)
+    }
+    for bundle in [Bundle.main] + Bundle.allFrameworks {
+      guard let root = bundle.resourceURL else { continue }
+      for prefix in ["share/sounds/linphone", "sounds/linphone"] {
+        let candidate = root.appendingPathComponent(prefix)
+          .appendingPathComponent(relativePath)
+        if files.fileExists(atPath: candidate.path) { return candidate }
+      }
+    }
+    return nil
+  }
+
+  private func applyRingtoneVolume(on currentCore: Core, level: Int) throws {
+    guard let source = ringtoneSourceURL else {
+      throw NSError(domain: "VoIPCloud", code: 1404,
+        userInfo: [NSLocalizedDescriptionKey: "The packaged ringtone is unavailable."])
+    }
+    currentCore.ring = try scaledDesktopSoundURL(
+      source: source, level: level, name: "ringtone"
+    ).path
+  }
+
+  private func applyRingbackVolume(on currentCore: Core, level: Int) throws {
+    guard let source = ringbackSourceURL else {
+      throw NSError(domain: "VoIPCloud", code: 1407,
+        userInfo: [NSLocalizedDescriptionKey: "The outgoing ringback sound is unavailable."])
+    }
+    currentCore.ringback = try scaledDesktopSoundURL(
+      source: source, level: level, name: "ringback"
+    ).path
+  }
+
+  private func scaledDesktopSoundURL(source: URL, level: Int, name: String) throws -> URL {
+    if level == 100 { return source }
+    var bytes = [UInt8](try Data(contentsOf: source))
+    guard bytes.count >= 44,
+      String(bytes: bytes[0..<4], encoding: .ascii) == "RIFF",
+      String(bytes: bytes[8..<12], encoding: .ascii) == "WAVE" else {
+      throw NSError(domain: "VoIPCloud", code: 1405,
+        userInfo: [NSLocalizedDescriptionKey: "The ringtone is not a WAV file."])
+    }
+    func u16(_ offset: Int) -> Int {
+      Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+    }
+    func u32(_ offset: Int) -> Int {
+      u16(offset) | (u16(offset + 2) << 16)
+    }
+    var pcm16 = false
+    var audioRange: Range<Int>?
+    var offset = 12
+    while offset + 8 <= bytes.count {
+      let size = u32(offset + 4)
+      let start = offset + 8
+      guard size <= bytes.count - start else { break }
+      let kind = String(bytes: bytes[offset..<(offset + 4)], encoding: .ascii)
+      if kind == "fmt " && size >= 16 {
+        pcm16 = u16(start) == 1 && u16(start + 14) == 16
+      } else if kind == "data" {
+        audioRange = start..<(start + size)
+      }
+      offset = start + size + (size & 1)
+    }
+    guard pcm16, let range = audioRange, !range.isEmpty, range.count.isMultiple(of: 2) else {
+      throw NSError(domain: "VoIPCloud", code: 1406,
+        userInfo: [NSLocalizedDescriptionKey: "The ringtone is not 16-bit PCM audio."])
+    }
+    for index in stride(from: range.lowerBound, to: range.upperBound, by: 2) {
+      let sample = Int(Int16(bitPattern: UInt16(u16(index))))
+      let scaled = Int16(sample * level / 100)
+      let bits = UInt16(bitPattern: scaled)
+      bytes[index] = UInt8(bits & 0xff)
+      bytes[index + 1] = UInt8(bits >> 8)
+    }
+    let output = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "VoipCloud-\(name)-\(ProcessInfo.processInfo.processIdentifier)-\(level).wav"
+    )
+    try Data(bytes).write(to: output, options: .atomic)
+    return output
   }
 
   private func setAudioVolume(call: FlutterMethodCall) throws {
@@ -1297,8 +1456,11 @@ private final class NativeLinphoneController: LinphoneController {
       DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.callAudioKey)
       currentCore.playbackGainDb = gainDb(for: level)
     case "ringtone":
+      try applyRingtoneVolume(on: currentCore, level: level)
       DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.ringtoneKey)
-      currentCore.config?.setInt(section: "sound", key: "ring_level", value: level)
+    case "ringback":
+      try applyRingbackVolume(on: currentCore, level: level)
+      DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.ringbackKey)
     default:
       throw NSError(
         domain: "VoIPCloud",
@@ -1455,7 +1617,8 @@ private final class NativeLinphoneController: LinphoneController {
     let terminationMessage = [
       stateMessage,
       call.errorInfo?.phrase,
-      call.errorInfo?.subErrorInfo?.phrase
+      call.errorInfo?.subErrorInfo?.phrase,
+      locallyDeclinedCallIds.contains(id) ? "Locally declined" : nil
     ]
       .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { !$0.isEmpty }
@@ -1492,12 +1655,15 @@ private final class NativeLinphoneController: LinphoneController {
       "featureCode": isFeatureCode,
       "stateMessage": terminationMessage
     ])
+    if isTerminalCallState(state) {
+      locallyDeclinedCallIds.remove(id)
+    }
     if deviceDndEnabled && call.dir == .Incoming && isIncomingRinging(call) {
       clearDesktopCallNotification(callId: id)
       let key = ObjectIdentifier(call)
       if dndDeclinedCalls.insert(key).inserted {
         do {
-          try call.decline(reason: .Declined)
+          try call.decline(reason: .Busy)
         } catch {
           NSLog("VoIPCloud/macOS device DND decline failed: %@", error.localizedDescription)
         }
@@ -1563,8 +1729,10 @@ private final class NativeLinphoneController: LinphoneController {
     let requestedId = notification.userInfo?[DesktopCallNotification.callIdKey] as? String ?? ""
     guard let call = findCall(id: requestedId), isIncomingRinging(call) else { return }
     do {
-      try call.decline(reason: .Declined)
+      locallyDeclinedCallIds.insert(callId(call))
+      try call.decline(reason: .Busy)
     } catch {
+      locallyDeclinedCallIds.remove(callId(call))
       NSLog("VoIPCloud/macOS native decline failed: %@", error.localizedDescription)
     }
   }

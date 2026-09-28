@@ -727,7 +727,7 @@ internal object AndroidCallCoordinator {
         val target = findSession(callId) ?: preferredSession() ?: return
         target.pendingReject = true
         rememberRejectedCallId(target.snapshot.sipCallId ?: target.snapshot.sessionId)
-        LinphoneBridgeAccessor.decline(context, target.snapshot.sipCallId)
+        LinphoneBridgeAccessor.decline(context, target.snapshot.sipCallId, userInitiated = true)
         finish(context, DisconnectCause.REJECTED, "local_reject", State.ENDED, target)
     }
 
@@ -796,7 +796,7 @@ internal object AndroidCallCoordinator {
         if (cause.code == DisconnectCause.REJECTED) {
             target.pendingReject = true
             rememberRejectedCallId(target.snapshot.sipCallId ?: target.snapshot.sessionId)
-            LinphoneBridgeAccessor.decline(context, target.snapshot.sipCallId)
+            LinphoneBridgeAccessor.decline(context, target.snapshot.sipCallId, userInitiated = true)
         } else {
             LinphoneBridgeAccessor.end(context, target.snapshot.sipCallId)
         }

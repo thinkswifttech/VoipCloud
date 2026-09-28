@@ -519,7 +519,7 @@ class MainActivity : FlutterActivity() {
             else -> "Open VoIPCloud to view missed calls and messages"
         }
         val notification = NotificationCompat.Builder(this, MISSED_CALLS_CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_call_answer)
             .setContentTitle(label)
             .setContentText(detail)
             .setContentIntent(pendingIntent)
@@ -713,6 +713,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     private var core: Core? = null
     private var account: Account? = null
     private val calls = mutableMapOf<String, Call>()
+    private val locallyDeclinedCallIds = mutableSetOf<String>()
     private data class PresenceSubscription(
         val extension: String,
         val eventPackage: String
@@ -2167,6 +2168,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                 }.orEmpty()
             )
         )
+        if (isTerminalCallState(state)) locallyDeclinedCallIds.remove(id)
     }
 
     private fun emitCoordinatorSnapshot(snapshot: AndroidCallCoordinator.Snapshot) {
@@ -2295,7 +2297,8 @@ private class LinphoneBridge private constructor(private val context: android.co
         listOfNotNull(
             stateMessage?.takeIf { it.isNotBlank() },
             call.errorInfo?.phrase?.takeIf { it.isNotBlank() },
-            call.errorInfo?.subErrorInfo?.phrase?.takeIf { it.isNotBlank() }
+            call.errorInfo?.subErrorInfo?.phrase?.takeIf { it.isNotBlank() },
+            "Locally declined".takeIf { callId(call) in locallyDeclinedCallIds }
         ).distinct().joinToString(" | ")
 
     private fun recoverLiveCall(): Call? {
@@ -2466,9 +2469,13 @@ private class LinphoneBridge private constructor(private val context: android.co
         mainHandler.post(check)
     }
 
-    fun declineFromCoordinator(requestedId: String?): Boolean {
+    fun declineFromCoordinator(requestedId: String?, userInitiated: Boolean = false): Boolean {
         val incoming = findCall(requestedId) ?: findCurrentIncomingCall() ?: return false
-        return runCatching { incoming.decline(Reason.Declined); true }.getOrElse {
+        if (userInitiated) locallyDeclinedCallIds.add(callId(incoming))
+        // This device may be one of several ringing for the same extension.
+        // A global SIP decline (603) would also cancel the other devices.
+        return runCatching { incoming.decline(Reason.Busy); true }.getOrElse {
+            if (userInitiated) locallyDeclinedCallIds.remove(callId(incoming))
             Log.w("VoIPCloud/Linphone", "Coordinator decline failed", it)
             false
         }
@@ -2502,7 +2509,8 @@ private class LinphoneBridge private constructor(private val context: android.co
     fun declineIncomingFromNotification() {
         val incoming = findCurrentIncomingCall() ?: return
         try {
-            incoming.decline(Reason.Declined)
+            locallyDeclinedCallIds.add(callId(incoming))
+            incoming.decline(Reason.Busy)
         } catch (error: Throwable) {
             Log.w("VoIPCloud/Linphone", "Failed to decline incoming call from notification", error)
         }
@@ -2516,6 +2524,7 @@ private class LinphoneBridge private constructor(private val context: android.co
         core = null
         account = null
         calls.clear()
+        locallyDeclinedCallIds.clear()
     }
 
     private fun findCurrentIncomingCall(): Call? {
@@ -2819,8 +2828,13 @@ internal object LinphoneBridgeAccessor {
     fun accept(context: android.content.Context, callId: String?): Boolean =
         LinphoneBridge.shared(context.applicationContext).acceptFromCoordinator(callId)
 
-    fun decline(context: android.content.Context, callId: String?): Boolean =
-        LinphoneBridge.shared(context.applicationContext).declineFromCoordinator(callId)
+    fun decline(
+        context: android.content.Context,
+        callId: String?,
+        userInitiated: Boolean = false
+    ): Boolean =
+        LinphoneBridge.shared(context.applicationContext)
+            .declineFromCoordinator(callId, userInitiated)
 
     fun end(context: android.content.Context, callId: String?): Boolean =
         LinphoneBridge.shared(context.applicationContext).endFromCoordinator(callId)

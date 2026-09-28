@@ -33,4 +33,18 @@ void main() {
       );
     });
   });
+
+  group('contactPhoneNumbersMatch', () {
+    test('avoids duplicating an existing formatted NANP number', () {
+      expect(
+        contactPhoneNumbersMatch('(416) 555-0142', '+1 416 555 0142'),
+        isTrue,
+      );
+    });
+
+    test('does not treat different or empty numbers as the same contact phone', () {
+      expect(contactPhoneNumbersMatch('+14165550142', '+14165550143'), isFalse);
+      expect(contactPhoneNumbersMatch('', '+14165550142'), isFalse);
+    });
+  });
 }

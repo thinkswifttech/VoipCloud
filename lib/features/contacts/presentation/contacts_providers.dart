@@ -139,6 +139,24 @@ class ContactsController extends AsyncNotifier<List<Contact>> {
     return result;
   }
 
+  Future<void> viewContact(String id) async {
+    await ref
+        .read(deviceContactsRepositoryProvider)
+        .openNativeContactViewer(id);
+    await refresh();
+  }
+
+  Future<({String id, String name})?> pickContact() =>
+      ref.read(deviceContactsRepositoryProvider).pickNativeContact();
+
+  Future<bool> addPhoneToExistingContact(String id, String number) async {
+    final added = await ref
+        .read(deviceContactsRepositoryProvider)
+        .addPhoneToExistingContact(id, number);
+    await refresh();
+    return added;
+  }
+
   Future<void> openSettings() =>
       ref.read(deviceContactsRepositoryProvider).openSettings();
 }

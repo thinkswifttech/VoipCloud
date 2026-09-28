@@ -18,6 +18,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -37,6 +38,8 @@ namespace {
 constexpr UINT kLinphoneBridgeEventMessage = WM_APP + 0x5C1;
 constexpr UINT kLinphoneIterateMessage = WM_APP + 0x5C2;
 constexpr UINT kVoipCloudTrayIconId = 1;
+// LinphoneReasonBusy is device-scoped (SIP 486); Declined would be global 603.
+constexpr int kLinphoneReasonBusy = 6;
 constexpr wchar_t kVoipCloudRegistryPath[] =
     L"Software\\ThinkSwift\\VoipCloud";
 constexpr wchar_t kDeviceDndRegistryValue[] = L"DeviceDndEnabled";
@@ -45,6 +48,7 @@ constexpr wchar_t kAudioInputRegistryValue[] = L"AudioInputEndpoint";
 constexpr wchar_t kMicrophoneVolumeRegistryValue[] = L"MicrophoneVolume";
 constexpr wchar_t kCallAudioVolumeRegistryValue[] = L"CallAudioVolume";
 constexpr wchar_t kRingtoneVolumeRegistryValue[] = L"RingtoneVolume";
+constexpr wchar_t kRingbackVolumeRegistryValue[] = L"RingbackVolume";
 constexpr char kVoipCloudVersion[] =
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MAJOR) "."
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MINOR) "."
@@ -317,6 +321,88 @@ float VolumePercentToGainDb(int level) {
   const int clamped = std::clamp(level, 0, 100);
   if (clamped == 0) return -80.0f;
   return 20.0f * std::log10(static_cast<float>(clamped) / 100.0f);
+}
+
+// The SDK's ring-level control is deprecated and does not attenuate the
+// packaged ringtone on every Windows audio backend. Give its ringer a PCM WAV
+// whose samples already have the requested gain instead.
+std::wstring ScaledSound(const std::string& source, int level,
+                         const wchar_t* sound_name) {
+  const std::wstring source_path = Utf8ToWide(source);
+  HANDLE input = CreateFileW(source_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+  if (input == INVALID_HANDLE_VALUE) return {};
+  LARGE_INTEGER length{};
+  if (!GetFileSizeEx(input, &length) || length.QuadPart < 44 ||
+      length.QuadPart > 8 * 1024 * 1024) {
+    CloseHandle(input);
+    return {};
+  }
+  std::vector<uint8_t> wave(static_cast<size_t>(length.QuadPart));
+  DWORD read = 0;
+  const bool loaded = ReadFile(input, wave.data(),
+                               static_cast<DWORD>(wave.size()), &read,
+                               nullptr) && read == wave.size();
+  CloseHandle(input);
+  if (!loaded || std::memcmp(wave.data(), "RIFF", 4) != 0 ||
+      std::memcmp(wave.data() + 8, "WAVE", 4) != 0) return {};
+
+  auto u16 = [&](size_t offset) {
+    return static_cast<uint16_t>(wave[offset] | (wave[offset + 1] << 8));
+  };
+  auto u32 = [&](size_t offset) {
+    return static_cast<uint32_t>(wave[offset]) |
+           (static_cast<uint32_t>(wave[offset + 1]) << 8) |
+           (static_cast<uint32_t>(wave[offset + 2]) << 16) |
+           (static_cast<uint32_t>(wave[offset + 3]) << 24);
+  };
+  bool pcm16 = false;
+  size_t data_start = 0;
+  size_t data_size = 0;
+  for (size_t offset = 12; offset + 8 <= wave.size();) {
+    const uint32_t chunk_size = u32(offset + 4);
+    const size_t start = offset + 8;
+    if (chunk_size > wave.size() - start) return {};
+    if (std::memcmp(wave.data() + offset, "fmt ", 4) == 0 &&
+        chunk_size >= 16) {
+      pcm16 = u16(start) == 1 && u16(start + 14) == 16;
+    } else if (std::memcmp(wave.data() + offset, "data", 4) == 0) {
+      data_start = start;
+      data_size = chunk_size;
+    }
+    offset = start + chunk_size + (chunk_size & 1);
+  }
+  if (!pcm16 || data_size == 0 || (data_size & 1) != 0) return {};
+  for (size_t offset = data_start; offset < data_start + data_size;
+       offset += 2) {
+    const int16_t sample = static_cast<int16_t>(u16(offset));
+    const int16_t scaled = static_cast<int16_t>(
+        static_cast<int>(sample) * std::clamp(level, 0, 100) / 100);
+    const uint16_t bits = static_cast<uint16_t>(scaled);
+    wave[offset] = static_cast<uint8_t>(bits & 0xff);
+    wave[offset + 1] = static_cast<uint8_t>(bits >> 8);
+  }
+
+  wchar_t temp[MAX_PATH] = {};
+  const DWORD temp_length = GetTempPathW(MAX_PATH, temp);
+  if (temp_length == 0 || temp_length >= MAX_PATH) return {};
+  const std::wstring path = std::wstring(temp) + L"VoipCloud-" + sound_name + L"-" +
+                            std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(level) + L".wav";
+  HANDLE output = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (output == INVALID_HANDLE_VALUE) return {};
+  DWORD written = 0;
+  const bool saved = WriteFile(output, wave.data(),
+                               static_cast<DWORD>(wave.size()), &written,
+                               nullptr) && written == wave.size();
+  CloseHandle(output);
+  if (!saved) {
+    DeleteFileW(path.c_str());
+    return {};
+  }
+  return path;
 }
 
 int IntArg(const EncodableMap& args, const char* key) {
@@ -837,6 +923,9 @@ class LinphoneApi {
             "linphone_core_set_input_audio_device");
     linphone_core_set_ring = LoadSymbol<void (*)(LinphoneCore*, const char*)>(
         "linphone_core_set_ring");
+    linphone_core_set_ringback =
+        LoadSymbol<void (*)(LinphoneCore*, const char*)>(
+            "linphone_core_set_ringback");
     linphone_core_set_ring_during_incoming_early_media =
         LoadSymbol<void (*)(LinphoneCore*, int)>(
             "linphone_core_set_ring_during_incoming_early_media");
@@ -1072,6 +1161,7 @@ class LinphoneApi {
   void (*linphone_core_set_input_audio_device)(LinphoneCore*,
                                                 LinphoneAudioDevice*) = nullptr;
   void (*linphone_core_set_ring)(LinphoneCore*, const char*) = nullptr;
+  void (*linphone_core_set_ringback)(LinphoneCore*, const char*) = nullptr;
   void (*linphone_core_set_ring_during_incoming_early_media)(LinphoneCore*,
                                                              int) = nullptr;
   int (*linphone_core_play_local)(LinphoneCore*, const char*) = nullptr;
@@ -1359,10 +1449,24 @@ class LinphoneWindowsBridge::Impl {
         const DWORD ringtone_attributes = GetFileAttributesA(ringtone_path.c_str());
         if (ringtone_attributes != INVALID_FILE_ATTRIBUTES &&
             (ringtone_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+          ringtone_source_path_ = ringtone_path;
           api_.linphone_core_set_ring(core_, ringtone_path.c_str());
           TraceNative("EnsureReady packaged desktop ringtone configured");
         } else {
           TraceNative("EnsureReady packaged desktop ringtone is unavailable");
+        }
+      }
+      if (api_.linphone_core_set_ringback != nullptr) {
+        const std::string ringback_path = resources_directory +
+            "\\share\\sounds\\linphone\\ringback.wav";
+        const DWORD attributes = GetFileAttributesA(ringback_path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+          ringback_source_path_ = ringback_path;
+          api_.linphone_core_set_ringback(core_, ringback_path.c_str());
+          TraceNative("EnsureReady outgoing ringback configured");
+        } else {
+          TraceNative("EnsureReady packaged outgoing ringback unavailable");
         }
       }
       if (api_.linphone_core_set_ring_during_incoming_early_media != nullptr) {
@@ -1661,7 +1765,7 @@ class LinphoneWindowsBridge::Impl {
       if (incoming && CallStatus(state) == "ringing" &&
           api_.linphone_call_decline != nullptr) {
         dnd_declined_incoming_call_ = call;
-        api_.linphone_call_decline(call, 3);
+        api_.linphone_call_decline(call, kLinphoneReasonBusy);
         notified_incoming_call_ = nullptr;
         owner_->ClearIncomingCallNotification();
       }
@@ -1774,7 +1878,7 @@ class LinphoneWindowsBridge::Impl {
       return;
     }
     if (api_.linphone_call_decline == nullptr ||
-        api_.linphone_call_decline(call, 3) != 0) {
+        api_.linphone_call_decline(call, kLinphoneReasonBusy) != 0) {
       result->Error("LINPHONE_ERROR", "Unable to decline incoming call.");
       return;
     }
@@ -2260,10 +2364,49 @@ class LinphoneWindowsBridge::Impl {
                api_.linphone_core_set_playback_gain_db != nullptr) {
       api_.linphone_core_set_playback_gain_db(
           core_, VolumePercentToGainDb(clamped));
-    } else if (kind == "ringtone" &&
-               api_.linphone_core_set_ring_level != nullptr) {
-      api_.linphone_core_set_ring_level(core_, clamped);
+    } else if (kind == "ringtone") {
+      ApplyRingtoneVolume(clamped);
+    } else if (kind == "ringback") {
+      ApplyRingbackVolume(clamped);
     }
+  }
+
+  bool ApplyRingtoneVolume(int level) {
+    if (core_ == nullptr || api_.linphone_core_set_ring == nullptr ||
+        ringtone_source_path_.empty()) return false;
+    if (level == 100) {
+      api_.linphone_core_set_ring(core_, ringtone_source_path_.c_str());
+      return true;
+    }
+    const std::wstring scaled = ScaledSound(ringtone_source_path_, level,
+                                           L"ringtone");
+    if (scaled.empty()) {
+      TraceNative("Unable to prepare volume-adjusted ringtone");
+      return false;
+    }
+    const std::string path = WideToUtf8(scaled);
+    api_.linphone_core_set_ring(core_, path.c_str());
+    ringtone_files_.push_back(scaled);
+    return true;
+  }
+
+  bool ApplyRingbackVolume(int level) {
+    if (core_ == nullptr || api_.linphone_core_set_ringback == nullptr ||
+        ringback_source_path_.empty()) return false;
+    if (level == 100) {
+      api_.linphone_core_set_ringback(core_, ringback_source_path_.c_str());
+      return true;
+    }
+    const std::wstring scaled = ScaledSound(ringback_source_path_, level,
+                                            L"ringback");
+    if (scaled.empty()) {
+      TraceNative("Unable to prepare volume-adjusted ringback");
+      return false;
+    }
+    const std::string path = WideToUtf8(scaled);
+    api_.linphone_core_set_ringback(core_, path.c_str());
+    ringtone_files_.push_back(scaled);
+    return true;
   }
 
   void RestoreAudioVolumeLevels() {
@@ -2273,6 +2416,8 @@ class LinphoneWindowsBridge::Impl {
                      LoadRegistryLevel(kCallAudioVolumeRegistryValue));
     ApplyAudioVolume("ringtone",
                      LoadRegistryLevel(kRingtoneVolumeRegistryValue));
+    ApplyAudioVolume("ringback",
+                     LoadRegistryLevel(kRingbackVolumeRegistryValue));
   }
 
   void GetAudioVolumeLevels(std::unique_ptr<MethodResult> result) {
@@ -2285,6 +2430,8 @@ class LinphoneWindowsBridge::Impl {
          EncodableValue(LoadRegistryLevel(kCallAudioVolumeRegistryValue))},
         {EncodableValue("ringtone"),
          EncodableValue(LoadRegistryLevel(kRingtoneVolumeRegistryValue))},
+        {EncodableValue("ringback"),
+         EncodableValue(LoadRegistryLevel(kRingbackVolumeRegistryValue))},
     }));
   }
 
@@ -2300,11 +2447,25 @@ class LinphoneWindowsBridge::Impl {
       registry_value = kCallAudioVolumeRegistryValue;
     } else if (kind == "ringtone") {
       registry_value = kRingtoneVolumeRegistryValue;
+    } else if (kind == "ringback") {
+      registry_value = kRingbackVolumeRegistryValue;
     } else {
       result->Error("AUDIO_VOLUME", "Unknown desktop audio volume control.");
       return;
     }
-    ApplyAudioVolume(kind, clamped);
+    if (kind == "ringtone") {
+      if (!ApplyRingtoneVolume(clamped)) {
+        result->Error("AUDIO_VOLUME", "Unable to adjust the ringtone.");
+        return;
+      }
+    } else if (kind == "ringback") {
+      if (!ApplyRingbackVolume(clamped)) {
+        result->Error("AUDIO_VOLUME", "Unable to adjust outgoing ringback.");
+        return;
+      }
+    } else {
+      ApplyAudioVolume(kind, clamped);
+    }
     if (!SaveRegistryLevel(registry_value, clamped)) {
       result->Error("AUDIO_VOLUME", "Unable to save the audio volume.");
       return;
@@ -2689,6 +2850,10 @@ class LinphoneWindowsBridge::Impl {
       TraceNative("Dispose core unref complete");
       core_ = nullptr;
     }
+    for (const auto& ringtone_file : ringtone_files_) {
+      DeleteFileW(ringtone_file.c_str());
+    }
+    ringtone_files_.clear();
     callbacks_ = nullptr;
     account_ = nullptr;
     active_call_ = nullptr;
@@ -2988,7 +3153,7 @@ class LinphoneWindowsBridge::Impl {
           dnd_declined_incoming_call_ = call;
           TraceNative("Declining incoming call for device DND id=" +
                       PointerId(call));
-          api_.linphone_call_decline(call, 3);
+          api_.linphone_call_decline(call, kLinphoneReasonBusy);
         }
       } else if (notified_incoming_call_ != call) {
         notified_incoming_call_ = call;
@@ -3046,6 +3211,9 @@ class LinphoneWindowsBridge::Impl {
                      std::pair<std::string, std::string>>
       presence_subscriptions_;
   std::string sip_domain_;
+  std::string ringtone_source_path_;
+  std::string ringback_source_path_;
+  std::vector<std::wstring> ringtone_files_;
   std::mutex core_mutex_;
   ComPtr<IAudioClient> audio_test_client_;
   ComPtr<IAudioCaptureClient> audio_test_capture_;
@@ -3177,6 +3345,11 @@ void LinphoneWindowsBridge::ClearIncomingCallNotification() {
 }
 
 void LinphoneWindowsBridge::SetAppBadgeCount(int raw_count) {
+  app_badge_count_ = std::max(raw_count, 0);
+  ReapplyAppBadge();
+}
+
+void LinphoneWindowsBridge::ReapplyAppBadge() {
   if (window_ == nullptr) {
     return;
   }
@@ -3194,11 +3367,13 @@ void LinphoneWindowsBridge::SetAppBadgeCount(int raw_count) {
     return;
   }
 
-  const int count = std::max(raw_count, 0);
+  const int count = app_badge_count_;
   HICON icon = count == 0 ? nullptr : CreateBadgeOverlayIcon(count);
   const std::wstring description =
       count == 0 ? L"" : std::to_wstring(count) + L" unread items";
-  taskbar->SetOverlayIcon(window_, icon, description.c_str());
+  const HRESULT applied =
+      taskbar->SetOverlayIcon(window_, icon, description.c_str());
+  if (FAILED(applied)) TraceNative("App badge taskbar overlay failed");
   taskbar->Release();
   if (icon != nullptr) {
     DestroyIcon(icon);

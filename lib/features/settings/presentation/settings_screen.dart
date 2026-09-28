@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/app_version_provider.dart';
 import '../../../core/updates/desktop_update.dart';
+import '../../../core/updates/windows_update_installer.dart';
 import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../shared/icons/app_icons.dart';
@@ -479,6 +480,9 @@ class _AboutSection extends ConsumerStatefulWidget {
 }
 
 class _AboutSectionState extends ConsumerState<_AboutSection> {
+  bool _installingUpdate = false;
+  double? _updateProgress;
+
   Future<void> _checkForUpdates() async {
     await ref.read(desktopUpdateProvider.notifier).check();
     if (!mounted) return;
@@ -493,14 +497,76 @@ class _AboutSectionState extends ConsumerState<_AboutSection> {
     }
   }
 
-  Future<void> _downloadUpdate(DesktopRelease release) async {
-    final launched = await ref.read(desktopUpdateLauncherProvider)(
-      release.downloadUri,
-    );
-    if (!launched && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to open the update download.')),
+  Future<void> _startUpdate(DesktopRelease release) async {
+    if (!Platform.isWindows) {
+      final launched = await ref.read(desktopUpdateLauncherProvider)(
+        release.downloadUri,
       );
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to open the update download.')),
+        );
+      }
+      return;
+    }
+    if (_installingUpdate) return;
+    if (await ref.read(sipServiceProvider).hasActiveCall()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Finish your call before updating.')),
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Update VoipCloud?'),
+        content: Text(
+          'Version ${release.version} (build ${release.build}) will be '
+          'downloaded and verified. VoipCloud will close during installation, '
+          'then reopen. Windows may ask for administrator permission.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Update and restart'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _installingUpdate = true;
+      _updateProgress = 0;
+    });
+    try {
+      await WindowsUpdateInstaller().install(
+        release,
+        onProgress: (progress) {
+          if (mounted) setState(() => _updateProgress = progress);
+        },
+        canInstall: () async =>
+            !await ref.read(sipServiceProvider).hasActiveCall(),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to install update: $error')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _installingUpdate = false;
+          _updateProgress = null;
+        });
+      }
     }
   }
 
@@ -547,7 +613,9 @@ class _AboutSectionState extends ConsumerState<_AboutSection> {
             failed: update.hasError,
             result: update.value,
             onCheck: _checkForUpdates,
-            onDownload: _downloadUpdate,
+            onAction: _startUpdate,
+            installing: _installingUpdate,
+            progress: _updateProgress,
           ),
           const Divider(height: 28),
         ],
@@ -563,14 +631,18 @@ class _DesktopUpdateTile extends StatelessWidget {
     required this.failed,
     required this.result,
     required this.onCheck,
-    required this.onDownload,
+    required this.onAction,
+    required this.installing,
+    required this.progress,
   });
 
   final bool checking;
   final bool failed;
   final DesktopUpdateResult? result;
   final VoidCallback onCheck;
-  final Future<void> Function(DesktopRelease release) onDownload;
+  final Future<void> Function(DesktopRelease release) onAction;
+  final bool installing;
+  final double? progress;
 
   @override
   Widget build(BuildContext context) {
@@ -592,19 +664,25 @@ class _DesktopUpdateTile extends StatelessWidget {
     return AppInfoTile(
       icon: AppIcons.importFile,
       title: available ? 'Update available' : 'Desktop updates',
-      subtitle: checking ? 'Checking for updates…' : subtitle,
-      trailing: checking
+      subtitle: installing
+          ? progress == null
+                ? 'Preparing update…'
+                : 'Downloading update… ${(progress! * 100).round()}%'
+          : checking
+          ? 'Checking for updates…'
+          : subtitle,
+      trailing: checking || installing
           ? const SizedBox.square(
               dimension: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
           : available
           ? FilledButton(
-              onPressed: () => onDownload(release!),
-              child: const Text('Download'),
+              onPressed: () => onAction(release!),
+              child: Text(Platform.isWindows ? 'Update' : 'Download'),
             )
           : TextButton(onPressed: onCheck, child: const Text('Check')),
-      onTap: checking || available ? null : onCheck,
+      onTap: checking || installing || available ? null : onCheck,
     );
   }
 }

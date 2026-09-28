@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/files/downloads_saver.dart';
+import '../../../core/files/email_attachment_composer.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../sip/domain/sip_log_entry.dart';
@@ -22,6 +23,7 @@ class SipLogsScreen extends ConsumerStatefulWidget {
 class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
   final _scrollController = ScrollController();
   bool _exporting = false;
+  bool _sharing = false;
 
   @override
   void initState() {
@@ -71,10 +73,20 @@ class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
             icon: const Icon(AppIcons.paste),
           ),
           IconButton(
-            tooltip: 'Export',
+            tooltip: 'Save logs',
             onPressed: logs.isEmpty || _exporting ? null : _export,
             icon: const Icon(AppIcons.exportFile),
           ),
+          if (EmailAttachmentComposer().isSupported)
+            Builder(
+              builder: (shareContext) => IconButton(
+                tooltip: 'Share or email logs',
+                onPressed: logs.isEmpty || _sharing
+                    ? null
+                    : () => _shareByEmail(shareContext),
+                icon: const Icon(AppIcons.email),
+              ),
+            ),
           IconButton(
             tooltip: 'Clear',
             onPressed: logs.isEmpty
@@ -163,15 +175,8 @@ class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
   Future<void> _export() async {
     setState(() => _exporting = true);
     try {
-      final stamp = DateTime.now()
-          .toUtc()
-          .toIso8601String()
-          .replaceAll(':', '')
-          .replaceAll('-', '')
-          .split('.')
-          .first;
       final path = await AppFiles().saveText(
-        fileName: 'thinkSwift_Voipcloud_sip_logs_$stamp.txt',
+        fileName: _exportFileName(),
         content: ref.read(sipLogStoreProvider).exportText(),
         mimeType: 'text/plain',
       );
@@ -179,6 +184,8 @@ class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Saved $path')));
+    } on FileSaveCancelled {
+      // Closing the Save As dialog is not an export failure.
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -189,6 +196,50 @@ class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
         setState(() => _exporting = false);
       }
     }
+  }
+
+  Future<void> _shareByEmail(BuildContext shareContext) async {
+    setState(() => _sharing = true);
+    try {
+      final renderBox = shareContext.findRenderObject();
+      final sharePositionOrigin = renderBox is RenderBox && renderBox.hasSize
+          ? renderBox.localToGlobal(Offset.zero) & renderBox.size
+          : null;
+      await EmailAttachmentComposer().composeLog(
+        fileName: _exportFileName(),
+        content: ref.read(sipLogStoreProvider).exportText(),
+        sharePositionOrigin: sharePositionOrigin,
+      );
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            error.message ?? 'Could not open sharing options for the SIP logs.',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not open sharing options for the SIP logs.'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
+  String _exportFileName() {
+    final stamp = DateTime.now()
+        .toUtc()
+        .toIso8601String()
+        .replaceAll(':', '')
+        .replaceAll('-', '')
+        .split('.')
+        .first;
+    return 'thinkSwift_Voipcloud_sip_logs_$stamp.txt';
   }
 }
 

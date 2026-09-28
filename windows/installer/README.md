@@ -61,8 +61,8 @@ Run from PowerShell:
 
 The script fails if Linphone is absent, builds the release bundle, creates an
 MSI from CMake's complete install graph, signs it when a thumbprint is supplied,
-verifies the signature, and prints its SHA-256 digest. Never distribute an
-unsigned production MSI.
+verifies the signature, and prints its SHA-256 digest. Signing is strongly
+recommended; an unsigned MSI still shows Windows' Unknown publisher prompt.
 
 Windows MSI builds always use `config/production.json` through Flutter's
 `--dart-define-from-file` option. Packaging validates `APP_ENV=production` and
@@ -70,15 +70,33 @@ checks every value against Flutter's generated Windows defines before compiling.
 
 ## Publishing desktop updates
 
-The production config points the desktop app at
-the deployment-specific HTTPS update manifest. Settings > About exposes a
-manual **Check for updates** action. A newer build presents a download button
-that opens the versioned MSI through the user's browser, preserving Windows'
-normal Authenticode and SmartScreen checks.
+The production config points the desktop app at the deployment-specific HTTPS
+update manifest. Settings > About exposes **Check for updates**. On Windows,
+**Update** downloads the versioned MSI into the user's temporary directory,
+checks its size and SHA-256 against the HTTPS manifest, and asks for confirmation
+before closing the app. A separate helper rechecks SHA-256 after VoipCloud exits,
+starts the MSI with Windows' normal UAC approval and passive progress UI, waits
+for completion, then reopens VoipCloud. If UAC is declined or setup fails, the
+helper reports the error, leaves a verbose MSI log beside the downloaded MSI,
+and reopens the existing app. Updates are deferred
+while a call is active. On macOS, the release still opens in the browser.
+
+The Windows helper is installed beside VoipCloud.exe but copied to the user's
+temporary directory for each update so the MSI can replace the installed files.
+The new code first ships in a normal MSI; an older installed build without the
+helper cannot perform this automatic handoff and must be upgraded manually once.
+The updater never bypasses UAC or the unsigned-publisher warning.
+
+CPack/WiX currently enables `AllowSameVersionUpgrades`, so a new MSI with a new
+ProductCode but the same three-field ProductVersion can replace the previous
+build. The portal's filename and ProductVersion validation can therefore stay
+as-is. Windows Installer cannot distinguish build numbers in this case, so a
+manually launched older same-version MSI could downgrade the app; the in-app
+updater only offers a manifest build newer than the installed build.
 
 Windows and macOS also perform one quiet update check when the app opens. When
 a newer desktop build is available, the Settings icon displays a badge and the
-About section presents the release and download action. Network failures never
+About section presents the release and update action. Network failures never
 block startup and can be retried manually from About.
 
 After building the MSI, publish it with:

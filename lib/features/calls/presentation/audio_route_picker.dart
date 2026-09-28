@@ -354,16 +354,25 @@ class _AudioRoutePickerSheetState
           microphone: level,
           callAudio: current.callAudio,
           ringtone: current.ringtone,
+          ringback: current.ringback,
         ),
         AudioVolumeKind.callAudio => AudioVolumeLevels(
           microphone: current.microphone,
           callAudio: level,
           ringtone: current.ringtone,
+          ringback: current.ringback,
         ),
         AudioVolumeKind.ringtone => AudioVolumeLevels(
           microphone: current.microphone,
           callAudio: current.callAudio,
           ringtone: level,
+          ringback: current.ringback,
+        ),
+        AudioVolumeKind.ringback => AudioVolumeLevels(
+          microphone: current.microphone,
+          callAudio: current.callAudio,
+          ringtone: current.ringtone,
+          ringback: level,
         ),
       };
     });
@@ -431,6 +440,14 @@ class _DesktopVolumeControls extends StatelessWidget {
           value: levels.ringtone,
           onChanged: (value) => onChanged(AudioVolumeKind.ringtone, value),
           onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.ringtone, value),
+        ),
+        _VolumeSlider(
+          icon: Icons.call_outlined,
+          label: 'Outgoing ringback',
+          description: 'Ringing you hear while the other phone rings',
+          value: levels.ringback,
+          onChanged: (value) => onChanged(AudioVolumeKind.ringback, value),
+          onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.ringback, value),
         ),
       ],
     );

@@ -1,5 +1,12 @@
 import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
+
+class FileSaveCancelled implements Exception {
+  const FileSaveCancelled();
+}
 
 class AppFiles {
   AppFiles({MethodChannel channel = const MethodChannel('voipcloud/files')})
@@ -13,6 +20,28 @@ class AppFiles {
     required Uint8List bytes,
     String mimeType = 'application/octet-stream',
   }) async {
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      final extension = fileName.contains('.')
+          ? fileName.split('.').last.toLowerCase()
+          : null;
+      final location = await getSaveLocation(
+        suggestedName: fileName,
+        acceptedTypeGroups: [
+          XTypeGroup(
+            label: extension == null
+                ? 'Files'
+                : '${extension.toUpperCase()} files',
+            extensions: extension == null ? null : [extension],
+            mimeTypes: [mimeType],
+          ),
+        ],
+      );
+      if (location == null) {
+        throw const FileSaveCancelled();
+      }
+      await File(location.path).writeAsBytes(bytes, flush: true);
+      return location.path;
+    }
     final result = await _channel.invokeMethod<dynamic>(
       'saveToDownloads',
       <String, dynamic>{

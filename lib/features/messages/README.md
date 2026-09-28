@@ -32,11 +32,19 @@ The implementation must:
   logged into the same messaging inbox;
 - derive unread badges from the server conversation index rather than replayed
   history, preventing old events from appearing as newly unread after initial
-  provisioning;
+  provisioning; refresh that index when the app resumes so navigation and
+  launcher badges catch up after background delivery;
 - keep private media URLs and message bodies out of routine logs;
 - clear protected cached data on logout, revocation, suspension, reassignment,
   and reprovisioning; and
 - route standard APNs/FCM and desktop notification payloads to conversations.
+
+In a conversation, the tappable header opens the native card for a saved
+contact. An unsaved number can be copied, used to create a new contact, or
+explicitly added to a contact selected in the native picker. Adding to an
+existing card requires contacts write permission and never changes a card
+without confirmation. The header call action opens the in-app dialer with the
+conversation number prefilled; it does not place the call automatically.
 
 Do not add concrete endpoint paths, payload fields, retention behavior, or
 realtime protocols here until the versioned messaging data-plane contract is
