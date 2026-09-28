@@ -40,6 +40,9 @@ constexpr UINT kLinphoneIterateMessage = WM_APP + 0x5C2;
 constexpr UINT kVoipCloudTrayIconId = 1;
 // LinphoneReasonBusy is device-scoped (SIP 486); Declined would be global 603.
 constexpr int kLinphoneReasonBusy = 6;
+constexpr int kLinphoneToneCallLost = 4;
+constexpr int kLinphoneToneCallEnd = 5;
+std::atomic<uint64_t> g_tone_file_sequence{0};
 constexpr wchar_t kVoipCloudRegistryPath[] =
     L"Software\\ThinkSwift\\VoipCloud";
 constexpr wchar_t kDeviceDndRegistryValue[] = L"DeviceDndEnabled";
@@ -363,22 +366,35 @@ std::wstring ScaledSound(const std::string& source, int level,
   for (size_t offset = 12; offset + 8 <= wave.size();) {
     const uint32_t chunk_size = u32(offset + 4);
     const size_t start = offset + 8;
-    if (chunk_size > wave.size() - start) return {};
+    // Some SDK WAVs use a streaming sentinel for the final data chunk size
+    // (for example 0x7ffff000) even though the file itself is complete. Treat
+    // the bytes physically present in a final data chunk as authoritative,
+    // while continuing to reject truncated metadata chunks.
+    const bool extends_past_file = chunk_size > wave.size() - start;
+    if (extends_past_file &&
+        std::memcmp(wave.data() + offset, "data", 4) != 0) {
+      return {};
+    }
     if (std::memcmp(wave.data() + offset, "fmt ", 4) == 0 &&
         chunk_size >= 16) {
       pcm16 = u16(start) == 1 && u16(start + 14) == 16;
     } else if (std::memcmp(wave.data() + offset, "data", 4) == 0) {
       data_start = start;
-      data_size = chunk_size;
+      data_size = extends_past_file ? wave.size() - start : chunk_size;
     }
+    if (extends_past_file) break;
     offset = start + chunk_size + (chunk_size & 1);
   }
   if (!pcm16 || data_size == 0 || (data_size & 1) != 0) return {};
+  // A tone slider should sound even across its range. A mildly exponential
+  // curve gives useful resolution at the quiet end, unlike raw PCM percent.
+  const double normalized = std::clamp(level, 0, 100) / 100.0;
+  const double gain = std::pow(normalized, 1.6);
   for (size_t offset = data_start; offset < data_start + data_size;
        offset += 2) {
     const int16_t sample = static_cast<int16_t>(u16(offset));
     const int16_t scaled = static_cast<int16_t>(
-        static_cast<int>(sample) * std::clamp(level, 0, 100) / 100);
+        std::lround(static_cast<double>(sample) * gain));
     const uint16_t bits = static_cast<uint16_t>(scaled);
     wave[offset] = static_cast<uint8_t>(bits & 0xff);
     wave[offset + 1] = static_cast<uint8_t>(bits >> 8);
@@ -389,7 +405,79 @@ std::wstring ScaledSound(const std::string& source, int level,
   if (temp_length == 0 || temp_length >= MAX_PATH) return {};
   const std::wstring path = std::wstring(temp) + L"VoipCloud-" + sound_name + L"-" +
                             std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(++g_tone_file_sequence) + L"-" +
                             std::to_wstring(level) + L".wav";
+  HANDLE output = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (output == INVALID_HANDLE_VALUE) return {};
+  DWORD written = 0;
+  const bool saved = WriteFile(output, wave.data(),
+                               static_cast<DWORD>(wave.size()), &written,
+                               nullptr) && written == wave.size();
+  CloseHandle(output);
+  if (!saved) {
+    DeleteFileW(path.c_str());
+    return {};
+  }
+  return path;
+}
+
+std::wstring CreateCallEndTone(int call_audio_level) {
+  constexpr uint32_t kSampleRate = 16000;
+  constexpr uint32_t kDurationMs = 160;
+  constexpr uint32_t kSampleCount = kSampleRate * kDurationMs / 1000;
+  constexpr uint32_t kDataSize = kSampleCount * sizeof(int16_t);
+  constexpr size_t kHeaderSize = 44;
+  std::vector<uint8_t> wave(kHeaderSize + kDataSize, 0);
+  auto write_u16 = [&wave](size_t offset, uint16_t value) {
+    wave[offset] = static_cast<uint8_t>(value & 0xff);
+    wave[offset + 1] = static_cast<uint8_t>(value >> 8);
+  };
+  auto write_u32 = [&wave](size_t offset, uint32_t value) {
+    wave[offset] = static_cast<uint8_t>(value & 0xff);
+    wave[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    wave[offset + 2] = static_cast<uint8_t>((value >> 16) & 0xff);
+    wave[offset + 3] = static_cast<uint8_t>((value >> 24) & 0xff);
+  };
+  std::memcpy(wave.data(), "RIFF", 4);
+  write_u32(4, 36 + kDataSize);
+  std::memcpy(wave.data() + 8, "WAVEfmt ", 8);
+  write_u32(16, 16);
+  write_u16(20, 1);
+  write_u16(22, 1);
+  write_u32(24, kSampleRate);
+  write_u32(28, kSampleRate * sizeof(int16_t));
+  write_u16(32, sizeof(int16_t));
+  write_u16(34, 16);
+  std::memcpy(wave.data() + 36, "data", 4);
+  write_u32(40, kDataSize);
+
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kFrequencyHz = 425.0;
+  constexpr uint32_t kFadeSamples = kSampleRate * 20 / 1000;
+  const double user_gain = std::clamp(call_audio_level, 0, 100) / 100.0;
+  // Cap the indication around -21 dBFS even when call audio is at 100%.
+  const double peak = 0.09 * user_gain;
+  for (uint32_t i = 0; i < kSampleCount; ++i) {
+    const double fade_in = std::min(1.0, i / static_cast<double>(kFadeSamples));
+    const double fade_out = std::min(
+        1.0, (kSampleCount - 1 - i) / static_cast<double>(kFadeSamples));
+    const double envelope = std::min(fade_in, fade_out);
+    const auto sample = static_cast<int16_t>(std::lround(
+        std::sin(2.0 * kPi * kFrequencyHz * i / kSampleRate) *
+        envelope * peak * 32767.0));
+    write_u16(kHeaderSize + i * sizeof(int16_t),
+              static_cast<uint16_t>(sample));
+  }
+
+  wchar_t temp[MAX_PATH] = {};
+  const DWORD temp_length = GetTempPathW(MAX_PATH, temp);
+  if (temp_length == 0 || temp_length >= MAX_PATH) return {};
+  const std::wstring path = std::wstring(temp) + L"VoipCloud-call-end-" +
+                            std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(++g_tone_file_sequence) + L"-" +
+                            std::to_wstring(std::clamp(call_audio_level, 0, 100)) +
+                            L".wav";
   HANDLE output = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (output == INVALID_HANDLE_VALUE) return {};
@@ -926,6 +1014,9 @@ class LinphoneApi {
     linphone_core_set_ringback =
         LoadSymbol<void (*)(LinphoneCore*, const char*)>(
             "linphone_core_set_ringback");
+    linphone_core_set_tone =
+        LoadSymbol<void (*)(LinphoneCore*, int, const char*)>(
+            "linphone_core_set_tone");
     linphone_core_set_ring_during_incoming_early_media =
         LoadSymbol<void (*)(LinphoneCore*, int)>(
             "linphone_core_set_ring_during_incoming_early_media");
@@ -1162,6 +1253,7 @@ class LinphoneApi {
                                                 LinphoneAudioDevice*) = nullptr;
   void (*linphone_core_set_ring)(LinphoneCore*, const char*) = nullptr;
   void (*linphone_core_set_ringback)(LinphoneCore*, const char*) = nullptr;
+  void (*linphone_core_set_tone)(LinphoneCore*, int, const char*) = nullptr;
   void (*linphone_core_set_ring_during_incoming_early_media)(LinphoneCore*,
                                                              int) = nullptr;
   int (*linphone_core_play_local)(LinphoneCore*, const char*) = nullptr;
@@ -2360,10 +2452,12 @@ class LinphoneWindowsBridge::Impl {
     const int clamped = std::clamp(level, 0, 100);
     if (kind == "microphone" && api_.linphone_core_set_mic_gain_db != nullptr) {
       api_.linphone_core_set_mic_gain_db(core_, VolumePercentToGainDb(clamped));
-    } else if (kind == "callAudio" &&
-               api_.linphone_core_set_playback_gain_db != nullptr) {
-      api_.linphone_core_set_playback_gain_db(
-          core_, VolumePercentToGainDb(clamped));
+    } else if (kind == "callAudio") {
+      if (api_.linphone_core_set_playback_gain_db != nullptr) {
+        api_.linphone_core_set_playback_gain_db(
+            core_, VolumePercentToGainDb(clamped));
+      }
+      ApplyCallEndToneVolume(clamped);
     } else if (kind == "ringtone") {
       ApplyRingtoneVolume(clamped);
     } else if (kind == "ringback") {
@@ -2386,7 +2480,7 @@ class LinphoneWindowsBridge::Impl {
     }
     const std::string path = WideToUtf8(scaled);
     api_.linphone_core_set_ring(core_, path.c_str());
-    ringtone_files_.push_back(scaled);
+    tone_files_.push_back(scaled);
     return true;
   }
 
@@ -2405,8 +2499,21 @@ class LinphoneWindowsBridge::Impl {
     }
     const std::string path = WideToUtf8(scaled);
     api_.linphone_core_set_ringback(core_, path.c_str());
-    ringtone_files_.push_back(scaled);
+    tone_files_.push_back(scaled);
     return true;
+  }
+
+  void ApplyCallEndToneVolume(int call_audio_level) {
+    if (core_ == nullptr || api_.linphone_core_set_tone == nullptr) return;
+    const std::wstring tone = CreateCallEndTone(call_audio_level);
+    if (tone.empty()) {
+      TraceNative("Unable to prepare volume-adjusted call end tone");
+      return;
+    }
+    const std::string path = WideToUtf8(tone);
+    api_.linphone_core_set_tone(core_, kLinphoneToneCallLost, path.c_str());
+    api_.linphone_core_set_tone(core_, kLinphoneToneCallEnd, path.c_str());
+    tone_files_.push_back(tone);
   }
 
   void RestoreAudioVolumeLevels() {
@@ -2850,10 +2957,10 @@ class LinphoneWindowsBridge::Impl {
       TraceNative("Dispose core unref complete");
       core_ = nullptr;
     }
-    for (const auto& ringtone_file : ringtone_files_) {
-      DeleteFileW(ringtone_file.c_str());
+    for (const auto& tone_file : tone_files_) {
+      DeleteFileW(tone_file.c_str());
     }
-    ringtone_files_.clear();
+    tone_files_.clear();
     callbacks_ = nullptr;
     account_ = nullptr;
     active_call_ = nullptr;
@@ -3213,7 +3320,7 @@ class LinphoneWindowsBridge::Impl {
   std::string sip_domain_;
   std::string ringtone_source_path_;
   std::string ringback_source_path_;
-  std::vector<std::wstring> ringtone_files_;
+  std::vector<std::wstring> tone_files_;
   std::mutex core_mutex_;
   ComPtr<IAudioClient> audio_test_client_;
   ComPtr<IAudioCaptureClient> audio_test_capture_;
