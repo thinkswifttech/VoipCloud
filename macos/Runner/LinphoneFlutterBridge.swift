@@ -28,7 +28,8 @@ final class LinphoneFlutterBridge {
 
   private let registrationEvents = LinphoneEventStreamHandler()
   private let callEvents = LinphoneEventStreamHandler(
-    detachedBufferCapacity: 64
+    detachedBufferCapacity: 64,
+    terminalOutbox: .shared
   )
   private let messageEvents = LinphoneEventStreamHandler()
   private let presenceEvents = LinphoneEventStreamHandler()
@@ -63,6 +64,18 @@ final class LinphoneFlutterBridge {
         result(nil)
         return
       }
+      if call.method == "ackCallHistoryEvent" {
+        let arguments = call.arguments as? [String: Any]
+        DesktopCallHistoryOutbox.shared.acknowledge(
+          arguments?["historyEventId"] as? String ?? ""
+        )
+        result(nil)
+        return
+      }
+      if call.method == "purgeAccount" {
+        DesktopCallHistoryOutbox.shared.clear()
+        self.callEvents.clearPending()
+      }
       self.controller.handle(call: call, result: result)
     }
 
@@ -87,11 +100,16 @@ final class LinphoneFlutterBridge {
 
 private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   private let detachedBufferCapacity: Int
+  private let terminalOutbox: DesktopCallHistoryOutbox?
   private var eventSink: FlutterEventSink?
   private var detachedEvents: [[String: Any?]] = []
 
-  init(detachedBufferCapacity: Int = 0) {
+  init(
+    detachedBufferCapacity: Int = 0,
+    terminalOutbox: DesktopCallHistoryOutbox? = nil
+  ) {
     self.detachedBufferCapacity = max(0, detachedBufferCapacity)
+    self.terminalOutbox = terminalOutbox
     super.init()
   }
 
@@ -100,6 +118,11 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
     eventSink events: @escaping FlutterEventSink
   ) -> FlutterError? {
     eventSink = events
+    if let terminalOutbox {
+      for event in terminalOutbox.pendingEvents() {
+        events(event)
+      }
+    }
     if !detachedEvents.isEmpty {
       let pending = detachedEvents
       detachedEvents.removeAll(keepingCapacity: true)
@@ -118,6 +141,14 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   func send(_ event: [String: Any?]) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
+      let status = event["status"] as? String
+      let isTerminal = status == "ended" || status == "failed" || status == "missed"
+      if isTerminal, let terminalOutbox {
+        if let persisted = terminalOutbox.persist(event) {
+          self.eventSink?(persisted)
+          return
+        }
+      }
       if let eventSink = self.eventSink {
         eventSink(event)
         return
@@ -129,6 +160,145 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
         self.detachedEvents.removeFirst(overflow)
       }
     }
+  }
+
+  func clearPending() {
+    detachedEvents.removeAll(keepingCapacity: false)
+  }
+}
+
+private final class DesktopCallHistoryOutbox {
+  static let shared = DesktopCallHistoryOutbox()
+
+  private let fileManager = FileManager.default
+  private let maximumEventCount = 200
+  private let maximumAge: TimeInterval = 30 * 24 * 60 * 60
+
+  private var directoryURL: URL? {
+    guard let applicationSupport = fileManager.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    ).first else { return nil }
+    return applicationSupport
+      .appendingPathComponent("VoIPCloud", isDirectory: true)
+      .appendingPathComponent("CallHistory", isDirectory: true)
+  }
+
+  func persist(_ event: [String: Any?]) -> [String: Any?]? {
+    guard let directoryURL else { return nil }
+    do {
+      try prepareDirectory(directoryURL)
+      let callId = event["id"] as? String
+      for record in try records(in: directoryURL)
+      where callId != nil && record.event["id"] as? String == callId {
+        try? fileManager.removeItem(at: record.url)
+      }
+      let eventId = UUID().uuidString.lowercased()
+      var stored = event.compactMapValues { $0 }
+      stored["historyEventId"] = eventId
+      stored["historyReplay"] = false
+      stored["historyPersistedAtEpochMs"] = Int64(Date().timeIntervalSince1970 * 1000)
+      guard JSONSerialization.isValidJSONObject(stored) else { return nil }
+      let data = try JSONSerialization.data(withJSONObject: stored)
+      try data.write(
+        to: directoryURL.appendingPathComponent("\(eventId).json"),
+        options: .atomic
+      )
+      try prune(in: directoryURL)
+      return optionalDictionary(stored)
+    } catch {
+      NSLog("VoIPCloud/macOS could not persist call-history event: %@", error.localizedDescription)
+      return nil
+    }
+  }
+
+  func pendingEvents() -> [[String: Any?]] {
+    guard let directoryURL else { return [] }
+    do {
+      try prepareDirectory(directoryURL)
+      try prune(in: directoryURL)
+      return try records(in: directoryURL).map { record in
+        var event = record.event
+        event["historyReplay"] = true
+        return optionalDictionary(event)
+      }
+    } catch {
+      NSLog("VoIPCloud/macOS could not replay call-history events: %@", error.localizedDescription)
+      return []
+    }
+  }
+
+  func acknowledge(_ eventId: String) {
+    let allowed = CharacterSet.alphanumerics.union(
+      CharacterSet(charactersIn: "-")
+    )
+    guard !eventId.isEmpty,
+          eventId.unicodeScalars.allSatisfy({ allowed.contains($0) }),
+          let directoryURL else { return }
+    try? fileManager.removeItem(
+      at: directoryURL.appendingPathComponent("\(eventId).json")
+    )
+  }
+
+  func clear() {
+    guard let directoryURL else { return }
+    try? fileManager.removeItem(at: directoryURL)
+  }
+
+  private func prepareDirectory(_ directoryURL: URL) throws {
+    try fileManager.createDirectory(
+      at: directoryURL,
+      withIntermediateDirectories: true
+    )
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    var mutableURL = directoryURL
+    try? mutableURL.setResourceValues(values)
+  }
+
+  private func records(in directoryURL: URL) throws -> [(url: URL, event: [String: Any])] {
+    let urls = try fileManager.contentsOfDirectory(
+      at: directoryURL,
+      includingPropertiesForKeys: nil,
+      options: [.skipsHiddenFiles]
+    ).filter { $0.pathExtension == "json" }
+    var result: [(url: URL, event: [String: Any])] = []
+    for url in urls {
+      do {
+        let data = try Data(contentsOf: url)
+        guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+          try? fileManager.removeItem(at: url)
+          continue
+        }
+        result.append((url, event))
+      } catch {
+        try? fileManager.removeItem(at: url)
+      }
+    }
+    return result.sorted { persistedAt($0.event) < persistedAt($1.event) }
+  }
+
+  private func prune(in directoryURL: URL) throws {
+    let oldest = Int64((Date().timeIntervalSince1970 - maximumAge) * 1000)
+    var current = try records(in: directoryURL)
+    for record in current where persistedAt(record.event) < oldest {
+      try? fileManager.removeItem(at: record.url)
+    }
+    current = try records(in: directoryURL)
+    for record in current.prefix(max(0, current.count - maximumEventCount)) {
+      try? fileManager.removeItem(at: record.url)
+    }
+  }
+
+  private func persistedAt(_ event: [String: Any]) -> Int64 {
+    (event["historyPersistedAtEpochMs"] as? NSNumber)?.int64Value ?? 0
+  }
+
+  private func optionalDictionary(_ event: [String: Any]) -> [String: Any?] {
+    var result: [String: Any?] = [:]
+    for (key, value) in event { result[key] = value }
+    return result
   }
 }
 

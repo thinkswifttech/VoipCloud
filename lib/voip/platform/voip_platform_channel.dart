@@ -199,6 +199,14 @@ class VoipPlatformChannel {
     return _channel.invokeMethod<void>('clearNativeCallState');
   }
 
+  /// Removes a native terminal-call outbox item only after Dart has durably
+  /// committed it to local call history.
+  Future<void> acknowledgeCallHistoryEvent(String eventId) {
+    return _channel.invokeMethod<void>('ackCallHistoryEvent', {
+      'eventId': eventId,
+    });
+  }
+
   Future<void> setAppBadgeCount(
     int count, {
     int? missedCalls,

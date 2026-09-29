@@ -20,6 +20,7 @@ void main() {
           'https://updates.example.test/desktop/stable.json',
       'LEGAL_TERMS_URL':
           'https://updates.example.test/legal/terms/current.json',
+      'CALL_HISTORY_ENDPOINT_PATH': '/api/voipcloud/calls/history',
     });
 
     expect(config.environment, AppEnvironment.staging);
@@ -31,6 +32,7 @@ void main() {
     expect(config.enableVoipDebugLogs, isTrue);
     expect(config.desktopUpdateManifestUri?.host, 'updates.example.test');
     expect(config.legalTermsUri?.path, '/legal/terms/current.json');
+    expect(config.callHistoryEndpointUri?.path, '/api/voipcloud/calls/history');
     expect(config.hasBackend, isTrue);
     expect(config.hasSipProxy, isTrue);
   });
@@ -44,6 +46,7 @@ void main() {
     expect(config.messagingBaseUri, isNull);
     expect(config.desktopUpdateManifestUri, isNull);
     expect(config.legalTermsUri, isNull);
+    expect(config.callHistoryEndpointUri, isNull);
   });
 
   test('rejects an insecure desktop update manifest', () {
@@ -61,5 +64,28 @@ void main() {
     });
 
     expect(config.legalTermsUri, isNull);
+  });
+
+  test('rejects unsafe call history endpoint paths', () {
+    expect(
+      AppConfig.fromMap({
+        'CALL_HISTORY_ENDPOINT_PATH':
+            'https://attacker.example.test/api/voipcloud/calls/history',
+      }).callHistoryEndpointUri,
+      isNull,
+    );
+    expect(
+      AppConfig.fromMap({
+        'CALL_HISTORY_ENDPOINT_PATH':
+            '//attacker.example.test/api/voipcloud/calls/history',
+      }).callHistoryEndpointUri,
+      isNull,
+    );
+    expect(
+      AppConfig.fromMap({
+        'CALL_HISTORY_ENDPOINT_PATH': '/api/../admin',
+      }).callHistoryEndpointUri,
+      isNull,
+    );
   });
 }

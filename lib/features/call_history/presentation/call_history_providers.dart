@@ -3,9 +3,13 @@ import 'dart:async';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/config/config_providers.dart';
 import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/secure_storage_service.dart';
+import '../../../core/storage/storage_providers.dart';
+import '../data/api_call_history_repository.dart';
 import '../data/local_call_history_repository.dart';
+import '../data/reconciled_call_history_repository.dart';
 import '../domain/call_history_item.dart';
 import '../domain/call_history_repository.dart';
 
@@ -21,7 +25,14 @@ final callHistoryStorageProvider = Provider<SecureStorageService>((ref) {
 });
 
 final callHistoryRepositoryProvider = Provider<CallHistoryRepository>((ref) {
-  return LocalCallHistoryRepository(ref.watch(callHistoryStorageProvider));
+  final storage = ref.watch(callHistoryStorageProvider);
+  return ReconciledCallHistoryRepository(
+    local: LocalCallHistoryRepository(storage),
+    server: ApiCallHistoryRepository(
+      storage: ref.watch(secureStorageProvider),
+      endpointPath: ref.watch(appConfigProvider).callHistoryEndpointUri,
+    ),
+  );
 });
 
 final callHistoryProvider =

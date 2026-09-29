@@ -179,6 +179,104 @@ void main() {
         CallHistoryDisposition.declined,
       );
     });
+
+    test(
+      'acknowledges replay only after durable history persistence',
+      () async {
+        final gate = Completer<void>();
+        history.writeGate = gate.future;
+        platform.emitCall(
+          _event(
+            'durable-queue-call',
+            'ended',
+            stateMessage: 'Call completed elsewhere',
+            historyEventId: 'outbox-1',
+          ),
+        );
+        await _flushEvents();
+
+        expect(platform.acknowledgedHistoryEvents, isEmpty);
+        gate.complete();
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(platform.acknowledgedHistoryEvents, ['outbox-1']);
+        expect(history.items.single.id, 'durable-queue-call');
+        expect(
+          history.items.single.effectiveDisposition,
+          CallHistoryDisposition.answeredElsewhere,
+        );
+      },
+    );
+
+    test('acknowledges duplicate replay without duplicating history', () async {
+      platform.emitCall(
+        _event(
+          'replayed-call',
+          'ended',
+          stateMessage: 'Call completed elsewhere',
+          historyEventId: 'outbox-original',
+        ),
+      );
+      await _flushEvents();
+      await _flushEvents();
+
+      platform.emitCall(
+        _event(
+          'replayed-call',
+          'ended',
+          stateMessage: 'Call completed elsewhere',
+          historyEventId: 'outbox-replay',
+        ),
+      );
+      await _flushEvents();
+      await _flushEvents();
+
+      expect(history.items, hasLength(1));
+      expect(platform.acknowledgedHistoryEvents, [
+        'outbox-original',
+        'outbox-replay',
+      ]);
+    });
+
+    test(
+      'does not acknowledge replay when history persistence fails',
+      () async {
+        history.writeError = StateError('storage unavailable');
+        platform.emitCall(
+          _event(
+            'retry-after-restart',
+            'ended',
+            stateMessage: 'Call completed elsewhere',
+            historyEventId: 'outbox-retry',
+          ),
+        );
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(platform.acknowledgedHistoryEvents, isEmpty);
+        expect(history.items, isEmpty);
+
+        history.writeError = null;
+        platform.emitCall(
+          _event(
+            'retry-after-restart',
+            'ended',
+            stateMessage: 'Call completed elsewhere',
+            historyEventId: 'outbox-retry-2',
+          ),
+        );
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(platform.acknowledgedHistoryEvents, ['outbox-retry-2']);
+        expect(history.items.single.id, 'retry-after-restart');
+        expect(
+          history.items.single.effectiveDisposition,
+          CallHistoryDisposition.answeredElsewhere,
+        );
+      },
+    );
   });
 }
 
@@ -199,6 +297,7 @@ Map<String, dynamic> _event(
   String status, {
   String direction = 'incoming',
   String? stateMessage,
+  String? historyEventId,
 }) {
   return {
     'id': id,
@@ -207,6 +306,7 @@ Map<String, dynamic> _event(
     'status': status,
     'startedAt': DateTime(2026, 9, 17, 10).millisecondsSinceEpoch,
     'stateMessage': stateMessage,
+    'historyEventId': ?historyEventId,
   };
 }
 
@@ -220,6 +320,7 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   final _callEvents = StreamController<Map<String, dynamic>>.broadcast();
   final _messageEvents = StreamController<Map<String, dynamic>>.broadcast();
   final List<String> actions = [];
+  final List<String> acknowledgedHistoryEvents = [];
   final Map<String, Map<String, dynamic>> _calls = {};
 
   @override
@@ -240,6 +341,11 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
 
   @override
   Future<void> register() async {}
+
+  @override
+  Future<void> acknowledgeCallHistoryEvent(String eventId) async {
+    acknowledgedHistoryEvents.add(eventId);
+  }
 
   @override
   Future<bool> hasActiveCall() async => _calls.values.any(
@@ -293,6 +399,8 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
 
 class _MemoryCallHistoryRepository implements CallHistoryRepository {
   final List<CallHistoryItem> items = [];
+  Future<void>? writeGate;
+  Object? writeError;
 
   @override
   Future<void> clearCallHistory() async => items.clear();
@@ -311,6 +419,8 @@ class _MemoryCallHistoryRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
   }) async {
+    await writeGate;
+    if (writeError case final error?) throw error;
     final item = CallHistoryItem(
       id: sipCallId ?? 'call-${startedAt.microsecondsSinceEpoch}',
       remoteNumber: remoteNumber,

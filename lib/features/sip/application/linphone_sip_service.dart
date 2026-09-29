@@ -71,6 +71,8 @@ class LinphoneSipService implements SipService {
   final Set<String> _ringingIncomingCallIds = {};
   final Set<String> _answeredIncomingCallIds = {};
   final Set<String> _declinedIncomingCallIds = {};
+  final Map<String, Future<void>> _historyPersistence = {};
+  final Set<String> _persistedHistoryCallIds = {};
   final Set<String> _featureCodeCallIds = {};
   bool _pendingPbxDndToggle = false;
   bool _featureCodeDialInFlight = false;
@@ -1027,7 +1029,10 @@ class LinphoneSipService implements SipService {
       _stopWindowsCallReconciliationIfIdle();
       return;
     }
-    _recordCallState(call);
+    _recordCallState(
+      call,
+      historyEventId: _nullableString(event['historyEventId']),
+    );
     final previousActive = _activeCall;
     _publishCallState();
     if (_activeCall == null && call.answeredElsewhere) {
@@ -1391,7 +1396,7 @@ class LinphoneSipService implements SipService {
     return user.startsWith('*') || user.startsWith('#');
   }
 
-  void _recordCallState(VoipCall call) {
+  void _recordCallState(VoipCall call, {String? historyEventId}) {
     if (_featureCodeCallIds.contains(call.id) ||
         (_featureCodeDialInFlight && _looksLikePbxFeatureCode(call))) {
       return;
@@ -1409,39 +1414,106 @@ class LinphoneSipService implements SipService {
     if (previous != null &&
         _isFinished(previous.status) &&
         !upgradesAnsweredElsewhere) {
-      return;
+      final existingWrite = _historyPersistence[call.id];
+      if (historyEventId != null) {
+        if (existingWrite != null) {
+          unawaited(
+            existingWrite
+                .then((_) => _acknowledgeHistoryEvent(historyEventId))
+                .onError((_, _) {}),
+          );
+          return;
+        }
+        if (_persistedHistoryCallIds.contains(call.id)) {
+          unawaited(_acknowledgeHistoryEvent(historyEventId));
+          return;
+        }
+        // A prior write failed. Fall through and retry with the lifecycle
+        // evidence retained below instead of acknowledging a lost call.
+      } else {
+        return;
+      }
     }
     final repository = _callHistoryRepository;
     if (repository == null) {
       return;
     }
-    final wasDndReject = _dndRejectedCallIds.remove(call.id);
-    final wasDeclined = _declinedIncomingCallIds.remove(call.id);
+    final wasDndReject = _dndRejectedCallIds.contains(call.id);
+    final wasDeclined = _declinedIncomingCallIds.contains(call.id);
     final classification = classifyCompletedCall(
       direction: call.direction,
       status: call.status,
-      wasRinging: _ringingIncomingCallIds.remove(call.id),
-      wasAnswered: _answeredIncomingCallIds.remove(call.id),
+      wasRinging: _ringingIncomingCallIds.contains(call.id),
+      wasAnswered: _answeredIncomingCallIds.contains(call.id),
       wasDndRejected: wasDndReject,
       wasDeclined: wasDeclined,
       wasAnsweredElsewhere: call.answeredElsewhere,
     );
+    late final Future<void> persistence;
+    persistence = repository
+        .syncCallLog(
+          remoteNumber: _displayNumber(call.remoteUri),
+          remoteDisplayName: call.remoteDisplayName,
+          direction: classification.direction,
+          status: classification.status,
+          disposition: classification.disposition,
+          startedAt: call.startedAt,
+          endedAt: call.endedAt ?? DateTime.now(),
+          sipCallId: call.id,
+        )
+        .then<void>((_) async {
+          _rememberPersistedHistoryCall(call.id);
+          _ringingIncomingCallIds.remove(call.id);
+          _answeredIncomingCallIds.remove(call.id);
+          _dndRejectedCallIds.remove(call.id);
+          _declinedIncomingCallIds.remove(call.id);
+          if (historyEventId != null) {
+            await _acknowledgeHistoryEvent(historyEventId);
+          }
+          if (!_disposed) _onCallHistoryChanged?.call();
+        });
+    _historyPersistence[call.id] = persistence;
     unawaited(
-      repository
-          .syncCallLog(
-            remoteNumber: _displayNumber(call.remoteUri),
-            remoteDisplayName: call.remoteDisplayName,
-            direction: classification.direction,
-            status: classification.status,
-            disposition: classification.disposition,
-            startedAt: call.startedAt,
-            endedAt: call.endedAt ?? DateTime.now(),
-            sipCallId: call.id,
+      persistence
+          .then<void>(
+            (_) {},
+            onError: (Object error, StackTrace stackTrace) {
+              AppLogger.error(
+                'Call history persistence failed; native event remains pending',
+                error: error,
+                stackTrace: stackTrace,
+              );
+            },
           )
           .whenComplete(() {
-            if (!_disposed) _onCallHistoryChanged?.call();
+            if (identical(_historyPersistence[call.id], persistence)) {
+              _historyPersistence.remove(call.id);
+            }
           }),
     );
+  }
+
+  void _rememberPersistedHistoryCall(String callId) {
+    _persistedHistoryCallIds
+      ..remove(callId)
+      ..add(callId);
+    while (_persistedHistoryCallIds.length > 512) {
+      _persistedHistoryCallIds.remove(_persistedHistoryCallIds.first);
+    }
+  }
+
+  Future<void> _acknowledgeHistoryEvent(String eventId) async {
+    try {
+      await _platformChannel.acknowledgeCallHistoryEvent(eventId);
+    } on MissingPluginException {
+      // Platforms without a native outbox do not emit historyEventId.
+    } on Object catch (error, stackTrace) {
+      AppLogger.error(
+        'Unable to acknowledge native call history event',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
   void _emitRegistration(SipRegistrationState state) {

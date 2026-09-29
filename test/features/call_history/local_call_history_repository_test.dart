@@ -47,6 +47,41 @@ void main() {
       isTrue,
     );
   });
+
+  test(
+    'replaces a cached server record with its delayed native event',
+    () async {
+      final repository = LocalCallHistoryRepository(_SlowStorage());
+      final startedAt = DateTime.utc(2026, 9, 28, 12);
+
+      await repository.syncCallLog(
+        remoteNumber: '14165550100',
+        direction: CallDirection.incoming,
+        status: CallStatus.missed,
+        disposition: CallHistoryDisposition.missed,
+        startedAt: startedAt,
+        sipCallId: 'server-42',
+      );
+      await repository.syncCallLog(
+        remoteNumber: '+1 (416) 555-0100',
+        remoteDisplayName: 'SUP: Caller',
+        direction: CallDirection.missed,
+        status: CallStatus.ended,
+        disposition: CallHistoryDisposition.answeredElsewhere,
+        startedAt: startedAt.add(const Duration(seconds: 2)),
+        sipCallId: 'native-call-id',
+      );
+
+      final history = await repository.getCallHistory();
+      expect(history, hasLength(1));
+      expect(history.single.id, 'native-call-id');
+      expect(history.single.remoteDisplayName, 'SUP: Caller');
+      expect(
+        history.single.effectiveDisposition,
+        CallHistoryDisposition.answeredElsewhere,
+      );
+    },
+  );
 }
 
 class _SlowStorage extends InMemorySecureStorageService {

@@ -17,6 +17,7 @@ class AppConfig {
     required this.enableVoipDebugLogs,
     required this.desktopUpdateManifestUrl,
     required this.legalTermsUrl,
+    required this.callHistoryEndpointPath,
   });
 
   factory AppConfig.fromEnvironment() {
@@ -46,6 +47,9 @@ class AppConfig {
         'DESKTOP_UPDATE_MANIFEST_URL',
       ),
       legalTermsUrl: const String.fromEnvironment('LEGAL_TERMS_URL'),
+      callHistoryEndpointPath: const String.fromEnvironment(
+        'CALL_HISTORY_ENDPOINT_PATH',
+      ),
     );
   }
 
@@ -64,6 +68,7 @@ class AppConfig {
           (values['ENABLE_VOIP_DEBUG_LOGS'] ?? '').toLowerCase() == 'true',
       desktopUpdateManifestUrl: values['DESKTOP_UPDATE_MANIFEST_URL'] ?? '',
       legalTermsUrl: values['LEGAL_TERMS_URL'] ?? '',
+      callHistoryEndpointPath: values['CALL_HISTORY_ENDPOINT_PATH'] ?? '',
     );
   }
 
@@ -79,6 +84,7 @@ class AppConfig {
   final bool enableVoipDebugLogs;
   final String desktopUpdateManifestUrl;
   final String legalTermsUrl;
+  final String callHistoryEndpointPath;
 
   bool get isProduction => environment == AppEnvironment.production;
 
@@ -116,6 +122,30 @@ class AppConfig {
   Uri? get legalTermsUri {
     final uri = Uri.tryParse(legalTermsUrl.trim());
     if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
+      return null;
+    }
+    return uri;
+  }
+
+  /// Root-relative path resolved only against the authenticated tenant host.
+  /// Rejecting absolute/protocol-relative values prevents a build-time config
+  /// mistake from sending a device bearer token to another origin.
+  Uri? get callHistoryEndpointUri {
+    final value = callHistoryEndpointPath.trim();
+    final rawSegments = value.split('/');
+    if (!RegExp(r'^/[A-Za-z0-9._~/-]+$').hasMatch(value) ||
+        value.contains('//') ||
+        rawSegments.contains('.') ||
+        rawSegments.contains('..')) {
+      return null;
+    }
+    final uri = Uri.tryParse(value);
+    if (uri == null ||
+        !value.startsWith('/') ||
+        uri.hasScheme ||
+        uri.hasAuthority ||
+        uri.hasQuery ||
+        uri.hasFragment) {
       return null;
     }
     return uri;

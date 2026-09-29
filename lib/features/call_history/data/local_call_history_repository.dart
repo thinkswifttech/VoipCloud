@@ -96,13 +96,16 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
       endedAt: endedAt,
     );
     final current = await _safeCallHistoryForSync();
-    final deduped = [item, ...current.where((entry) => entry.id != id)]
-      ..sort((a, b) => b.startedAt.compareTo(a.startedAt));
+    final deduped = [
+      item,
+      ...current.where((entry) => entry.id != id && !_sameCall(entry, item)),
+    ]..sort((a, b) => b.startedAt.compareTo(a.startedAt));
     final limited = deduped.take(200).map((entry) => entry.toJson()).toList();
     try {
       await _storage.write(StorageKeys.appCallHistory, jsonEncode(limited));
     } catch (error) {
       AppLogger.warning('Call history write skipped', data: error);
+      rethrow;
     }
     return item;
   }
@@ -114,5 +117,20 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
       AppLogger.warning('Call history read skipped during sync', data: error);
       return const [];
     }
+  }
+
+  bool _sameCall(CallHistoryItem left, CallHistoryItem right) {
+    if ((left.direction == CallDirection.outgoing) !=
+        (right.direction == CallDirection.outgoing)) {
+      return false;
+    }
+    if (_digits(left.remoteNumber) != _digits(right.remoteNumber)) return false;
+    return left.startedAt.difference(right.startedAt).abs() <=
+        const Duration(seconds: 8);
+  }
+
+  String _digits(String value) {
+    final digits = value.replaceAll(RegExp(r'[^0-9]'), '');
+    return digits.isEmpty ? value.trim().toLowerCase() : digits;
   }
 }

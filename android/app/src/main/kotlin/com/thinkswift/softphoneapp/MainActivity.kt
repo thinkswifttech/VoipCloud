@@ -941,7 +941,16 @@ private class LinphoneBridge private constructor(private val context: android.co
                 }
                 "clearNativeCallState" -> {
                     CallerIdentityStore.clear(context)
+                    CallHistoryOutbox.clear(context)
                     result.success(null)
+                }
+                "ackCallHistoryEvent" -> {
+                    result.success(
+                        CallHistoryOutbox.acknowledge(
+                            context,
+                            call.argument<String>("eventId").orEmpty()
+                        )
+                    )
                 }
                 "ensureBluetoothPermission" -> {
                     result.success(ensureBluetoothPermission())
@@ -2365,7 +2374,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     fun updateCallSink(sink: EventChannel.EventSink?) {
-        val pending = synchronized(callEventLock) {
+        val detached = synchronized(callEventLock) {
             callSink = sink
             if (sink == null || detachedCallEvents.isEmpty()) {
                 emptyList()
@@ -2378,22 +2387,35 @@ private class LinphoneBridge private constructor(private val context: android.co
             }
         }
         if (sink != null) {
-            pending.forEach(sink::success)
+            detached.forEach(sink::success)
+            // Replay terminal events until Dart confirms its history write.
+            CallHistoryOutbox.pending(context).forEach(sink::success)
         }
     }
 
     private fun emitCallEvent(event: Map<String, Any?>) {
+        val terminal = event["status"]?.toString()?.lowercase() in setOf(
+            "ended",
+            "failed",
+            "missed"
+        )
+        val deliveredEvent = if (terminal) {
+            CallHistoryOutbox.record(context, event)
+        } else {
+            event
+        }
         val sink = synchronized(callEventLock) {
             val attached = callSink
-            if (attached == null) {
+            // Terminal events already live in the disk-backed outbox.
+            if (attached == null && !terminal) {
                 while (detachedCallEvents.size >= DETACHED_CALL_EVENT_CAPACITY) {
                     detachedCallEvents.removeFirst()
                 }
-                detachedCallEvents.addLast(event)
+                detachedCallEvents.addLast(deliveredEvent)
             }
             attached
         }
-        sink?.success(event)
+        sink?.success(deliveredEvent)
     }
 
     fun updateFcmPushToken(token: String) {
@@ -2718,6 +2740,7 @@ private class LinphoneBridge private constructor(private val context: android.co
         account = null
         SipCredentialStore.clear(context)
         CallerIdentityStore.clear(context)
+        CallHistoryOutbox.clear(context)
         Log.i("VoIPCloud/Linphone", "Purged logged-out SIP account")
     }
 }

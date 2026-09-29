@@ -482,7 +482,8 @@ final class LinphoneFlutterBridge {
   private static let callEvents = LinphoneEventStreamHandler(
     name: "calls",
     detachedBufferCapacity: 64,
-    replayLatestEvent: false
+    replayLatestEvent: false,
+    terminalOutbox: IOSCallHistoryOutbox.shared
   )
   private static let messageEvents = LinphoneEventStreamHandler(name: "messages")
   private static let sipLogEvents = LinphoneEventStreamHandler(name: "logs")
@@ -550,6 +551,23 @@ final class LinphoneFlutterBridge {
         let arguments = call.arguments as? [String: Any]
         let count = max(0, (arguments?["count"] as? NSNumber)?.intValue ?? 0)
         IOSAppBadge.setCount(count)
+        result(nil)
+        return
+      }
+      if call.method == "ackCallHistoryEvent" {
+        let arguments = call.arguments as? [String: Any]
+        let eventId = (arguments?["eventId"] as? String)?.trimmingCharacters(
+          in: .whitespacesAndNewlines
+        ) ?? ""
+        guard !eventId.isEmpty else {
+          result(FlutterError(
+            code: "INVALID_HISTORY_EVENT_ID",
+            message: "A call-history event id is required.",
+            details: nil
+          ))
+          return
+        }
+        IOSCallHistoryOutbox.shared.acknowledge(eventId: eventId)
         result(nil)
         return
       }
@@ -1080,10 +1098,149 @@ private enum SipCredentialStore {
   }
 }
 
+private final class IOSCallHistoryOutbox {
+  static let shared = IOSCallHistoryOutbox()
+
+  private let lock = NSLock()
+  private let maxEvents = 200
+  private let maxAge: TimeInterval = 30 * 24 * 60 * 60
+  private let fileURL: URL
+
+  private init() {
+    let manager = FileManager.default
+    let support = (try? manager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )) ?? manager.temporaryDirectory
+    let directory = support.appendingPathComponent(
+      "VoIPCloud/CallHistory",
+      isDirectory: true
+    )
+    try? manager.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true
+    )
+    var directoryValues = URLResourceValues()
+    directoryValues.isExcludedFromBackup = true
+    var mutableDirectory = directory
+    try? mutableDirectory.setResourceValues(directoryValues)
+    fileURL = directory.appendingPathComponent("terminal-events-v1.json")
+  }
+
+  func enqueue(_ source: [String: Any?]) -> [String: Any?] {
+    lock.lock()
+    defer { lock.unlock() }
+
+    var event = source.compactMapValues { $0 }
+    let eventId = UUID().uuidString.lowercased()
+    event["historyEventId"] = eventId
+    event["historyReplay"] = false
+
+    var records = loadLocked()
+    let callId = event["id"] as? String
+    if let callId, !callId.isEmpty {
+      records.removeAll { record in
+        guard let saved = record["event"] as? [String: Any] else { return false }
+        return saved["id"] as? String == callId
+      }
+    }
+    records.append([
+      "storedAt": Date().timeIntervalSince1970,
+      "event": event,
+    ])
+    records = prune(records)
+    persistLocked(records)
+    return optionalValues(event)
+  }
+
+  func pendingEvents() -> [[String: Any?]] {
+    lock.lock()
+    defer { lock.unlock() }
+
+    let records = prune(loadLocked())
+    persistLocked(records)
+    return records.compactMap { record in
+      guard var event = record["event"] as? [String: Any] else { return nil }
+      event["historyReplay"] = true
+      return optionalValues(event)
+    }
+  }
+
+  func acknowledge(eventId: String) {
+    lock.lock()
+    defer { lock.unlock() }
+
+    var records = loadLocked()
+    records.removeAll { record in
+      guard let event = record["event"] as? [String: Any] else { return false }
+      return event["historyEventId"] as? String == eventId
+    }
+    persistLocked(prune(records))
+  }
+
+  func clear() {
+    lock.lock()
+    defer { lock.unlock() }
+    do {
+      if FileManager.default.fileExists(atPath: fileURL.path) {
+        try FileManager.default.removeItem(at: fileURL)
+      }
+    } catch {
+      NSLog("Softphone/CallHistoryOutbox clear failed: %@", error.localizedDescription)
+    }
+  }
+
+  private func loadLocked() -> [[String: Any]] {
+    guard let data = try? Data(contentsOf: fileURL),
+          let decoded = try? JSONSerialization.jsonObject(with: data),
+          let records = decoded as? [[String: Any]]
+    else {
+      return []
+    }
+    return records
+  }
+
+  private func prune(_ records: [[String: Any]]) -> [[String: Any]] {
+    let cutoff = Date().timeIntervalSince1970 - maxAge
+    let current = records.filter { record in
+      (record["storedAt"] as? NSNumber)?.doubleValue ?? 0 >= cutoff
+    }
+    return Array(current.suffix(maxEvents))
+  }
+
+  private func persistLocked(_ records: [[String: Any]]) {
+    do {
+      if records.isEmpty {
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+          try FileManager.default.removeItem(at: fileURL)
+        }
+        return
+      }
+      let data = try JSONSerialization.data(withJSONObject: records)
+      try data.write(to: fileURL, options: .atomic)
+      try? FileManager.default.setAttributes(
+        [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+        ofItemAtPath: fileURL.path
+      )
+    } catch {
+      NSLog("Softphone/CallHistoryOutbox persist failed: %@", error.localizedDescription)
+    }
+  }
+
+  private func optionalValues(_ event: [String: Any]) -> [String: Any?] {
+    event.reduce(into: [String: Any?]()) { result, pair in
+      result[pair.key] = pair.value
+    }
+  }
+}
+
 private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   private let name: String
   private let detachedBufferCapacity: Int
   private let replayLatestEvent: Bool
+  private let terminalOutbox: IOSCallHistoryOutbox?
   private var eventSink: FlutterEventSink?
   private var lastEvent: [String: Any?]?
   private var detachedEvents: [[String: Any?]] = []
@@ -1091,11 +1248,13 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   init(
     name: String,
     detachedBufferCapacity: Int = 0,
-    replayLatestEvent: Bool = true
+    replayLatestEvent: Bool = true,
+    terminalOutbox: IOSCallHistoryOutbox? = nil
   ) {
     self.name = name
     self.detachedBufferCapacity = max(0, detachedBufferCapacity)
     self.replayLatestEvent = replayLatestEvent
+    self.terminalOutbox = terminalOutbox
     super.init()
   }
 
@@ -1105,6 +1264,17 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   ) -> FlutterError? {
     eventSink = events
     NSLog("Softphone/EventChannel %@ listener attached", name)
+    let durableEvents = terminalOutbox?.pendingEvents() ?? []
+    if !durableEvents.isEmpty {
+      NSLog(
+        "Softphone/EventChannel %@ replaying %d durable terminal events",
+        name,
+        durableEvents.count
+      )
+      for event in durableEvents {
+        events(event)
+      }
+    }
     if !detachedEvents.isEmpty {
       let pending = detachedEvents
       detachedEvents.removeAll(keepingCapacity: true)
@@ -1132,9 +1302,18 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   func send(_ event: [String: Any?]) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
+      let terminal = Self.isTerminalCallEvent(event)
+      let deliverable = terminal
+        ? (self.terminalOutbox?.enqueue(event) ?? event)
+        : event
       guard let eventSink = self.eventSink else {
-        if self.detachedBufferCapacity > 0 {
-          self.detachedEvents.append(event)
+        if terminal, self.terminalOutbox != nil {
+          NSLog(
+            "Softphone/EventChannel %@ durably queued terminal event",
+            self.name
+          )
+        } else if self.detachedBufferCapacity > 0 {
+          self.detachedEvents.append(deliverable)
           let overflow = self.detachedEvents.count - self.detachedBufferCapacity
           if overflow > 0 {
             self.detachedEvents.removeFirst(overflow)
@@ -1154,10 +1333,15 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
         return
       }
       if self.replayLatestEvent {
-        self.lastEvent = event
+        self.lastEvent = deliverable
       }
-      eventSink(event)
+      eventSink(deliverable)
     }
+  }
+
+  private static func isTerminalCallEvent(_ event: [String: Any?]) -> Bool {
+    guard let status = event["status"] as? String else { return false }
+    return status == "ended" || status == "missed" || status == "failed"
   }
 }
 
@@ -3993,6 +4177,7 @@ private final class NativeLinphoneController: LinphoneController {
     account = nil
     SipCredentialStore.clear()
     IOSCallerIdentityStore.shared.clear()
+    IOSCallHistoryOutbox.shared.clear()
     NSLog("Softphone/Linphone purged logged-out SIP account")
   }
 

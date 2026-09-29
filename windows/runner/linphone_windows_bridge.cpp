@@ -3,6 +3,7 @@
 #include <flutter/event_channel.h>
 #include <flutter/event_stream_handler_functions.h>
 #include <flutter/method_channel.h>
+#include <flutter/standard_message_codec.h>
 #include <flutter/standard_method_codec.h>
 
 #include <shellapi.h>
@@ -19,9 +20,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -43,6 +47,7 @@ constexpr int kLinphoneReasonBusy = 6;
 constexpr int kLinphoneToneCallLost = 4;
 constexpr int kLinphoneToneCallEnd = 5;
 std::atomic<uint64_t> g_tone_file_sequence{0};
+std::atomic<uint64_t> g_call_history_event_sequence{0};
 constexpr wchar_t kVoipCloudRegistryPath[] =
     L"Software\\ThinkSwift\\VoipCloud";
 constexpr wchar_t kDeviceDndRegistryValue[] = L"DeviceDndEnabled";
@@ -168,6 +173,198 @@ using MethodCall = flutter::MethodCall<EncodableValue>;
 using MethodResult = flutter::MethodResult<EncodableValue>;
 using EventSink = flutter::EventSink<EncodableValue>;
 using Microsoft::WRL::ComPtr;
+
+constexpr size_t kCallHistoryOutboxCapacity = 200;
+constexpr int64_t kCallHistoryOutboxMaxAgeMilliseconds =
+    30LL * 24LL * 60LL * 60LL * 1000LL;
+
+int64_t CurrentEpochMilliseconds() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+std::filesystem::path CallHistoryOutboxDirectory() {
+  wchar_t local_app_data[MAX_PATH] = {};
+  const auto length = GetEnvironmentVariableW(
+      L"LOCALAPPDATA", local_app_data, MAX_PATH);
+  if (length == 0 || length >= MAX_PATH) {
+    return {};
+  }
+  return std::filesystem::path(std::wstring(local_app_data, length)) /
+         L"ThinkSwift" / L"VoipCloud" / L"CallHistory";
+}
+
+std::string MapString(const EncodableMap& map, const char* key) {
+  const auto found = map.find(EncodableValue(std::string(key)));
+  if (found == map.end()) {
+    return {};
+  }
+  const auto* value = std::get_if<std::string>(&found->second);
+  return value == nullptr ? std::string() : *value;
+}
+
+int64_t MapInt64(const EncodableMap& map, const char* key) {
+  const auto found = map.find(EncodableValue(std::string(key)));
+  if (found == map.end()) {
+    return 0;
+  }
+  if (const auto* value = std::get_if<int64_t>(&found->second)) {
+    return *value;
+  }
+  if (const auto* value = std::get_if<int32_t>(&found->second)) {
+    return *value;
+  }
+  return 0;
+}
+
+bool IsTerminalCallPayload(const EncodableMap& payload) {
+  const auto status = MapString(payload, "status");
+  return status == "ended" || status == "failed" || status == "missed";
+}
+
+std::string NewCallHistoryEventId() {
+  std::ostringstream value;
+  value << std::hex << CurrentEpochMilliseconds() << '-'
+        << GetCurrentProcessId() << '-'
+        << g_call_history_event_sequence.fetch_add(1);
+  return value.str();
+}
+
+std::optional<EncodableMap> ReadCallHistoryEvent(
+    const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return std::nullopt;
+  }
+  std::vector<uint8_t> bytes(
+      (std::istreambuf_iterator<char>(input)),
+      std::istreambuf_iterator<char>());
+  const auto decoded =
+      flutter::StandardMessageCodec::GetInstance().DecodeMessage(bytes);
+  if (!decoded) {
+    return std::nullopt;
+  }
+  const auto* map = std::get_if<EncodableMap>(decoded.get());
+  if (map == nullptr) {
+    return std::nullopt;
+  }
+  return *map;
+}
+
+std::vector<std::pair<std::filesystem::path, EncodableMap>>
+ReadCallHistoryOutbox() {
+  std::vector<std::pair<std::filesystem::path, EncodableMap>> events;
+  const auto directory = CallHistoryOutboxDirectory();
+  std::error_code error;
+  if (directory.empty() || !std::filesystem::is_directory(directory, error)) {
+    return events;
+  }
+  for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+    if (error) break;
+    if (!entry.is_regular_file(error) || entry.path().extension() != L".event") {
+      continue;
+    }
+    auto event = ReadCallHistoryEvent(entry.path());
+    if (event.has_value()) {
+      events.emplace_back(entry.path(), std::move(*event));
+    } else {
+      std::filesystem::remove(entry.path(), error);
+    }
+  }
+  std::sort(events.begin(), events.end(), [](const auto& left, const auto& right) {
+    return MapInt64(left.second, "historyPersistedAtEpochMs") <
+           MapInt64(right.second, "historyPersistedAtEpochMs");
+  });
+  return events;
+}
+
+void PruneCallHistoryOutbox() {
+  auto events = ReadCallHistoryOutbox();
+  const auto oldest = CurrentEpochMilliseconds() -
+                      kCallHistoryOutboxMaxAgeMilliseconds;
+  std::error_code error;
+  for (const auto& event : events) {
+    if (MapInt64(event.second, "historyPersistedAtEpochMs") < oldest) {
+      std::filesystem::remove(event.first, error);
+    }
+  }
+  events = ReadCallHistoryOutbox();
+  while (events.size() > kCallHistoryOutboxCapacity) {
+    std::filesystem::remove(events.front().first, error);
+    events.erase(events.begin());
+  }
+}
+
+std::optional<EncodableMap> PersistCallHistoryEvent(
+    const EncodableMap& payload) {
+  auto event = payload;
+  const auto event_id = NewCallHistoryEventId();
+  event[EncodableValue("historyEventId")] = EncodableValue(event_id);
+  event[EncodableValue("historyReplay")] = EncodableValue(false);
+  event[EncodableValue("historyPersistedAtEpochMs")] =
+      EncodableValue(CurrentEpochMilliseconds());
+  const auto directory = CallHistoryOutboxDirectory();
+  if (directory.empty()) {
+    return std::nullopt;
+  }
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  if (error) {
+    return std::nullopt;
+  }
+  const auto call_id = MapString(event, "id");
+  for (const auto& existing : ReadCallHistoryOutbox()) {
+    if (!call_id.empty() && MapString(existing.second, "id") == call_id) {
+      std::filesystem::remove(existing.first, error);
+    }
+  }
+  const auto bytes = flutter::StandardMessageCodec::GetInstance()
+                         .EncodeMessage(EncodableValue(event));
+  if (!bytes) {
+    return std::nullopt;
+  }
+  const auto final_path = directory / Utf8ToWide(event_id + ".event");
+  const auto temporary_path = directory / Utf8ToWide(event_id + ".tmp");
+  {
+    std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+      return std::nullopt;
+    }
+    output.write(reinterpret_cast<const char*>(bytes->data()),
+                 static_cast<std::streamsize>(bytes->size()));
+    output.flush();
+    if (!output) {
+      output.close();
+      std::filesystem::remove(temporary_path, error);
+      return std::nullopt;
+    }
+  }
+  std::filesystem::rename(temporary_path, final_path, error);
+  if (error) {
+    std::filesystem::remove(temporary_path, error);
+    return std::nullopt;
+  }
+  PruneCallHistoryOutbox();
+  return event;
+}
+
+void AcknowledgeCallHistoryEvent(const std::string& event_id) {
+  if (event_id.empty() ||
+      !std::all_of(event_id.begin(), event_id.end(), [](unsigned char value) {
+        return std::isalnum(value) || value == '-';
+      })) {
+    return;
+  }
+  std::error_code error;
+  std::filesystem::remove(
+      CallHistoryOutboxDirectory() / Utf8ToWide(event_id + ".event"), error);
+}
+
+void ClearCallHistoryOutbox() {
+  std::error_code error;
+  std::filesystem::remove_all(CallHistoryOutboxDirectory(), error);
+}
 
 struct LinphoneFactory;
 struct LinphoneCore;
@@ -1346,6 +1543,15 @@ class LinphoneWindowsBridge::Impl {
     if (stream == "registration" && registration_sink_) {
       registration_sink_->Success(EncodableValue(payload));
     } else if (stream == "calls") {
+      if (IsTerminalCallPayload(payload)) {
+        const auto persisted = PersistCallHistoryEvent(payload);
+        if (persisted.has_value()) {
+          if (call_sink_) {
+            call_sink_->Success(EncodableValue(*persisted));
+          }
+          return;
+        }
+      }
       if (call_sink_) {
         call_sink_->Success(EncodableValue(payload));
       } else {
@@ -1363,7 +1569,16 @@ class LinphoneWindowsBridge::Impl {
   }
 
   void FlushPendingCallEvents() {
-    if (!call_sink_ || detached_call_events_.empty()) {
+    if (!call_sink_) {
+      return;
+    }
+    PruneCallHistoryOutbox();
+    for (const auto& pending : ReadCallHistoryOutbox()) {
+      auto replay = pending.second;
+      replay[EncodableValue("historyReplay")] = EncodableValue(true);
+      call_sink_->Success(EncodableValue(replay));
+    }
+    if (detached_call_events_.empty()) {
       return;
     }
     auto pending = std::move(detached_call_events_);
@@ -1409,6 +1624,10 @@ class LinphoneWindowsBridge::Impl {
       SetNativeDnd(BoolArg(ArgsMap(call), "enabled"), std::move(result));
     } else if (method == "setAppBadgeCount") {
       owner_->SetAppBadgeCount(IntArg(ArgsMap(call), "count"));
+      result->Success();
+    } else if (method == "ackCallHistoryEvent") {
+      AcknowledgeCallHistoryEvent(
+          StringArg(ArgsMap(call), "historyEventId"));
       result->Success();
     } else if (method == "enterBackground" || method == "enterForeground") {
       result->Success();
@@ -2756,6 +2975,8 @@ class LinphoneWindowsBridge::Impl {
 
   void PurgeAccount(std::unique_ptr<MethodResult> result) {
     std::lock_guard<std::mutex> lock(core_mutex_);
+    ClearCallHistoryOutbox();
+    detached_call_events_.clear();
     if (core_ == nullptr) {
       account_ = nullptr;
       sip_domain_.clear();
