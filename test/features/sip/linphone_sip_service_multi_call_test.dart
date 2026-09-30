@@ -24,8 +24,12 @@ void main() {
       service = LinphoneSipService(
         platformChannel: platform,
         callHistoryRepository: history,
+        postDialPause: Duration.zero,
+        postDialToneGap: Duration.zero,
       );
       await service.initialize(_config);
+      platform.emitRegistration({'status': 'registered'});
+      await _flushEvents();
     });
 
     tearDown(() async {
@@ -84,6 +88,143 @@ void main() {
       expect(service.activeCall?.status, CallStatus.active);
     });
 
+    test('blind transfer sends the PBX ## feature code as DTMF', () async {
+      platform.emitCall(_event('original', 'active', direction: 'outgoing'));
+      await _flushEvents();
+
+      await service.blindTransfer(
+        callId: 'original',
+        destination: 'sip:211@example.test',
+      );
+
+      expect(platform.actions, [
+        'dtmf:#',
+        'dtmf:#',
+        'dtmf:2',
+        'dtmf:1',
+        'dtmf:1',
+      ]);
+    });
+
+    test(
+      'comma post-dial calls only the base number then sends tones',
+      () async {
+        await service.makeCall('18005551212,123#');
+        await _flushEvents();
+
+        expect(platform.actions, ['call:18005551212']);
+
+        platform.emitCall(
+          _event(
+            'post-dial-comma',
+            'active',
+            direction: 'outgoing',
+            remoteUri: '18005551212',
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+
+        expect(platform.actions, [
+          'call:18005551212',
+          'dtmf:1',
+          'dtmf:2',
+          'dtmf:3',
+          'dtmf:#',
+        ]);
+      },
+    );
+
+    test('semicolon post-dial waits for explicit confirmation', () async {
+      await service.makeCall('18005551212;456');
+      platform.emitCall(
+        _event(
+          'post-dial-wait',
+          'active',
+          direction: 'outgoing',
+          remoteUri: '18005551212',
+        ),
+      );
+      await _flushEvents();
+
+      expect(platform.actions, ['call:18005551212']);
+      expect(service.postDialPrompt?.digits, '456');
+
+      await service.continuePostDial('post-dial-wait');
+      await _flushEvents();
+
+      expect(platform.actions, [
+        'call:18005551212',
+        'dtmf:4',
+        'dtmf:5',
+        'dtmf:6',
+      ]);
+      expect(service.postDialPrompt, isNull);
+    });
+
+    test('starts an attended transfer by holding then dialing', () async {
+      platform.emitCall(_event('original', 'active', direction: 'outgoing'));
+      await _flushEvents();
+
+      await service.startAttendedTransfer(
+        originalCallId: 'original',
+        destination: '211',
+      );
+      await _flushEvents();
+
+      expect(platform.actions, ['hold:original', 'call:211']);
+      expect(
+        service.liveCalls.firstWhere((call) => call.id == 'original').status,
+        CallStatus.held,
+      );
+    });
+
+    test('completes attended transfer using the two exact calls', () async {
+      platform.emitCall(_event('original', 'held', direction: 'incoming'));
+      platform.emitCall(
+        _event('consultation', 'active', direction: 'outgoing'),
+      );
+      await _flushEvents();
+
+      await service.completeAttendedTransfer(
+        originalCallId: 'original',
+        consultationCallId: 'consultation',
+      );
+
+      expect(platform.actions, ['transfer:original:consultation']);
+    });
+
+    test('cancels attended transfer and restores the original call', () async {
+      platform.emitCall(_event('original', 'held', direction: 'incoming'));
+      platform.emitCall(
+        _event('consultation', 'active', direction: 'outgoing'),
+      );
+      await _flushEvents();
+
+      await service.cancelAttendedTransfer(
+        originalCallId: 'original',
+        consultationCallId: 'consultation',
+      );
+      await _flushEvents();
+
+      expect(platform.actions, ['end:consultation', 'resume:original']);
+      expect(service.activeCall?.id, 'original');
+    });
+
+    test('merges exactly one active and one held call', () async {
+      platform.emitCall(_event('original', 'held', direction: 'incoming'));
+      platform.emitCall(
+        _event('consultation', 'active', direction: 'outgoing'),
+      );
+      await _flushEvents();
+
+      await service.mergeCalls(
+        activeCallId: 'consultation',
+        heldCallId: 'original',
+      );
+
+      expect(platform.actions, ['merge:consultation:original']);
+    });
+
     test(
       'automatically resumes the sole held call when its peer ends',
       () async {
@@ -127,6 +268,72 @@ void main() {
         expect(
           history.items.single.effectiveDisposition,
           isNot(CallHistoryDisposition.missed),
+        );
+      },
+    );
+
+    test(
+      'keeps this device answered when a connected call ends elsewhere',
+      () async {
+        platform.emitCall(_event('android-answered', 'ringing'));
+        platform.emitCall(_event('android-answered', 'active'));
+        await _flushEvents();
+
+        platform.emitCall(
+          _event(
+            'android-answered',
+            'ended',
+            stateMessage: 'Call completed elsewhere',
+          ),
+        );
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(history.items, hasLength(1));
+        expect(history.items.single.direction, CallDirection.incoming);
+        expect(
+          history.items.single.effectiveDisposition,
+          CallHistoryDisposition.answered,
+        );
+      },
+    );
+
+    test(
+      'keeps a queue prefix when Android Telecom emits a later plain identity',
+      () async {
+        platform.emitCall(
+          _event(
+            'android-queue-call',
+            'ringing',
+            remoteUri: 'sip:TEST%3A211@example.test',
+            remoteDisplayName: 'TEST: Abdul Test User',
+          ),
+        );
+        platform.emitCall(
+          _event(
+            'android-queue-call',
+            'active',
+            remoteUri: '211',
+            remoteDisplayName: 'Abdul Test User',
+          ),
+        );
+        platform.emitCall(
+          _event(
+            'android-queue-call',
+            'ended',
+            remoteUri: '211',
+            remoteDisplayName: 'Abdul Test User',
+          ),
+        );
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(history.items, hasLength(1));
+        expect(history.items.single.remoteNumber, 'TEST:211');
+        expect(history.items.single.remoteDisplayName, 'TEST: Abdul Test User');
+        expect(
+          history.items.single.effectiveDisposition,
+          CallHistoryDisposition.answered,
         );
       },
     );
@@ -240,6 +447,33 @@ void main() {
     });
 
     test(
+      'legacy Windows replay uses durable event time instead of app-open time',
+      () async {
+        final persistedAt = DateTime(2026, 9, 29, 14, 8);
+        final event =
+            _event(
+                'legacy-windows-replay',
+                'ended',
+                historyEventId: 'outbox-legacy',
+              )
+              ..remove('startedAt')
+              ..addAll({
+                'historyReplay': true,
+                'historyPersistedAtEpochMs': persistedAt.millisecondsSinceEpoch,
+              });
+
+        platform.emitCall(event);
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(history.items, hasLength(1));
+        expect(history.items.single.startedAt, persistedAt);
+        expect(history.items.single.endedAt, persistedAt);
+        expect(platform.acknowledgedHistoryEvents, ['outbox-legacy']);
+      },
+    );
+
+    test(
       'does not acknowledge replay when history persistence fails',
       () async {
         history.writeError = StateError('storage unavailable');
@@ -298,10 +532,13 @@ Map<String, dynamic> _event(
   String direction = 'incoming',
   String? stateMessage,
   String? historyEventId,
+  String? remoteUri,
+  String? remoteDisplayName,
 }) {
   return {
     'id': id,
-    'remoteUri': 'sip:$id@example.test',
+    'remoteUri': remoteUri ?? 'sip:$id@example.test',
+    'remoteDisplayName': ?remoteDisplayName,
     'direction': direction,
     'status': status,
     'startedAt': DateTime(2026, 9, 17, 10).millisecondsSinceEpoch,
@@ -377,11 +614,42 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   }
 
   @override
+  Future<void> makeCall(String destination) async {
+    actions.add('call:$destination');
+    emitCall(_event('outgoing-$destination', 'dialing', direction: 'outgoing'));
+  }
+
+  @override
+  Future<void> sendDtmf(String value) async {
+    actions.add('dtmf:$value');
+  }
+
+  @override
+  Future<void> completeAttendedTransfer({
+    required String originalCallId,
+    required String consultationCallId,
+  }) async {
+    actions.add('transfer:$originalCallId:$consultationCallId');
+  }
+
+  @override
+  Future<void> mergeCalls({
+    required String activeCallId,
+    required String heldCallId,
+  }) async {
+    actions.add('merge:$activeCallId:$heldCallId');
+  }
+
+  @override
   Future<void> dispose() async {}
 
   void emitCall(Map<String, dynamic> event) {
     _calls['${event['id']}'] = Map<String, dynamic>.from(event);
     _callEvents.add(event);
+  }
+
+  void emitRegistration(Map<String, dynamic> event) {
+    _registrationEvents.add(event);
   }
 
   void _changeStatus(String callId, String status) {

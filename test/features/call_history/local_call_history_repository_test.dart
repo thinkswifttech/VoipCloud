@@ -82,6 +82,61 @@ void main() {
       );
     },
   );
+
+  test('removes overlapping queue-leg duplicates already in storage', () async {
+    final storage = InMemorySecureStorageService();
+    final repository = LocalCallHistoryRepository(storage);
+    final startedAt = DateTime.utc(2026, 9, 29, 15, 57);
+
+    await repository.syncCallLog(
+      remoteNumber: '211',
+      direction: CallDirection.missed,
+      status: CallStatus.missed,
+      disposition: CallHistoryDisposition.missed,
+      startedAt: startedAt,
+      endedAt: startedAt.add(const Duration(seconds: 15)),
+      sipCallId: 'server-outer-leg',
+    );
+    await repository.syncCallLog(
+      remoteNumber: '211',
+      remoteDisplayName: 'TEST: Abdul Test User',
+      direction: CallDirection.incoming,
+      status: CallStatus.ended,
+      disposition: CallHistoryDisposition.answered,
+      startedAt: startedAt.add(const Duration(seconds: 3)),
+      endedAt: startedAt.add(const Duration(seconds: 12)),
+      sipCallId: 'windows-native-call',
+    );
+
+    final history = await repository.getCallHistory();
+    expect(history, hasLength(1));
+    expect(history.single.id, 'windows-native-call');
+    expect(
+      history.single.effectiveDisposition,
+      CallHistoryDisposition.answered,
+    );
+  });
+
+  test('hides a cached zero-duration provisional server miss', () async {
+    final repository = LocalCallHistoryRepository(
+      InMemorySecureStorageService(),
+    );
+    final startedAt = DateTime.utc(2026, 9, 29, 19, 50);
+
+    await repository.syncCallLog(
+      remoteNumber: '211',
+      remoteDisplayName: 'TEST: Abdul Test User',
+      direction: CallDirection.missed,
+      status: CallStatus.missed,
+      disposition: CallHistoryDisposition.missed,
+      startedAt: startedAt,
+      endedAt: startedAt,
+      sipCallId:
+          'b7d8e6bcdb6f4b96cdf67a61156efee92eb68967fcb1fed4d0bfb0e614334562',
+    );
+
+    expect(await repository.getCallHistory(), isEmpty);
+  });
 }
 
 class _SlowStorage extends InMemorySecureStorageService {

@@ -12,6 +12,8 @@ import '../../../features/calls/presentation/call_session_providers.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../features/session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
+import '../../../shared/platform/desktop_platform.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
@@ -94,10 +96,13 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   @override
   Widget build(BuildContext context) {
     final directory = ref.watch(directoryProvider);
-    final transferMode = ref.watch(callTransferModeProvider);
+    final transferMode = ref.watch(callTransferModeProvider) != null;
 
-    ref.listen<bool>(callTransferModeProvider, (previous, next) {
-      if (next && _tab != _DirectoryTab.company) {
+    ref.listen<CallTransferRequest?>(callTransferModeProvider, (
+      previous,
+      next,
+    ) {
+      if (next != null && _tab != _DirectoryTab.company) {
         setState(() {
           _tab = _DirectoryTab.company;
           if (!_sortOptionsFor(_tab).contains(_sort)) {
@@ -260,7 +265,9 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   }) {
     final tab =
         forcedTab ??
-        (ref.read(callTransferModeProvider) ? _DirectoryTab.company : _tab);
+        (ref.read(callTransferModeProvider) != null
+            ? _DirectoryTab.company
+            : _tab);
     return entries.where((entry) {
       return switch (tab) {
         _DirectoryTab.company => entry.isCompany,
@@ -275,7 +282,9 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   }) {
     final effectiveTab =
         forcedTab ??
-        (ref.read(callTransferModeProvider) ? _DirectoryTab.company : _tab);
+        (ref.read(callTransferModeProvider) != null
+            ? _DirectoryTab.company
+            : _tab);
     if (identical(_lastInput, entries) &&
         _lastQuery == _query &&
         _lastTab == effectiveTab &&
@@ -304,7 +313,9 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     final query = _query.toLowerCase();
     final effectiveTab =
         forcedTab ??
-        (ref.read(callTransferModeProvider) ? _DirectoryTab.company : _tab);
+        (ref.read(callTransferModeProvider) != null
+            ? _DirectoryTab.company
+            : _tab);
     final filtered = query.isEmpty
         ? entries.toList()
         : entries.where((entry) {
@@ -345,7 +356,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   }
 
   Future<void> _openEntry(DirectoryEntry entry) async {
-    final transferMode = ref.read(callTransferModeProvider);
+    final transferMode = ref.read(callTransferModeProvider) != null;
     final destination = await _selectNumber(
       entry,
       action: transferMode ? _NumberAction.transfer : _NumberAction.call,
@@ -376,17 +387,25 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     DirectoryEntry entry, {
     String? selectedNumber,
   }) async {
+    final request = ref.read(callTransferModeProvider);
+    if (request == null) return;
     final destination =
         selectedNumber ??
         await _selectNumber(entry, action: _NumberAction.transfer);
     if (destination == null || !mounted) return;
-    final call = ref.read(activeCallProvider).value;
-    if (call == null || !isInCallUiCall(call)) {
+    final original = ref
+        .read(liveCallsProvider)
+        .value
+        ?.where((call) => call.id == request.originalCallId)
+        .firstOrNull;
+    if (original == null || !isInCallUiCall(original)) {
       ref.read(callTransferModeProvider.notifier).clear();
       return;
     }
 
-    final confirmed = await showModalBottomSheet<bool>(
+    final attended = request.kind == CallTransferKind.attended;
+
+    final confirmed = await showAppModalBottomSheet<bool>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) {
@@ -398,10 +417,15 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Text('Transfer call?', style: theme.textTheme.titleMedium),
+                Text(
+                  attended ? 'Start attended transfer?' : 'Blind transfer?',
+                  style: theme.textTheme.titleMedium,
+                ),
                 const SizedBox(height: 8),
                 Text(
-                  'Blind transfer to ${entry.displayName} · $destination',
+                  attended
+                      ? 'The current caller will be placed on hold while you speak with ${entry.displayName} · $destination.'
+                      : 'Send the PBX transfer code ##$destination for ${entry.displayName}.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -410,7 +434,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
                 FilledButton.icon(
                   onPressed: () => Navigator.of(sheetContext).pop(true),
                   icon: const Icon(AppIcons.callForward, size: AppIconSize.sm),
-                  label: const Text('Transfer'),
+                  label: Text(attended ? 'Call and consult' : 'Transfer now'),
                 ),
                 const SizedBox(height: 8),
                 TextButton(
@@ -428,13 +452,39 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     }
 
     try {
-      await ref
-          .read(sipServiceProvider)
-          .transferCall(callId: call.id, destination: destination);
+      final service = ref.read(sipServiceProvider);
+      if (attended) {
+        await service.startAttendedTransfer(
+          originalCallId: request.originalCallId,
+          destination: destination,
+        );
+      } else {
+        await service.blindTransfer(
+          callId: request.originalCallId,
+          destination: destination,
+        );
+      }
       if (!mounted) return;
       ref.read(callTransferModeProvider.notifier).clear();
+      if (attended) {
+        ref
+            .read(attendedTransferSessionProvider.notifier)
+            .begin(
+              AttendedTransferSession(
+                originalCallId: request.originalCallId,
+                destination: destination,
+                destinationLabel: entry.displayName,
+              ),
+            );
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Transferring to ${entry.displayName}…')),
+        SnackBar(
+          content: Text(
+            attended
+                ? 'Calling ${entry.displayName}; the original caller is on hold.'
+                : 'Blind transfer sent to ${entry.displayName}.',
+          ),
+        ),
       );
       context.go(RoutePaths.dialer);
     } catch (error) {
@@ -456,7 +506,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     if (!alwaysShow && entry.numbers.length == 1) {
       return entry.numbers.first;
     }
-    return showModalBottomSheet<String>(
+    return showAppModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
@@ -862,6 +912,14 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
                   ),
                   icon: const Icon(AppIcons.filter),
                 ),
+                if (isDesktopPlatform) ...[
+                  const SizedBox(width: 8),
+                  IconButton.outlined(
+                    tooltip: 'Refresh directory',
+                    onPressed: () => unawaited(widget.onRefresh()),
+                    icon: const Icon(AppIcons.refresh),
+                  ),
+                ],
               ],
             ),
           ),

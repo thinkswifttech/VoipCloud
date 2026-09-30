@@ -11,6 +11,7 @@ import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../features/directory/domain/directory_entry.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../shared/icons/app_icons.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../data/device_contacts_repository.dart';
 import '../domain/contact.dart';
@@ -264,7 +265,7 @@ class QuickDialPanel extends ConsumerWidget {
     required bool canExport,
     List<QuickDialEntry> entries = const [],
   }) {
-    return showModalBottomSheet<void>(
+    return showAppModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -283,7 +284,7 @@ class QuickDialPanel extends ConsumerWidget {
     WidgetRef ref,
     QuickDialEntry entry,
   ) {
-    return showModalBottomSheet<void>(
+    return showAppModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -522,7 +523,7 @@ class _AddQuickDialSheet extends StatelessWidget {
               trailing: const Icon(AppIcons.chevronRight),
               onTap: () async {
                 Navigator.of(context).pop();
-                await showModalBottomSheet<void>(
+                await showAppModalBottomSheet<void>(
                   context: context,
                   isScrollControlled: true,
                   useSafeArea: true,
@@ -543,7 +544,7 @@ class _AddQuickDialSheet extends StatelessWidget {
             trailing: const Icon(AppIcons.chevronRight),
             onTap: () async {
               Navigator.of(context).pop();
-              await showModalBottomSheet<void>(
+              await showAppModalBottomSheet<void>(
                 context: context,
                 isScrollControlled: true,
                 useSafeArea: true,
@@ -561,7 +562,7 @@ class _AddQuickDialSheet extends StatelessWidget {
             trailing: const Icon(AppIcons.chevronRight),
             onTap: () async {
               Navigator.of(context).pop();
-              await showModalBottomSheet<void>(
+              await showAppModalBottomSheet<void>(
                 context: context,
                 isScrollControlled: true,
                 useSafeArea: true,
@@ -717,7 +718,7 @@ class _PickContactSheetState extends ConsumerState<_PickContactSheet> {
     if (phones.length == 1) {
       number = phones.first.number;
     } else {
-      number = await showModalBottomSheet<String>(
+      number = await showAppModalBottomSheet<String>(
         context: context,
         showDragHandle: true,
         builder: (sheetContext) {

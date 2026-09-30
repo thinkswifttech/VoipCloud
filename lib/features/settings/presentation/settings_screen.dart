@@ -133,24 +133,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     const Divider(),
                     const _AndroidFullScreenCallTile(),
                   ],
-                  if (Platform.isWindows || Platform.isMacOS) ...[
-                    const Divider(),
-                    AppInfoTile(
-                      icon: AppIcons.speakerOn,
-                      title: 'Audio devices',
-                      subtitle: 'Choose a speaker and microphone',
-                      trailing: IconButton(
-                        tooltip: 'Choose audio devices',
-                        icon: const Icon(AppIcons.chevronRight),
-                        onPressed: () => showAudioRoutePicker(
-                          context: context,
-                          ref: ref,
-                          selectedRoute: AudioOutputRoute.speaker,
-                          choosingDefaults: true,
-                        ),
+                  const Divider(),
+                  AppInfoTile(
+                    icon: AppIcons.speakerOn,
+                    title: Platform.isWindows || Platform.isMacOS
+                        ? 'Audio devices'
+                        : 'Audio settings',
+                    subtitle: Platform.isWindows || Platform.isMacOS
+                        ? 'Choose devices and adjust call sounds'
+                        : 'Adjust call audio, alerts, and ringing',
+                    trailing: IconButton(
+                      tooltip: Platform.isWindows || Platform.isMacOS
+                          ? 'Choose audio devices'
+                          : 'Open audio settings',
+                      icon: const Icon(AppIcons.chevronRight),
+                      onPressed: () => showAudioRoutePicker(
+                        context: context,
+                        ref: ref,
+                        selectedRoute: AudioOutputRoute.speaker,
+                        choosingDefaults: true,
                       ),
                     ),
-                  ],
+                  ),
                 ],
               ),
             ),

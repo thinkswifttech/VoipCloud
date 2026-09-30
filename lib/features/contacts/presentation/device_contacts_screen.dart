@@ -12,6 +12,7 @@ import '../../../features/messages/domain/messaging_platform.dart';
 import '../../../features/session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_card.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
@@ -304,7 +305,7 @@ class _DeviceContactsScreenState extends ConsumerState<DeviceContactsScreen> {
     if (phones.isEmpty) return null;
     if (phones.length == 1) return phones.first.number;
 
-    return showModalBottomSheet<String>(
+    return showAppModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) {
@@ -347,7 +348,7 @@ class _DeviceContactsScreenState extends ConsumerState<DeviceContactsScreen> {
 
   Future<void> _openContact(Contact contact) {
     final brightness = Theme.of(context).brightness;
-    return showModalBottomSheet<void>(
+    return showAppModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -1583,7 +1584,7 @@ class _ContactDetails extends ConsumerWidget {
     if (phones.length == 1) {
       number = phones.first.number;
     } else {
-      number = await showModalBottomSheet<String>(
+      number = await showAppModalBottomSheet<String>(
         context: context,
         showDragHandle: true,
         builder: (sheetContext) {

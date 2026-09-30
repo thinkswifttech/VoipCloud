@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/theme/app_theme.dart';
 import '../../../shared/icons/app_icons.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../session/presentation/session_controller.dart';
 import '../domain/call_quality_info.dart';
 
@@ -14,7 +15,7 @@ Future<void> showCallQualitySheet({
   required WidgetRef ref,
   required String callId,
 }) {
-  return showModalBottomSheet<void>(
+  return showAppModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,

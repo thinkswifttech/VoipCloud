@@ -167,6 +167,20 @@ private final class LinphoneEventStreamHandler: NSObject, FlutterStreamHandler {
   }
 }
 
+private enum DesktopSipInstanceStore {
+  private static let key = "sip_instance_uuid"
+
+  static func value() -> String {
+    if let existing = UserDefaults.standard.string(forKey: key),
+       UUID(uuidString: existing) != nil {
+      return existing.lowercased()
+    }
+    let generated = UUID().uuidString.lowercased()
+    UserDefaults.standard.set(generated, forKey: key)
+    return generated
+  }
+}
+
 private final class DesktopCallHistoryOutbox {
   static let shared = DesktopCallHistoryOutbox()
 
@@ -309,7 +323,14 @@ private enum DesktopAudioVolumeStore {
   static let ringbackKey = "voipcloud_ringback_volume"
 
   static func level(for key: String) -> Int {
-    guard UserDefaults.standard.object(forKey: key) != nil else { return 100 }
+    guard UserDefaults.standard.object(forKey: key) != nil else {
+      switch key {
+      case callAudioKey: return 70
+      case ringtoneKey: return 55
+      case ringbackKey: return 45
+      default: return 100
+      }
+    }
     return min(100, max(0, UserDefaults.standard.integer(forKey: key)))
   }
 
@@ -348,6 +369,8 @@ private final class UnavailableLinphoneController: LinphoneController {
     case "setNativeDnd":
       DesktopDndStore.isEnabled = boolArgument(call, "enabled")
       result(nil)
+    case "getSipInstanceId":
+      result(DesktopSipInstanceStore.value())
     case "initialize",
          "configureAccount",
          "register",
@@ -374,6 +397,8 @@ private final class UnavailableLinphoneController: LinphoneController {
          "getAudioInputLevel",
          "stopAudioInputTest",
          "sendDtmf",
+         "completeAttendedTransfer",
+         "mergeCalls",
          "sendMessage",
          "startPresenceSubscriptions",
          "stopPresenceSubscriptions",
@@ -460,6 +485,8 @@ private final class NativeLinphoneController: LinphoneController {
       case "initialize":
         try initialize()
         result(nil)
+      case "getSipInstanceId":
+        result(DesktopSipInstanceStore.value())
       case "configureAccount":
         try configureAccount(args: call.arguments as? [String: Any] ?? [:])
         result(nil)
@@ -567,6 +594,18 @@ private final class NativeLinphoneController: LinphoneController {
         result(nil)
       case "getCallQuality":
         result(try getCallQuality(callId: argument(call, "callId")))
+      case "completeAttendedTransfer":
+        try completeAttendedTransfer(
+          originalCallId: argument(call, "originalCallId"),
+          consultationCallId: argument(call, "consultationCallId")
+        )
+        result(nil)
+      case "mergeCalls":
+        try mergeCalls(
+          activeCallId: argument(call, "activeCallId"),
+          heldCallId: argument(call, "heldCallId")
+        )
+        result(nil)
       case "sendMessage":
         try sendMessage(
           destination: argument(call, "destination"),
@@ -611,6 +650,11 @@ private final class NativeLinphoneController: LinphoneController {
       configPath: nil,
       factoryConfigPath: nil,
       systemContext: nil
+    )
+    newCore.config?.setString(
+      section: "misc",
+      key: "uuid",
+      value: DesktopSipInstanceStore.value()
     )
     let appVersion = Bundle.main.object(
       forInfoDictionaryKey: "CFBundleShortVersionString"
@@ -1286,6 +1330,48 @@ private final class NativeLinphoneController: LinphoneController {
     availableAudioDevices().filter { device in
       String(describing: device.type).caseInsensitiveCompare("Microphone") != .orderedSame
     }
+  }
+
+  private func completeAttendedTransfer(
+    originalCallId: String,
+    consultationCallId: String
+  ) throws {
+    guard let original = findCallStrict(id: originalCallId),
+          let consultation = findCallStrict(id: consultationCallId),
+          ObjectIdentifier(original) != ObjectIdentifier(consultation) else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1410,
+        userInfo: [NSLocalizedDescriptionKey: "Two established calls are required for attended transfer."]
+      )
+    }
+    try original.transferToAnother(dest: consultation)
+    NSLog(
+      "VoIPCloud/macOS attended transfer original=%@ consultation=%@",
+      originalCallId,
+      consultationCallId
+    )
+  }
+
+  private func mergeCalls(activeCallId: String, heldCallId: String) throws {
+    guard let currentCore = core,
+          let active = findCallStrict(id: activeCallId),
+          let held = findCallStrict(id: heldCallId),
+          ObjectIdentifier(active) != ObjectIdentifier(held) else {
+      throw NSError(
+        domain: "VoIPCloud",
+        code: 1411,
+        userInfo: [NSLocalizedDescriptionKey: "Two established calls are required to merge."]
+      )
+    }
+    try currentCore.addToConference(call: active)
+    do {
+      try currentCore.addToConference(call: held)
+    } catch {
+      try? currentCore.removeFromConference(call: active)
+      throw error
+    }
+    NSLog("VoIPCloud/macOS conference merged active=%@ held=%@", activeCallId, heldCallId)
   }
 
   private func isInputAudioDevice(_ device: AudioDevice) -> Bool {
@@ -1988,6 +2074,14 @@ private extension Data {
     Swift.withUnsafeBytes(of: &littleEndian) { bytes in
       append(contentsOf: bytes)
     }
+  }
+
+  private func findCallStrict(id: String) -> Call? {
+    guard !id.isEmpty else { return nil }
+    if let call = calls[id], !isTerminalCallState(call.state) { return call }
+    return core?.calls.first(where: {
+      !isTerminalCallState($0.state) && callId($0) == id
+    })
   }
 }
 

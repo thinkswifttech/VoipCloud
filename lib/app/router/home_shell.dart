@@ -79,7 +79,7 @@ class HomeShell extends ConsumerWidget {
     final isSettings = location.startsWith(RoutePaths.settings);
     final isDirectory = location.startsWith(RoutePaths.directory);
     final desktopPlatform = isSupportedDesktopPlatform();
-    final transferMode = ref.watch(callTransferModeProvider);
+    final transferMode = ref.watch(callTransferModeProvider) != null;
     final showTransferChrome = transferMode && isDirectory;
     final liveCall = ref.watch(activeCallProvider).value;
     final showReturnToCall =

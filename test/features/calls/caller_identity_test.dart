@@ -125,6 +125,24 @@ void main() {
     expect(identity.number, '14165550123');
   });
 
+  test('preserves a queue prefix from a quoted server display name', () {
+    final identity = resolveRemoteIdentity(
+      remoteUri: 'sip:211@tenant.example.test',
+      remoteDisplayName: '"TEST:Abdul Test User"',
+      contacts: const [
+        Contact(
+          id: 'contact-1',
+          displayName: 'Abdul Test User',
+          phoneNumber: '211',
+        ),
+      ],
+      directory: const [],
+    );
+
+    expect(identity.label, 'TEST: Abdul Test User');
+    expect(identity.number, '211');
+  });
+
   test('preserves a queue prefix when resolving a Quick Dial entry', () {
     final identity = resolveRemoteIdentity(
       remoteUri: 'sip:14165550123@tenant.example.test',

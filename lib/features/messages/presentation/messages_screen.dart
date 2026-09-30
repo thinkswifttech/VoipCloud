@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../../../app/theme/app_theme.dart';
 import '../../../core/errors/app_exception.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../features/calls/presentation/caller_avatar.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/domain/contact.dart';
@@ -235,7 +236,7 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
   }
 
   Future<void> _showNewMessageSheet() {
-    return showModalBottomSheet<void>(
+    return showAppModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
@@ -854,7 +855,7 @@ class _NewMessageSourceSheet extends StatelessWidget {
               trailing: const Icon(AppIcons.chevronRight),
               onTap: () async {
                 Navigator.of(context).pop();
-                final destination = await showModalBottomSheet<String>(
+                final destination = await showAppModalBottomSheet<String>(
                   context: context,
                   isScrollControlled: true,
                   useSafeArea: true,
@@ -879,7 +880,7 @@ class _NewMessageSourceSheet extends StatelessWidget {
               trailing: const Icon(AppIcons.chevronRight),
               onTap: () async {
                 Navigator.of(context).pop();
-                final destination = await showModalBottomSheet<String>(
+                final destination = await showAppModalBottomSheet<String>(
                   context: context,
                   isScrollControlled: true,
                   useSafeArea: true,
@@ -900,7 +901,7 @@ class _NewMessageSourceSheet extends StatelessWidget {
             trailing: const Icon(AppIcons.chevronRight),
             onTap: () async {
               Navigator.of(context).pop();
-              final destination = await showModalBottomSheet<String>(
+              final destination = await showAppModalBottomSheet<String>(
                 context: context,
                 isScrollControlled: true,
                 useSafeArea: true,
@@ -1186,7 +1187,7 @@ class _PickContactForMessageSheetState
     if (phones.length == 1) {
       number = phones.first.number;
     } else {
-      number = await showModalBottomSheet<String>(
+      number = await showAppModalBottomSheet<String>(
         context: context,
         showDragHandle: true,
         builder: (sheetContext) {

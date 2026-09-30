@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/services.dart';
 
 import '../../../core/constants/storage_keys.dart';
 import '../../../core/errors/app_exception.dart';
@@ -8,6 +9,7 @@ import '../../../core/storage/secure_storage_service.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 import '../../directory/domain/directory_access.dart';
+import '../../../voip/platform/voip_platform_channel.dart';
 import '../domain/call_history_item.dart';
 import '../domain/call_history_repository.dart';
 
@@ -21,8 +23,10 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
     required SecureStorageService storage,
     required Uri? endpointPath,
     Dio? dio,
+    VoipPlatformChannel? platformChannel,
   }) : _storage = storage,
        _endpointPath = endpointPath,
+       _platformChannel = platformChannel ?? const VoipPlatformChannel(),
        _dio =
            dio ??
            Dio(
@@ -35,6 +39,7 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
   final SecureStorageService _storage;
   final Uri? _endpointPath;
   final Dio _dio;
+  final VoipPlatformChannel _platformChannel;
 
   @override
   Future<List<CallHistoryItem>> getCallHistory() async {
@@ -43,16 +48,22 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
     if (access == null || endpointPath == null) return const [];
 
     final endpoint = access.endpoint.resolveUri(endpointPath);
+    final headers = <String, String>{'Authorization': 'Bearer ${access.token}'};
+    final appDeviceId = (await _storage.read(StorageKeys.appDeviceId))?.trim();
+    final sipDeviceId = await _readSipDeviceId();
+    if (appDeviceId != null && appDeviceId.isNotEmpty) {
+      headers['X-VoIPCloud-Device-ID'] = appDeviceId;
+    }
+    if (sipDeviceId != null) {
+      headers['X-VoIPCloud-SIP-Device-ID'] = sipDeviceId;
+    }
     final items = <CallHistoryItem>[];
     for (var page = 1; page <= 2; page += 1) {
       final response = await _dio.getUri<Object?>(
         endpoint.replace(
           queryParameters: {'page': page.toString(), 'size': '100'},
         ),
-        options: Options(
-          responseType: ResponseType.json,
-          headers: {'Authorization': 'Bearer ${access.token}'},
-        ),
+        options: Options(responseType: ResponseType.json, headers: headers),
       );
       final body = response.data;
       if (body is! Map) {
@@ -65,9 +76,10 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
       final content = payload['content'] ?? payload['data'];
       if (content is! List) break;
       items.addAll(
-        content.whereType<Map>().map(
-          (item) => _itemFromJson(Map<String, dynamic>.from(item)),
-        ),
+        content
+            .whereType<Map>()
+            .map((item) => _itemFromJson(Map<String, dynamic>.from(item)))
+            .whereType<CallHistoryItem>(),
       );
       final lastPage = _integer(payload['lastPage'] ?? payload['last_page']);
       if (content.length < 100 || (lastPage != null && page >= lastPage)) {
@@ -104,9 +116,25 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
     return DirectoryAccess.fromJson(Map<String, dynamic>.from(decoded));
   }
 
-  CallHistoryItem _itemFromJson(Map<String, dynamic> json) {
+  Future<String?> _readSipDeviceId() async {
+    try {
+      return await _platformChannel.getSipInstanceId();
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  CallHistoryItem? _itemFromJson(Map<String, dynamic> json) {
     final direction = _directionFromApi(_requiredString(json, 'direction'));
     final apiStatus = _requiredString(json, 'status');
+    // Statistics rows are created before a call has necessarily reached a
+    // terminal state. Older endpoint revisions exposed those provisional rows
+    // and the client treated an unknown status as missed, which manufactured a
+    // missed call whenever history refreshed. History is an immutable record
+    // of completed calls, so fail closed and ignore anything non-terminal.
+    if (!_terminalStatuses.contains(apiStatus)) return null;
     return CallHistoryItem(
       id: _requiredString(json, 'id'),
       remoteNumber: _requiredString(json, 'remoteParty'),
@@ -133,6 +161,14 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
       _ => CallHistoryDisposition.missed,
     };
   }
+
+  static const _terminalStatuses = {
+    'COMPLETED',
+    'ANSWERED_ELSEWHERE',
+    'MISSED',
+    'REJECTED',
+    'FAILED',
+  };
 
   CallDirection _directionFromApi(String value) {
     return value == 'OUTBOUND'

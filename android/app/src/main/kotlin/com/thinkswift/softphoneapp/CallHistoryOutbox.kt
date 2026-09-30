@@ -1,6 +1,7 @@
 package com.thinkswift.softphoneapp
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,13 +26,26 @@ internal object CallHistoryOutbox {
         return runCatching {
             val now = System.currentTimeMillis()
             val eventId = UUID.randomUUID().toString()
+            val loaded = load(context)
+            val previous = loaded.lastOrNull { it.callId == callId }?.event
             val event = linkedMapOf<String, Any?>()
             historyKeys.forEach { key ->
                 if (rawEvent.containsKey(key)) event[key] = rawEvent[key]
             }
+            mergeRicherIdentity(event, previous)
+            if (previous?.get("answeredElsewhere") == true) {
+                event["answeredElsewhere"] = true
+            }
+            val previousStartedAt = (previous?.get("startedAt") as? Number)?.toLong()
+            val currentStartedAt = (event["startedAt"] as? Number)?.toLong()
+            if (previousStartedAt != null &&
+                (currentStartedAt == null || previousStartedAt < currentStartedAt)
+            ) {
+                event["startedAt"] = previousStartedAt
+            }
             event["historyEventId"] = eventId
-            event["historyReplay"] = true
-            val entries = load(context)
+            event["historyReplay"] = false
+            val entries = loaded
                 .filter { now - it.storedAt <= MAX_AGE_MS && it.callId != callId }
                 .toMutableList()
             entries.add(Entry(eventId, callId, now, event))
@@ -52,7 +66,9 @@ internal object CallHistoryOutbox {
         val loaded = load(context)
         val retained = loaded.filter { now - it.storedAt <= MAX_AGE_MS }.takeLast(MAX_EVENTS)
         if (retained.size != loaded.size) save(context, retained)
-        return retained.sortedBy { it.storedAt }.map { LinkedHashMap(it.event) }
+        return retained.sortedBy { it.storedAt }.map {
+            LinkedHashMap(it.event).apply { put("historyReplay", true) }
+        }
     }
 
     @Synchronized
@@ -107,6 +123,37 @@ internal object CallHistoryOutbox {
         ) {
             error("Unable to persist terminal-call history outbox")
         }
+    }
+
+    private fun mergeRicherIdentity(
+        event: MutableMap<String, Any?>,
+        previous: Map<String, Any?>?
+    ) {
+        if (previous == null) return
+        val previousName = previous["remoteDisplayName"]?.toString()?.trim().orEmpty()
+        val currentName = event["remoteDisplayName"]?.toString()?.trim().orEmpty()
+        if (identityScore(previousName) > identityScore(currentName)) {
+            event["remoteDisplayName"] = previousName
+        }
+        val previousUri = previous["remoteUri"]?.toString()?.trim().orEmpty()
+        val currentUri = event["remoteUri"]?.toString()?.trim().orEmpty()
+        if (identityScore(previousUri) > identityScore(currentUri)) {
+            event["remoteUri"] = previousUri
+        }
+    }
+
+    private fun identityScore(value: String): Int {
+        if (value.isBlank()) return 0
+        var candidate = value.trim()
+        candidate = when {
+            candidate.startsWith("sips:", ignoreCase = true) -> candidate.drop(5)
+            candidate.startsWith("sip:", ignoreCase = true) -> candidate.drop(4)
+            else -> candidate
+        }
+        candidate = Uri.decode(candidate.substringBefore('@').substringBefore(';'))
+        val hasQueuePrefix = Regex("^[A-Za-z][A-Za-z0-9._ -]{0,31}:")
+            .containsMatchIn(candidate)
+        return 1 + (if (hasQueuePrefix) 10_000 else 0) + candidate.length
     }
 
     private fun JSONObject.toMap(): Map<String, Any?> = buildMap {

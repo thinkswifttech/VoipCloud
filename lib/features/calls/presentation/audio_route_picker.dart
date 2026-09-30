@@ -8,6 +8,7 @@ import '../domain/audio_output_route.dart';
 import '../domain/audio_volume_levels.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import 'desktop_audio_test_dialog.dart';
 
 Future<void> showAudioRoutePicker({
@@ -26,7 +27,7 @@ Future<void> showAudioRoutePicker({
     return;
   }
 
-  await showModalBottomSheet<void>(
+  await showAppModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
@@ -71,9 +72,7 @@ class _AudioRoutePickerSheetState
   void initState() {
     super.initState();
     unawaited(_reloadRoutes());
-    if (widget.choosingDefaults && (Platform.isWindows || Platform.isMacOS)) {
-      unawaited(_loadVolumeLevels());
-    }
+    unawaited(_loadVolumeLevels());
     // Refresh while open so Bluetooth connect/disconnect appears live.
     _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       unawaited(_reloadRoutes(silent: true));
@@ -122,7 +121,12 @@ class _AudioRoutePickerSheetState
       widget.messenger.showSnackBar(
         const SnackBar(content: Text('Unable to load audio outputs.')),
       );
-      Navigator.of(context).maybePop();
+      // Settings volume controls do not depend on route discovery. Keep the
+      // sheet open so a temporary Bluetooth/audio-route failure cannot hide
+      // the mobile safety controls.
+      if (!widget.choosingDefaults) {
+        Navigator.of(context).maybePop();
+      }
     } finally {
       _reloadInFlight = false;
     }
@@ -299,6 +303,32 @@ class _AudioRoutePickerSheetState
                     ],
                   ],
                 ],
+                if (Platform.isAndroid || Platform.isIOS) ...[
+                  const Divider(),
+                  const _AudioDeviceSectionLabel('Volume'),
+                  const _AudioSafetyNotice(),
+                  if (_volumeLevels case final levels?)
+                    _DesktopVolumeControls(
+                      levels: levels,
+                      onChanged: _changeVolume,
+                      onChangeEnd: _commitVolume,
+                    )
+                  else if (_volumeLoadFailed)
+                    ListTile(
+                      title: const Text('Unable to load volume controls.'),
+                      trailing: TextButton(
+                        onPressed: _loadVolumeLevels,
+                        child: const Text('Retry'),
+                      ),
+                    )
+                  else
+                    const Padding(
+                      padding: EdgeInsets.all(20),
+                      child: Center(
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    ),
+                ],
               ],
             ),
           ),
@@ -350,30 +380,11 @@ class _AudioRoutePickerSheetState
     final level = value.round().clamp(0, 100);
     setState(() {
       _volumeLevels = switch (kind) {
-        AudioVolumeKind.microphone => AudioVolumeLevels(
-          microphone: level,
-          callAudio: current.callAudio,
-          ringtone: current.ringtone,
-          ringback: current.ringback,
-        ),
-        AudioVolumeKind.callAudio => AudioVolumeLevels(
-          microphone: current.microphone,
-          callAudio: level,
-          ringtone: current.ringtone,
-          ringback: current.ringback,
-        ),
-        AudioVolumeKind.ringtone => AudioVolumeLevels(
-          microphone: current.microphone,
-          callAudio: current.callAudio,
-          ringtone: level,
-          ringback: current.ringback,
-        ),
-        AudioVolumeKind.ringback => AudioVolumeLevels(
-          microphone: current.microphone,
-          callAudio: current.callAudio,
-          ringtone: current.ringtone,
-          ringback: level,
-        ),
+        AudioVolumeKind.microphone => current.copyWith(microphone: level),
+        AudioVolumeKind.callAudio => current.copyWith(callAudio: level),
+        AudioVolumeKind.ringtone => current.copyWith(ringtone: level),
+        AudioVolumeKind.ringback => current.copyWith(ringback: level),
+        AudioVolumeKind.callWaiting => current.copyWith(callWaiting: level),
       };
     });
     _volumeCommitTimer?.cancel();
@@ -433,14 +444,16 @@ class _DesktopVolumeControls extends StatelessWidget {
           onChanged: (value) => onChanged(AudioVolumeKind.callAudio, value),
           onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.callAudio, value),
         ),
-        _VolumeSlider(
-          icon: Icons.notifications_active_rounded,
-          label: 'Incoming call ringtone',
-          description: 'Ringing volume before you answer',
-          value: levels.ringtone,
-          onChanged: (value) => onChanged(AudioVolumeKind.ringtone, value),
-          onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.ringtone, value),
-        ),
+        if (!Platform.isIOS)
+          _VolumeSlider(
+            icon: Icons.notifications_active_rounded,
+            label: 'Incoming call ringtone',
+            description: 'Ringing volume before you answer',
+            value: levels.ringtone,
+            onChanged: (value) => onChanged(AudioVolumeKind.ringtone, value),
+            onChangeEnd: (value) =>
+                onChangeEnd(AudioVolumeKind.ringtone, value),
+          ),
         _VolumeSlider(
           icon: Icons.call_outlined,
           label: 'Outgoing ringback',
@@ -449,7 +462,68 @@ class _DesktopVolumeControls extends StatelessWidget {
           onChanged: (value) => onChanged(AudioVolumeKind.ringback, value),
           onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.ringback, value),
         ),
+        if (Platform.isAndroid)
+          _VolumeSlider(
+            icon: Icons.add_ic_call_rounded,
+            label: 'Call waiting alert',
+            description: 'Alert heard while another call is active',
+            value: levels.callWaiting,
+            onChanged: (value) => onChanged(AudioVolumeKind.callWaiting, value),
+            onChangeEnd: (value) =>
+                onChangeEnd(AudioVolumeKind.callWaiting, value),
+          ),
+        if (Platform.isIOS)
+          const Column(
+            children: [
+              ListTile(
+                leading: Icon(Icons.phone_iphone_rounded),
+                title: Text('Incoming ringtone'),
+                subtitle: Text(
+                  'iPhone call ringing follows the system Ringer & Alerts volume.',
+                ),
+              ),
+              ListTile(
+                leading: Icon(Icons.add_ic_call_rounded),
+                title: Text('Call waiting alert'),
+                subtitle: Text(
+                  'While a call is active, iPhone uses the system in-call volume for the waiting alert.',
+                ),
+              ),
+            ],
+          ),
       ],
+    );
+  }
+}
+
+class _AudioSafetyNotice extends StatelessWidget {
+  const _AudioSafetyNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: colors.errorContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.hearing_rounded, color: colors.onErrorContainer),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'High levels can be very loud, especially with headphones. Increase gradually.',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: colors.onErrorContainer),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

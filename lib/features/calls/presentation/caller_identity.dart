@@ -63,7 +63,7 @@ CallerIdentity resolveRemoteIdentity({
   required List<DirectoryEntry> directory,
   List<QuickDialEntry> quickDial = const [],
 }) {
-  final remoteDisplay = remoteDisplayName?.trim() ?? '';
+  final remoteDisplay = _normalizedSipDisplayName(remoteDisplayName);
   final number = _identityNumber(
     remoteUri.isNotEmpty ? remoteUri : remoteDisplay,
   );
@@ -196,6 +196,25 @@ String? _displayNamePrefix(String? value) {
     r'^([A-Za-z][A-Za-z0-9._ -]{0,31}):\s*.+$',
   ).firstMatch(value?.trim() ?? '');
   return match?.group(1)?.trim();
+}
+
+/// SIP display names are quoted strings on the wire. Native SDKs normally
+/// remove that wrapper, but server history and some platform callbacks can
+/// preserve it. Normalize one balanced wrapper without altering apostrophes
+/// or quotation marks that are part of the actual caller name.
+String _normalizedSipDisplayName(String? value) {
+  var text = value?.trim() ?? '';
+  if (text.length < 2 || !text.startsWith('"') || !text.endsWith('"')) {
+    return text;
+  }
+
+  text = text.substring(1, text.length - 1);
+  return text
+      .replaceAllMapped(
+        RegExp(r'\\(.)', dotAll: true),
+        (match) => match.group(1) ?? '',
+      )
+      .trim();
 }
 
 String? _dialPrefix(String value) {

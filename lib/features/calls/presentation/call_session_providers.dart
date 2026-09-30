@@ -17,16 +17,55 @@ bool isInCallUiCall(VoipCall? call) {
   };
 }
 
+enum CallTransferKind { blind, attended }
+
+class CallTransferRequest {
+  const CallTransferRequest({required this.kind, required this.originalCallId});
+
+  final CallTransferKind kind;
+  final String originalCallId;
+}
+
+class AttendedTransferSession {
+  const AttendedTransferSession({
+    required this.originalCallId,
+    required this.destination,
+    required this.destinationLabel,
+  });
+
+  final String originalCallId;
+  final String destination;
+  final String destinationLabel;
+}
+
 final callTransferModeProvider =
-    NotifierProvider<CallTransferModeController, bool>(
+    NotifierProvider<CallTransferModeController, CallTransferRequest?>(
       CallTransferModeController.new,
     );
 
-class CallTransferModeController extends Notifier<bool> {
+class CallTransferModeController extends Notifier<CallTransferRequest?> {
   @override
-  bool build() => false;
+  CallTransferRequest? build() => null;
 
-  void begin() => state = true;
+  void begin({required CallTransferKind kind, required String originalCallId}) {
+    state = CallTransferRequest(kind: kind, originalCallId: originalCallId);
+  }
 
-  void clear() => state = false;
+  void clear() => state = null;
+}
+
+final attendedTransferSessionProvider =
+    NotifierProvider<
+      AttendedTransferSessionController,
+      AttendedTransferSession?
+    >(AttendedTransferSessionController.new);
+
+class AttendedTransferSessionController
+    extends Notifier<AttendedTransferSession?> {
+  @override
+  AttendedTransferSession? build() => null;
+
+  void begin(AttendedTransferSession session) => state = session;
+
+  void clear() => state = null;
 }

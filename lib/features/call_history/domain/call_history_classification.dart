@@ -21,7 +21,13 @@ CallHistoryClassification classifyCompletedCall({
   required bool wasDeclined,
   required bool wasAnsweredElsewhere,
 }) {
-  if (direction == CallDirection.incoming && wasAnsweredElsewhere) {
+  // A device that reached Active/Held has authoritative proof that it
+  // answered this call. Some forked/queue calls later terminate with a generic
+  // "Call completed elsewhere" reason when a sibling leg is cleaned up. That
+  // reason must never reclassify the device that actually carried the call.
+  if (direction == CallDirection.incoming &&
+      wasAnsweredElsewhere &&
+      !wasAnswered) {
     return (
       direction: CallDirection.incoming,
       status: status,

@@ -2,6 +2,7 @@ import '../../../core/logging/app_logger.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 import '../domain/call_history_item.dart';
+import '../domain/call_history_reconciliation.dart';
 import '../domain/call_history_repository.dart';
 
 /// Keeps fast/offline device history while filling gaps from SIP-edge events.
@@ -13,7 +14,7 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
 
   @override
   Future<List<CallHistoryItem>> getCallHistory() async {
-    final localItems = await local.getCallHistory();
+    final storedLocalItems = await local.getCallHistory();
     List<CallHistoryItem> serverItems;
     try {
       serverItems = await server.getCallHistory();
@@ -22,14 +23,18 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
         'Server call-history reconciliation skipped',
         data: error,
       );
-      return localItems;
+      return coalesceLogicalCalls(storedLocalItems);
     }
 
-    final merged = _merge(localItems, serverItems);
-    final localById = {for (final item in localItems) item.id: item};
+    final merged = _merge(
+      coalesceLogicalCalls(storedLocalItems),
+      coalesceLogicalCalls(serverItems),
+    );
     for (final item in merged) {
-      final saved = localById[item.id];
-      if (saved != null && _sameStoredValue(saved, item)) continue;
+      final saved = storedLocalItems
+          .where((candidate) => isSameLogicalCall(candidate, item))
+          .toList(growable: false);
+      if (saved.length == 1 && _sameStoredValue(saved.single, item)) continue;
       try {
         await local.syncCallLog(
           remoteNumber: item.remoteNumber,
@@ -86,7 +91,7 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
     final result = <CallHistoryItem>[];
     for (final serverItem in serverItems) {
       final matches = remainingLocal
-          .where((localItem) => _sameCall(localItem, serverItem))
+          .where((localItem) => isSameLogicalCall(localItem, serverItem))
           .toList(growable: false);
       if (matches.isEmpty) {
         result.add(serverItem);
@@ -97,36 +102,13 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
         orElse: () => matches.first,
       );
       remainingLocal.removeWhere(
-        (candidate) => _sameCall(candidate, serverItem),
+        (candidate) => isSameLogicalCall(candidate, serverItem),
       );
-      result.add(
-        CallHistoryItem(
-          id: localItem.id,
-          remoteNumber: localItem.remoteNumber,
-          remoteDisplayName:
-              localItem.remoteDisplayName ?? serverItem.remoteDisplayName,
-          direction: localItem.direction,
-          status: serverItem.status,
-          disposition: serverItem.effectiveDisposition,
-          startedAt: localItem.startedAt,
-          endedAt: serverItem.endedAt ?? localItem.endedAt,
-        ),
-      );
+      result.add(mergeLogicalCall(localItem, serverItem));
     }
     result.addAll(remainingLocal);
     result.sort((left, right) => right.startedAt.compareTo(left.startedAt));
     return result.take(200).toList(growable: false);
-  }
-
-  bool _sameCall(CallHistoryItem left, CallHistoryItem right) {
-    if (left.id == right.id) return true;
-    if ((left.direction == CallDirection.outgoing) !=
-        (right.direction == CallDirection.outgoing)) {
-      return false;
-    }
-    if (_digits(left.remoteNumber) != _digits(right.remoteNumber)) return false;
-    return left.startedAt.difference(right.startedAt).abs() <=
-        const Duration(seconds: 8);
   }
 
   bool _sameStoredValue(CallHistoryItem left, CallHistoryItem right) {
@@ -137,10 +119,5 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
         left.effectiveDisposition == right.effectiveDisposition &&
         left.startedAt == right.startedAt &&
         left.endedAt == right.endedAt;
-  }
-
-  String _digits(String value) {
-    final digits = value.replaceAll(RegExp(r'[^0-9]'), '');
-    return digits.isEmpty ? value.trim().toLowerCase() : digits;
   }
 }

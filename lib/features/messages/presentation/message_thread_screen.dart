@@ -10,6 +10,7 @@ import '../../../app/router/route_names.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../core/files/downloads_saver.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../features/calls/presentation/caller_avatar.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/presentation/contacts_providers.dart';
@@ -676,7 +677,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       return;
     }
     final supported = ref.read(deviceContactsRepositoryProvider).isSupported;
-    final choice = await showModalBottomSheet<_ContactCardAction>(
+    final choice = await showAppModalBottomSheet<_ContactCardAction>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
@@ -793,7 +794,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
   Future<void> _showMessageActions(CarrierMessage message) async {
     final reactionTarget = smsReactionTargetText(message);
     final allowReply = _canReplyTo(message);
-    final action = await showModalBottomSheet<Object>(
+    final action = await showAppModalBottomSheet<Object>(
       context: context,
       showDragHandle: true,
       builder: (context) => SafeArea(
@@ -950,7 +951,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
   Future<void> _chooseAttachmentSource() async {
     final source = isSupportedDesktopPlatform()
         ? ImageSource.gallery
-        : await showModalBottomSheet<ImageSource>(
+        : await showAppModalBottomSheet<ImageSource>(
             context: context,
             showDragHandle: true,
             builder: (context) => SafeArea(

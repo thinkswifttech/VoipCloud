@@ -51,6 +51,8 @@ class AppIcons {
   static const callDirectionOut = LucideIcons.moveUpRight;
   static const callEnd = LucideIcons.phoneOff;
   static const callForward = LucideIcons.phoneForwarded;
+  static const attendedTransfer = LucideIcons.phoneCall;
+  static const mergeCalls = LucideIcons.merge;
 
   static const contact = LucideIcons.user;
   static const person = LucideIcons.userRound;

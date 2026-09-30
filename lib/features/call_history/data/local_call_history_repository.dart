@@ -6,6 +6,7 @@ import '../../../core/storage/secure_storage_service.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 import '../domain/call_history_item.dart';
+import '../domain/call_history_reconciliation.dart';
 import '../domain/call_history_repository.dart';
 
 class LocalCallHistoryRepository implements CallHistoryRepository {
@@ -31,9 +32,23 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
               (item) =>
                   CallHistoryItem.fromJson(Map<String, dynamic>.from(item)),
             )
+            .where((item) => !_isLegacyProvisionalServerMiss(item))
             .toList()
           ..sort((a, b) => b.startedAt.compareTo(a.startedAt));
     return items;
+  }
+
+  /// Removes records cached by endpoint revisions that represented an
+  /// unfinished statistics row as a zero-duration missed call. Server call IDs
+  /// are SHA-256 hex values; native call IDs use platform-specific formats, so
+  /// this migration does not discard genuine native history.
+  bool _isLegacyProvisionalServerMiss(CallHistoryItem item) {
+    if (item.effectiveDisposition != CallHistoryDisposition.missed ||
+        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(item.id)) {
+      return false;
+    }
+    final endedAt = item.endedAt;
+    return endedAt == null || !endedAt.isAfter(item.startedAt);
   }
 
   @override
@@ -98,7 +113,9 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
     final current = await _safeCallHistoryForSync();
     final deduped = [
       item,
-      ...current.where((entry) => entry.id != id && !_sameCall(entry, item)),
+      ...current.where(
+        (entry) => entry.id != id && !isSameLogicalCall(entry, item),
+      ),
     ]..sort((a, b) => b.startedAt.compareTo(a.startedAt));
     final limited = deduped.take(200).map((entry) => entry.toJson()).toList();
     try {
@@ -117,20 +134,5 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
       AppLogger.warning('Call history read skipped during sync', data: error);
       return const [];
     }
-  }
-
-  bool _sameCall(CallHistoryItem left, CallHistoryItem right) {
-    if ((left.direction == CallDirection.outgoing) !=
-        (right.direction == CallDirection.outgoing)) {
-      return false;
-    }
-    if (_digits(left.remoteNumber) != _digits(right.remoteNumber)) return false;
-    return left.startedAt.difference(right.startedAt).abs() <=
-        const Duration(seconds: 8);
-  }
-
-  String _digits(String value) {
-    final digits = value.replaceAll(RegExp(r'[^0-9]'), '');
-    return digits.isEmpty ? value.trim().toLowerCase() : digits;
   }
 }

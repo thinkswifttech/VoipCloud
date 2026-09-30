@@ -120,6 +120,19 @@ final liveCallsProvider = StreamProvider<List<VoipCall>>((ref) {
   });
 });
 
+final postDialPromptProvider = StreamProvider<PostDialPrompt?>((ref) {
+  final service = ref.watch(sipServiceProvider);
+  return Stream<PostDialPrompt?>.multi((controller) {
+    controller.add(service.postDialPrompt);
+    final subscription = service.postDialPromptStream.listen(
+      controller.add,
+      onError: controller.addError,
+      onDone: controller.close,
+    );
+    controller.onCancel = subscription.cancel;
+  });
+});
+
 final sipMessagesProvider = StreamProvider((ref) {
   return ref.watch(sipServiceProvider).messageStream;
 });
@@ -396,7 +409,12 @@ class SessionController extends AsyncNotifier<AppSession?> {
           stackTrace: stackTrace,
         );
       }
-    } else if (directoryAccess != null) {
+    }
+    // Directory access is a separate device-scoped bearer credential. Revoke
+    // it even when a provisioning/device credential was also supplied; leaving
+    // it valid would allow this logged-out device to keep reading directory and
+    // server call-history data.
+    if (directoryAccess != null) {
       try {
         await ref.read(directoryRepositoryProvider).revoke(directoryAccess);
       } catch (error, stackTrace) {

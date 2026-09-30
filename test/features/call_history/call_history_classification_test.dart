@@ -98,6 +98,21 @@ void main() {
     expect(result.disposition, CallHistoryDisposition.answeredElsewhere);
   });
 
+  test('local answer remains authoritative over elsewhere termination', () {
+    final result = classifyCompletedCall(
+      direction: CallDirection.incoming,
+      status: CallStatus.ended,
+      wasRinging: true,
+      wasAnswered: true,
+      wasDndRejected: false,
+      wasDeclined: false,
+      wasAnsweredElsewhere: true,
+    );
+
+    expect(result.direction, CallDirection.incoming);
+    expect(result.disposition, CallHistoryDisposition.answered);
+  });
+
   test('recognizes only answered-elsewhere termination reasons', () {
     expect(isAnsweredElsewhereReason('Call completed elsewhere'), isTrue);
     expect(isAnsweredElsewhereReason('Answered elsewhere'), isTrue);

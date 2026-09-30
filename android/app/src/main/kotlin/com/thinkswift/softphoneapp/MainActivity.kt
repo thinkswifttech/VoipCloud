@@ -14,6 +14,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -43,6 +45,8 @@ import org.linphone.core.LoggingServiceListener
 import org.linphone.core.MediaDirection
 import org.linphone.core.Reason
 import org.linphone.core.RegistrationState
+import kotlin.math.log10
+import kotlin.math.pow
 import org.linphone.core.SubscriptionState
 import org.linphone.core.ToneID
 import org.linphone.core.TransportType
@@ -732,10 +736,17 @@ private class LinphoneBridge private constructor(private val context: android.co
     private var linphoneLogListener: LoggingServiceListener? = null
     private var audioRouteCallId: String? = null
     private var requestedAudioRoute = "earpiece"
+    private var callWaitingAlertCall: Call? = null
+    private var callWaitingTone: ToneGenerator? = null
+    private var outgoingRingbackCall: Call? = null
+    private var outgoingRingbackTone: ToneGenerator? = null
+    private var ringtoneSourcePath: String? = null
     @Volatile private var sipLoggingEnabled: Boolean = false
     private val sipLogFileLock = Any()
     private val maxSipLogBytes = 1_500_000L
-    private val callProgressToneGainDb = -9.0f
+    private val audioLevelPrefs by lazy {
+        context.getSharedPreferences("voipcloud_audio_levels", Context.MODE_PRIVATE)
+    }
 
     private val listener = object : CoreListenerStub() {
         override fun onAccountRegistrationStateChanged(
@@ -758,7 +769,7 @@ private class LinphoneBridge private constructor(private val context: android.co
             message: String
         ) {
             val currentState = state ?: call.state
-            updateCallToneLevel(core, currentState)
+            updateCallToneLevel(core, call, currentState)
             // inviteAddressWithParams can notify synchronously before dialFeatureCode
             // adds the Call to featureCodeCalls — adopt it while a feature dial is pending.
             if (pendingFeatureCodeDial) {
@@ -852,6 +863,10 @@ private class LinphoneBridge private constructor(private val context: android.co
                 "initialize" -> {
                     initialize()
                     result.success(null)
+                }
+                "getSipInstanceId" -> {
+                    initialize()
+                    result.success(sipInstanceUuid())
                 }
                 "configureAccount" -> {
                     configureAccount(call.arguments as? Map<*, *> ?: emptyMap<String, Any?>())
@@ -1008,6 +1023,24 @@ private class LinphoneBridge private constructor(private val context: android.co
                     val id = dialFeatureCode(call.argument<String>("code") ?: "")
                     result.success(id)
                 }
+                "getAudioVolumeLevels" -> {
+                    result.success(audioVolumeLevels())
+                }
+                "setAudioVolume" -> {
+                    val kind = call.argument<String>("kind").orEmpty()
+                    val level = (call.argument<Int>("level") ?: defaultAudioLevel(kind))
+                        .coerceIn(0, 100)
+                    if (kind !in setOf("microphone", "callAudio", "ringtone", "ringback", "callWaiting")) {
+                        result.error("AUDIO_VOLUME", "Unknown audio volume control.", null)
+                    } else {
+                        audioLevelPrefs.edit().putInt(kind, level).apply()
+                        if (kind == "ringtone") {
+                            core?.let(::configureRingtoneVolume)
+                        }
+                        applyCurrentAudioLevels()
+                        result.success(null)
+                    }
+                }
                 "acceptCall" -> {
                     val requestedId = call.argument<String>("callId")
                     val incoming = findCall(requestedId)
@@ -1079,10 +1112,17 @@ private class LinphoneBridge private constructor(private val context: android.co
                 "getCallQuality" -> {
                     result.success(getCallQuality(call.argument<String>("callId")))
                 }
-                "transferCall" -> {
-                    transferCall(
-                        call.argument<String>("callId"),
-                        call.argument<String>("destination") ?: ""
+                "completeAttendedTransfer" -> {
+                    completeAttendedTransfer(
+                        call.argument<String>("originalCallId"),
+                        call.argument<String>("consultationCallId")
+                    )
+                    result.success(null)
+                }
+                "mergeCalls" -> {
+                    mergeCalls(
+                        call.argument<String>("activeCallId"),
+                        call.argument<String>("heldCallId")
                     )
                     result.success(null)
                 }
@@ -1146,6 +1186,12 @@ private class LinphoneBridge private constructor(private val context: android.co
             "$basePath/linphonerc",
             context
         ).also {
+            val inheritedSipInstance = it.config?.getString("misc", "uuid", "")
+            it.config?.setString(
+                "misc",
+                "uuid",
+                sipInstanceUuid(inheritedSipInstance)
+            )
             it.addListener(listener)
             it.isIpv6Enabled = true
             // Identify VoIPCloud mobile registrations so Flexisip can route
@@ -1165,7 +1211,14 @@ private class LinphoneBridge private constructor(private val context: android.co
             // attenuated independently of Android's user-controlled ring volume.
             it.isNativeRingingEnabled = false
             it.isCallToneIndicationsEnabled = false
-            it.playbackGainDb = 0.0f
+            configureRingtoneVolume(it)
+            // Linphone's local ringback uses its ringer path and bypasses
+            // playbackGainDb. Silence that path and generate the cadence below
+            // so the app-local ringback slider is authoritative. SIP early
+            // media remains untouched and is attenuated through playbackGainDb.
+            it.ringback = silentRingbackPath()
+            it.micGainDb = gainDb(audioLevel("microphone"))
+            it.playbackGainDb = gainDb(audioLevel("callAudio"))
             // AVPF re-INVITEs during hold are poorly tolerated by many Asterisk builds.
             it.avpfMode = AVPFMode.Disabled
             it.setTone(
@@ -1189,16 +1242,286 @@ private class LinphoneBridge private constructor(private val context: android.co
         }
     }
 
-    private fun updateCallToneLevel(core: Core, state: Call.State) {
-        core.playbackGainDb = when (state) {
+    private fun updateCallToneLevel(core: Core, call: Call, state: Call.State) {
+        val hasOtherLiveCall = core.calls.any { candidate ->
+            candidate !== call &&
+                !isTerminalCallState(candidate.state) &&
+                !isIncomingRinging(candidate)
+        }
+        val level = when (state) {
             Call.State.PushIncomingReceived,
             Call.State.IncomingReceived,
-            Call.State.IncomingEarlyMedia,
+            Call.State.IncomingEarlyMedia -> if (hasOtherLiveCall) {
+                // A second call must not start the normal looping ringtone or
+                // attenuate the conversation already in progress. Use a short,
+                // independently controlled call-waiting indication instead.
+                core.stopRinging()
+                startCallWaitingAlert(call)
+                audioLevel("callAudio")
+            } else {
+                audioLevel("ringtone")
+            }
             Call.State.OutgoingInit,
-            Call.State.OutgoingProgress,
-            Call.State.OutgoingRinging,
-            Call.State.OutgoingEarlyMedia -> callProgressToneGainDb
-            else -> 0.0f
+            Call.State.OutgoingProgress -> {
+                stopOutgoingRingback(call)
+                audioLevel("callAudio")
+            }
+            Call.State.OutgoingRinging -> {
+                startOutgoingRingback(call)
+                audioLevel("callAudio")
+            }
+            Call.State.OutgoingEarlyMedia -> {
+                stopOutgoingRingback(call)
+                audioLevel("ringback")
+            }
+            else -> {
+                stopCallWaitingAlert(call)
+                stopOutgoingRingback(call)
+                audioLevel("callAudio")
+            }
+        }
+        core.playbackGainDb = gainDb(level)
+        core.micGainDb = gainDb(audioLevel("microphone"))
+    }
+
+    private val callWaitingAlertRunnable = object : Runnable {
+        override fun run() {
+            val waitingCall = callWaitingAlertCall ?: return
+            val stillRinging = core?.calls?.any { candidate ->
+                candidate === waitingCall && isIncomingRinging(candidate)
+            } == true
+            if (!stillRinging) {
+                stopCallWaitingAlert()
+                return
+            }
+
+            callWaitingTone?.release()
+            callWaitingTone = null
+            val level = audioLevel("callWaiting")
+            if (level > 0) {
+                callWaitingTone = runCatching {
+                    ToneGenerator(AudioManager.STREAM_VOICE_CALL, level).also {
+                        it.startTone(ToneGenerator.TONE_PROP_BEEP, 180)
+                    }
+                }.onFailure { error ->
+                    Log.w("VoIPCloud/Audio", "Unable to play call-waiting alert", error)
+                }.getOrNull()
+            }
+            mainHandler.postDelayed(this, 10_000)
+        }
+    }
+
+    private fun startCallWaitingAlert(call: Call) {
+        if (callWaitingAlertCall === call) return
+        stopCallWaitingAlert()
+        callWaitingAlertCall = call
+        mainHandler.post(callWaitingAlertRunnable)
+    }
+
+    private fun stopCallWaitingAlert(call: Call? = null) {
+        if (call != null && callWaitingAlertCall !== call) return
+        callWaitingAlertCall = null
+        mainHandler.removeCallbacks(callWaitingAlertRunnable)
+        callWaitingTone?.stopTone()
+        callWaitingTone?.release()
+        callWaitingTone = null
+    }
+
+    private val outgoingRingbackRunnable = object : Runnable {
+        override fun run() {
+            val ringingCall = outgoingRingbackCall ?: return
+            val stillRinging = core?.calls?.any { candidate ->
+                candidate === ringingCall && candidate.state == Call.State.OutgoingRinging
+            } == true
+            if (!stillRinging) {
+                stopOutgoingRingback()
+                return
+            }
+
+            outgoingRingbackTone?.release()
+            outgoingRingbackTone = null
+            val level = audioLevel("ringback")
+            if (level > 0) {
+                outgoingRingbackTone = runCatching {
+                    ToneGenerator(AudioManager.STREAM_VOICE_CALL, level).also {
+                        it.startTone(ToneGenerator.TONE_SUP_RINGTONE, 2_000)
+                    }
+                }.onFailure { error ->
+                    Log.w("VoIPCloud/Audio", "Unable to play outgoing ringback", error)
+                }.getOrNull()
+            }
+            // North American cadence: two seconds of tone, four seconds quiet.
+            mainHandler.postDelayed(this, 6_000)
+        }
+    }
+
+    private fun startOutgoingRingback(call: Call) {
+        if (outgoingRingbackCall === call) return
+        stopOutgoingRingback()
+        outgoingRingbackCall = call
+        mainHandler.post(outgoingRingbackRunnable)
+    }
+
+    private fun stopOutgoingRingback(call: Call? = null) {
+        if (call != null && outgoingRingbackCall !== call) return
+        outgoingRingbackCall = null
+        mainHandler.removeCallbacks(outgoingRingbackRunnable)
+        outgoingRingbackTone?.stopTone()
+        outgoingRingbackTone?.release()
+        outgoingRingbackTone = null
+    }
+
+    private fun silentRingbackPath(): String {
+        val target = java.io.File(context.cacheDir, "voipcloud-silent-ringback.wav")
+        if (target.isFile && target.length() >= 44L) return target.absolutePath
+
+        val sampleRate = 8_000
+        val sampleCount = sampleRate / 10
+        val dataSize = sampleCount * 2
+        val wave = java.nio.ByteBuffer.allocate(44 + dataSize)
+            .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        wave.put("RIFF".toByteArray(Charsets.US_ASCII))
+        wave.putInt(36 + dataSize)
+        wave.put("WAVEfmt ".toByteArray(Charsets.US_ASCII))
+        wave.putInt(16)
+        wave.putShort(1)
+        wave.putShort(1)
+        wave.putInt(sampleRate)
+        wave.putInt(sampleRate * 2)
+        wave.putShort(2)
+        wave.putShort(16)
+        wave.put("data".toByteArray(Charsets.US_ASCII))
+        wave.putInt(dataSize)
+        repeat(sampleCount) { wave.putShort(0) }
+        target.writeBytes(wave.array())
+        return target.absolutePath
+    }
+
+    private fun configureRingtoneVolume(currentCore: Core) {
+        val configured = currentCore.ring.orEmpty().trim()
+        if (ringtoneSourcePath.isNullOrBlank() &&
+            configured.isNotBlank() &&
+            !java.io.File(configured).name.startsWith("voipcloud-ringtone-")
+        ) {
+            ringtoneSourcePath = configured
+            audioLevelPrefs.edit().putString("ringtoneSourcePath", configured).apply()
+        }
+        val source = ringtoneSourcePath
+            ?: audioLevelPrefs.getString("ringtoneSourcePath", null)
+            ?: return
+        scaledPcmWave(source, audioLevel("ringtone"), "ringtone")?.let { scaled ->
+            currentCore.ring = scaled
+        }
+    }
+
+    private fun scaledPcmWave(sourcePath: String, level: Int, name: String): String? {
+        val source = java.io.File(sourcePath)
+        if (!source.isFile || source.length() !in 44L..8_388_608L) return null
+        val wave = runCatching { source.readBytes() }.getOrNull() ?: return null
+        if (wave.size < 44 ||
+            String(wave, 0, 4, Charsets.US_ASCII) != "RIFF" ||
+            String(wave, 8, 4, Charsets.US_ASCII) != "WAVE"
+        ) return null
+
+        val buffer = java.nio.ByteBuffer.wrap(wave).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        var offset = 12
+        var pcm16 = false
+        var dataStart = -1
+        var dataSize = 0
+        while (offset + 8 <= wave.size) {
+            val chunk = String(wave, offset, 4, Charsets.US_ASCII)
+            val declaredSize = buffer.getInt(offset + 4).toLong() and 0xffffffffL
+            val start = offset + 8
+            if (start > wave.size) break
+            val available = wave.size - start
+            val size = minOf(declaredSize, available.toLong()).toInt()
+            if (chunk == "fmt " && size >= 16) {
+                pcm16 = buffer.getShort(start).toInt() == 1 &&
+                    buffer.getShort(start + 14).toInt() == 16
+            } else if (chunk == "data") {
+                dataStart = start
+                dataSize = size
+                break
+            }
+            if (declaredSize > available.toLong()) break
+            offset = start + declaredSize.toInt() + (declaredSize.toInt() and 1)
+        }
+        if (!pcm16 || dataStart < 0 || dataSize < 2) return null
+
+        val gain = (level.coerceIn(0, 100) / 100.0).pow(1.6)
+        val end = dataStart + (dataSize and -2)
+        var sampleOffset = dataStart
+        while (sampleOffset < end) {
+            val sample = buffer.getShort(sampleOffset).toInt()
+            val scaled = (sample * gain).toInt()
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            buffer.putShort(sampleOffset, scaled.toShort())
+            sampleOffset += 2
+        }
+
+        val target = java.io.File(context.cacheDir, "voipcloud-$name-${level.coerceIn(0, 100)}.wav")
+        return runCatching {
+            target.writeBytes(wave)
+            target.absolutePath
+        }.onFailure { error ->
+            Log.w("VoIPCloud/Audio", "Unable to prepare scaled $name", error)
+        }.getOrNull()
+    }
+
+    private fun sipInstanceUuid(inherited: String? = null): String {
+        val preferences = context.getSharedPreferences(
+            "voipcloud_sip_identity",
+            Context.MODE_PRIVATE
+        )
+        val existing = preferences.getString("sip_instance_uuid", null)
+            ?.trim()
+            ?.lowercase()
+        if (!existing.isNullOrEmpty()) return existing
+        val inheritedUuid = inherited
+            ?.trim()
+            ?.removePrefix("urn:uuid:")
+            ?.lowercase()
+            ?.takeIf { candidate ->
+                runCatching { UUID.fromString(candidate) }.isSuccess
+            }
+        val stable = inheritedUuid ?: UUID.randomUUID().toString().lowercase()
+        preferences.edit().putString("sip_instance_uuid", stable).commit()
+        return stable
+    }
+
+    private fun defaultAudioLevel(kind: String): Int = when (kind) {
+        "microphone" -> 100
+        "callAudio" -> 70
+        "ringtone" -> 55
+        "ringback" -> 45
+        "callWaiting" -> 30
+        else -> 0
+    }
+
+    private fun audioLevel(kind: String): Int =
+        audioLevelPrefs.getInt(kind, defaultAudioLevel(kind)).coerceIn(0, 100)
+
+    private fun gainDb(level: Int): Float {
+        if (level <= 0) return -80.0f
+        return (20.0 * log10(level.coerceIn(1, 100) / 100.0)).toFloat()
+    }
+
+    private fun audioVolumeLevels(): Map<String, Int> = mapOf(
+        "microphone" to audioLevel("microphone"),
+        "callAudio" to audioLevel("callAudio"),
+        "ringtone" to audioLevel("ringtone"),
+        "ringback" to audioLevel("ringback"),
+        "callWaiting" to audioLevel("callWaiting")
+    )
+
+    private fun applyCurrentAudioLevels() {
+        val currentCore = core ?: return
+        val currentCall = findCurrentCall()
+        if (currentCall == null) {
+            currentCore.micGainDb = gainDb(audioLevel("microphone"))
+            currentCore.playbackGainDb = gainDb(audioLevel("callAudio"))
+        } else {
+            updateCallToneLevel(currentCore, currentCall, currentCall.state)
         }
     }
 
@@ -1544,22 +1867,42 @@ private class LinphoneBridge private constructor(private val context: android.co
         }
     }
 
-    private fun transferCall(callId: String?, destination: String) {
-        val activeCall = findCall(callId)
-            ?: throw IllegalStateException("There is no active call to transfer.")
-        val trimmed = destination.trim()
-        if (trimmed.isEmpty()) {
-            throw IllegalArgumentException("Transfer destination is required.")
+    private fun completeAttendedTransfer(originalCallId: String?, consultationCallId: String?) {
+        val original = findCallStrict(originalCallId)
+            ?: throw IllegalStateException("The original held call is no longer available.")
+        val consultation = findCallStrict(consultationCallId)
+            ?: throw IllegalStateException("The consultation call is no longer available.")
+        if (original === consultation) {
+            throw IllegalStateException("Attended transfer requires two different calls.")
         }
-        val address = normalizeDestination(trimmed)
-        val status = activeCall.transferTo(address)
+        val status = original.transferToAnother(consultation)
         if (status < 0) {
-            throw IllegalStateException("Call transfer failed.")
+            throw IllegalStateException("Attended call transfer failed.")
         }
         Log.i(
             "VoIPCloud/Linphone",
-            "Blind transfer requestedId=$callId destination=${address.asStringUriOnly()} status=$status"
+            "Attended transfer original=$originalCallId consultation=$consultationCallId status=$status"
         )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun mergeCalls(activeCallId: String?, heldCallId: String?) {
+        val currentCore = requireNotNull(core)
+        val active = findCallStrict(activeCallId)
+            ?: throw IllegalStateException("The active call is no longer available.")
+        val held = findCallStrict(heldCallId)
+            ?: throw IllegalStateException("The held call is no longer available.")
+        if (active === held) {
+            throw IllegalStateException("Conference merge requires two different calls.")
+        }
+        if (currentCore.addToConference(active) < 0) {
+            throw IllegalStateException("Unable to create the conference.")
+        }
+        if (currentCore.addToConference(held) < 0) {
+            runCatching { currentCore.removeFromConference(active) }
+            throw IllegalStateException("Unable to add the held call to the conference.")
+        }
+        Log.i("VoIPCloud/Linphone", "Conference merged active=$activeCallId held=$heldCallId")
     }
 
     private fun sendMessage(destination: String, text: String) {
@@ -2180,6 +2523,12 @@ private class LinphoneBridge private constructor(private val context: android.co
         if (isTerminalCallState(state)) locallyDeclinedCallIds.remove(id)
     }
 
+    private fun findCallStrict(id: String?): Call? {
+        if (id.isNullOrBlank()) return null
+        calls[id]?.takeIf { isLiveCall(it) }?.let { return it }
+        return core?.calls?.firstOrNull { isLiveCall(it) && callId(it) == id }
+    }
+
     private fun emitCoordinatorSnapshot(snapshot: AndroidCallCoordinator.Snapshot) {
         if (snapshot.isTerminal && recoverLiveCall() != null) return
         val status = when (snapshot.state) {
@@ -2540,10 +2889,13 @@ private class LinphoneBridge private constructor(private val context: android.co
 
     private fun dispose() {
         pushCallReconcileGeneration++
+        stopCallWaitingAlert()
+        stopOutgoingRingback()
         stopPresenceSubscriptions()
         core?.removeListener(listener)
         core?.stop()
         core = null
+        ringtoneSourcePath = null
         account = null
         calls.clear()
         locallyDeclinedCallIds.clear()

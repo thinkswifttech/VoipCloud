@@ -69,7 +69,7 @@ class CallRouteListener extends ConsumerWidget {
             ref.invalidate(callHistoryProvider);
           }
           // Leaving transfer mode must never end the SIP call — only clear UI mode.
-          if (ref.read(callTransferModeProvider)) {
+          if (ref.read(callTransferModeProvider) != null) {
             ref.read(callTransferModeProvider.notifier).clear();
           }
           if (path.startsWith('/calls/') && path != RoutePaths.callEnded) {

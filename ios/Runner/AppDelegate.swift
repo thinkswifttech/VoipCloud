@@ -1543,6 +1543,8 @@ private final class UnavailableLinphoneController: LinphoneController {
 
   func handle(call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
+    case "getSipInstanceId":
+      result(SipCredentialStore.sipInstanceUuid())
     case "initialize",
          "configureAccount",
          "register",
@@ -1562,7 +1564,8 @@ private final class UnavailableLinphoneController: LinphoneController {
          "getAudioRoutes",
          "setAudioRoute",
          "sendDtmf",
-         "transferCall",
+         "completeAttendedTransfer",
+         "mergeCalls",
          "sendMessage",
          "setSipLoggingEnabled",
          "appendSipLogLine",
@@ -3142,6 +3145,8 @@ private final class NativeLinphoneController: LinphoneController {
       case "initialize":
         try initialize()
         result(nil)
+      case "getSipInstanceId":
+        result(SipCredentialStore.sipInstanceUuid())
       case "configureAccount":
         try configureAccount(args: call.arguments as? [String: Any] ?? [:])
         result(nil)
@@ -3500,15 +3505,26 @@ private final class NativeLinphoneController: LinphoneController {
           route: argument(call, "route"),
           endpointId: args?["endpointId"] as? String
         ))
+      case "getAudioVolumeLevels":
+        result(audioVolumeLevels())
+      case "setAudioVolume":
+        try setAudioVolume(call: call)
+        result(nil)
       case "sendDtmf":
         try findCurrentCall()?.sendDtmf(dtmf: firstDtmf(argument(call, "value")))
         result(nil)
       case "getCallQuality":
         result(try getCallQuality(callId: argument(call, "callId")))
-      case "transferCall":
-        try transferCall(
-          callId: argument(call, "callId"),
-          destination: argument(call, "destination")
+      case "completeAttendedTransfer":
+        try completeAttendedTransfer(
+          originalCallId: argument(call, "originalCallId"),
+          consultationCallId: argument(call, "consultationCallId")
+        )
+        result(nil)
+      case "mergeCalls":
+        try mergeCalls(
+          activeCallId: argument(call, "activeCallId"),
+          heldCallId: argument(call, "heldCallId")
         )
         result(nil)
       case "sendMessage":
@@ -3609,6 +3625,18 @@ private final class NativeLinphoneController: LinphoneController {
     // PushKit is managed by VoipPushRegistry; avoid a second registry in the SDK.
     newCore.pushNotificationEnabled = false
     newCore.micEnabled = true
+    newCore.micGainDb = gainDb(for: audioLevel("microphone"))
+    newCore.playbackGainDb = gainDb(for: audioLevel("callAudio"))
+    do {
+      // Linphone's local ringback uses the ringer path rather than media
+      // playback gain. Use a pre-scaled PCM cadence so the app setting is
+      // authoritative without changing the iPhone's system volume.
+      newCore.ringback = try makeMobileRingbackTone(
+        level: audioLevel("ringback")
+      ).path
+    } catch {
+      NSLog("Softphone/Audio ringback could not be prepared: %@", error.localizedDescription)
+    }
     // FreePBX/Asterisk: prefer sendonly hold SDP (not inactive).
     newCore.config?.setInt(section: "sip", key: "inactive_audio_on_pause", value: 0)
     newCore.avpfMode = .Disabled
@@ -3620,6 +3648,7 @@ private final class NativeLinphoneController: LinphoneController {
     let newDelegate = CoreDelegateStub(
         onCallStateChanged: { [weak self] _, call, state, message in
             guard let self else { return }
+            self.updateAudioLevel(call: call, state: state)
             let id = self.callId(call)
             let objectId = ObjectIdentifier(call)
             let staleIds = self.calls.compactMap { cachedId, cachedCall in
@@ -3718,6 +3747,143 @@ private final class NativeLinphoneController: LinphoneController {
       }
     )
     registrationEvents.send(["status": "unregistered", "message": nil])
+  }
+
+  private func defaultAudioLevel(_ kind: String) -> Int {
+    switch kind {
+    case "microphone": return 100
+    case "callAudio": return 70
+    case "ringtone": return 55
+    case "ringback": return 45
+    case "callWaiting": return 30
+    default: return 0
+    }
+  }
+
+  private func audioLevel(_ kind: String) -> Int {
+    let key = "VoipCloudAudioLevel.\(kind)"
+    guard UserDefaults.standard.object(forKey: key) != nil else {
+      return defaultAudioLevel(kind)
+    }
+    return min(100, max(0, UserDefaults.standard.integer(forKey: key)))
+  }
+
+  private func gainDb(for level: Int) -> Float {
+    let value = min(100, max(0, level))
+    guard value > 0 else { return -80 }
+    return 20 * log10(Float(value) / 100)
+  }
+
+  private func audioVolumeLevels() -> [String: Int] {
+    return [
+      "microphone": audioLevel("microphone"),
+      "callAudio": audioLevel("callAudio"),
+      "ringtone": audioLevel("ringtone"),
+      "ringback": audioLevel("ringback"),
+      "callWaiting": audioLevel("callWaiting")
+    ]
+  }
+
+  private func setAudioVolume(call: FlutterMethodCall) throws {
+    let args = call.arguments as? [String: Any] ?? [:]
+    let kind = args["kind"] as? String ?? ""
+    guard ["microphone", "callAudio", "ringtone", "ringback", "callWaiting"]
+      .contains(kind) else {
+      throw NSError(domain: "SoftphoneLinphone", code: 1403,
+        userInfo: [NSLocalizedDescriptionKey: "Unknown audio volume control."])
+    }
+    let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue
+      ?? defaultAudioLevel(kind)))
+    UserDefaults.standard.set(level, forKey: "VoipCloudAudioLevel.\(kind)")
+    if kind == "ringback", let currentCore = core {
+      currentCore.ringback = try makeMobileRingbackTone(level: level).path
+    }
+    if kind == "microphone" {
+      core?.micGainDb = gainDb(for: level)
+    } else if let current = findCurrentCall() {
+      updateAudioLevel(call: current, state: current.state)
+    } else if kind == "callAudio" {
+      core?.playbackGainDb = gainDb(for: level)
+    }
+  }
+
+  private func makeMobileRingbackTone(level: Int) throws -> URL {
+    let sampleRate = 8_000
+    let sampleCount = sampleRate * 6
+    let clamped = min(100, max(0, level))
+    let gain = Double(clamped) / 100
+    var samples = Data(capacity: sampleCount * 2)
+
+    func appendUInt16(_ value: UInt16, to data: inout Data) {
+      var littleEndian = value.littleEndian
+      Swift.withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+    func appendUInt32(_ value: UInt32, to data: inout Data) {
+      var littleEndian = value.littleEndian
+      Swift.withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    for index in 0..<sampleCount {
+      let time = Double(index) / Double(sampleRate)
+      let value: Int16
+      if time < 2 && clamped > 0 {
+        let edge = min(1, min(time / 0.01, (2 - time) / 0.01))
+        let signal = (sin(2 * .pi * 440 * time) + sin(2 * .pi * 480 * time))
+          * 0.13 * gain
+        value = Int16(signal * edge * 32767)
+      } else {
+        value = 0
+      }
+      appendUInt16(UInt16(bitPattern: value), to: &samples)
+    }
+
+    var wave = Data()
+    wave.append(contentsOf: "RIFF".utf8)
+    appendUInt32(UInt32(36 + samples.count), to: &wave)
+    wave.append(contentsOf: "WAVEfmt ".utf8)
+    appendUInt32(16, to: &wave)
+    appendUInt16(1, to: &wave)
+    appendUInt16(1, to: &wave)
+    appendUInt32(UInt32(sampleRate), to: &wave)
+    appendUInt32(UInt32(sampleRate * 2), to: &wave)
+    appendUInt16(2, to: &wave)
+    appendUInt16(16, to: &wave)
+    wave.append(contentsOf: "data".utf8)
+    appendUInt32(UInt32(samples.count), to: &wave)
+    wave.append(samples)
+
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "VoipCloud-ringback-\(ProcessInfo.processInfo.processIdentifier)-\(clamped).wav"
+    )
+    try wave.write(to: url, options: .atomic)
+    return url
+  }
+
+  private func updateAudioLevel(call: Call, state: Call.State) {
+    guard let currentCore = core else { return }
+    let hasOtherCall = calls.values.contains { candidate in
+      ObjectIdentifier(candidate) != ObjectIdentifier(call)
+        && !isTerminalCallState(candidate.state)
+    }
+    let level: Int
+    switch state {
+    case .PushIncomingReceived, .IncomingReceived, .IncomingEarlyMedia:
+      if hasOtherCall {
+        // CallKit owns the native in-call waiting indication. Stop Linphone's
+        // normal looping ringtone so the second call produces only the system
+        // call-waiting alert and never masks the active conversation.
+        currentCore.stopRinging()
+        level = audioLevel("callAudio")
+      } else {
+        level = audioLevel("ringtone")
+      }
+    case .OutgoingInit, .OutgoingProgress, .OutgoingRinging, .OutgoingEarlyMedia:
+      level = audioLevel("ringback")
+    default:
+      level = audioLevel("callAudio")
+    }
+    currentCore.playbackGainDb = gainDb(for: level)
+    currentCore.micGainDb = gainDb(for: audioLevel("microphone"))
   }
 
   private func configureAccount(args: [String: Any]) throws {
@@ -4305,40 +4471,74 @@ private final class NativeLinphoneController: LinphoneController {
     }
   }
 
-  private func transferCall(callId: String, destination: String) throws {
-    guard let activeCall = findCall(id: callId) else {
+  private func completeAttendedTransfer(
+    originalCallId: String,
+    consultationCallId: String
+  ) throws {
+    guard let original = findCallStrict(id: originalCallId) else {
       throw NSError(
         domain: "SoftphoneLinphone",
         code: 1004,
-        userInfo: [NSLocalizedDescriptionKey: "There is no active call to transfer."]
+        userInfo: [NSLocalizedDescriptionKey: "The original held call is no longer available."]
       )
     }
-    let trimmed = destination.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
+    guard let consultation = findCallStrict(id: consultationCallId),
+          ObjectIdentifier(original) != ObjectIdentifier(consultation) else {
       throw NSError(
         domain: "SoftphoneLinphone",
         code: 1005,
-        userInfo: [NSLocalizedDescriptionKey: "Transfer destination is required."]
+        userInfo: [NSLocalizedDescriptionKey: "The consultation call is no longer available."]
       )
     }
-    let address = try normalizeDestination(trimmed)
     do {
-      try activeCall.transferTo(referTo: address)
+      try original.transferToAnother(dest: consultation)
     } catch {
       throw NSError(
         domain: "SoftphoneLinphone",
         code: 1006,
         userInfo: [
-          NSLocalizedDescriptionKey: "Call transfer failed.",
+          NSLocalizedDescriptionKey: "Attended call transfer failed.",
           NSUnderlyingErrorKey: error,
         ]
       )
     }
     NSLog(
-      "Softphone/Linphone blind transfer id=%@ destination=%@",
-      callId,
-      address.asStringUriOnly()
+      "Softphone/Linphone attended transfer original=%@ consultation=%@",
+      originalCallId,
+      consultationCallId
     )
+  }
+
+  private func mergeCalls(activeCallId: String, heldCallId: String) throws {
+    guard let currentCore = core,
+          let active = findCallStrict(id: activeCallId),
+          let held = findCallStrict(id: heldCallId),
+          ObjectIdentifier(active) != ObjectIdentifier(held) else {
+      throw NSError(
+        domain: "SoftphoneLinphone",
+        code: 1007,
+        userInfo: [NSLocalizedDescriptionKey: "Two established calls are required to merge."]
+      )
+    }
+    do {
+      try currentCore.addToConference(call: active)
+      do {
+        try currentCore.addToConference(call: held)
+      } catch {
+        try? currentCore.removeFromConference(call: active)
+        throw error
+      }
+    } catch {
+      throw NSError(
+        domain: "SoftphoneLinphone",
+        code: 1008,
+        userInfo: [
+          NSLocalizedDescriptionKey: "Unable to merge the calls into a conference.",
+          NSUnderlyingErrorKey: error,
+        ]
+      )
+    }
+    NSLog("Softphone/Linphone conference merged active=%@ held=%@", activeCallId, heldCallId)
   }
 
   private func sendMessage(destination: String, text: String) throws {
@@ -4761,6 +4961,12 @@ private final class NativeLinphoneController: LinphoneController {
       return call
     }
     return findCurrentCall()
+  }
+
+  private func findCallStrict(id: String) -> Call? {
+    guard !id.isEmpty else { return nil }
+    if let call = calls[id], isLiveCall(call) { return call }
+    return core?.calls.first(where: { isLiveCall($0) && callId($0) == id })
   }
 
   private func findCurrentCall() -> Call? {

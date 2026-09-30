@@ -18,6 +18,7 @@ void main() {
               'callAudio': 65,
               'ringtone': 40,
               'ringback': 30,
+              'callWaiting': 25,
             };
           }
           return null;
@@ -38,6 +39,7 @@ void main() {
     expect(levels.callAudio, 65);
     expect(levels.ringtone, 40);
     expect(levels.ringback, 30);
+    expect(levels.callWaiting, 25);
     expect(calls.map((call) => call.method), [
       'getAudioVolumeLevels',
       'setAudioVolume',
@@ -57,7 +59,8 @@ void main() {
 
     expect(levels.microphone, 0);
     expect(levels.callAudio, 100);
-    expect(levels.ringtone, 100);
+    expect(levels.ringtone, AudioVolumeLevels.defaults.ringtone);
     expect(levels.ringback, 0);
+    expect(levels.callWaiting, AudioVolumeLevels.defaults.callWaiting);
   });
 }

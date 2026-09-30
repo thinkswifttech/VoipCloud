@@ -111,6 +111,113 @@ void main() {
       expect(await repository.getCallHistory(), [localItem]);
     });
 
+    test(
+      'collapses queue legs and never lets server missed override local answer',
+      () async {
+        final localAnswered = _item(
+          id: 'windows-native-call',
+          remoteNumber: '211',
+          remoteDisplayName: 'TEST: Abdul Test User',
+          startedAt: startedAt.add(const Duration(seconds: 2)),
+          disposition: CallHistoryDisposition.answered,
+        );
+        final serverOuterLeg = _item(
+          id: 'server-outer-leg',
+          remoteNumber: '211',
+          startedAt: startedAt,
+          disposition: CallHistoryDisposition.missed,
+          direction: CallDirection.missed,
+        );
+        final serverB2buaLeg = _item(
+          id: 'server-b2bua-leg',
+          remoteNumber: '211',
+          startedAt: startedAt.add(const Duration(seconds: 4)),
+          disposition: CallHistoryDisposition.missed,
+          direction: CallDirection.missed,
+        );
+        final local = _FakeRepository(items: [localAnswered]);
+        final repository = ReconciledCallHistoryRepository(
+          local: local,
+          server: _FakeRepository(items: [serverOuterLeg, serverB2buaLeg]),
+        );
+
+        final result = await repository.getCallHistory();
+
+        expect(result, hasLength(1));
+        expect(result.single.id, 'windows-native-call');
+        expect(result.single.remoteDisplayName, 'TEST: Abdul Test User');
+        expect(
+          result.single.effectiveDisposition,
+          CallHistoryDisposition.answered,
+        );
+      },
+    );
+
+    test(
+      'collapses cached duplicates and keeps answered-elsewhere evidence',
+      () async {
+        final missedNative = _item(
+          id: 'android-native-call',
+          remoteNumber: '211',
+          startedAt: startedAt.add(const Duration(seconds: 1)),
+          disposition: CallHistoryDisposition.missed,
+          direction: CallDirection.missed,
+        );
+        final cachedMissedLeg = _item(
+          id: 'server-missed-leg',
+          remoteNumber: '211',
+          startedAt: startedAt,
+          disposition: CallHistoryDisposition.missed,
+          direction: CallDirection.missed,
+        );
+        final answeredElsewhereLeg = _item(
+          id: 'server-answered-leg',
+          remoteNumber: '211',
+          startedAt: startedAt.add(const Duration(seconds: 3)),
+          disposition: CallHistoryDisposition.answeredElsewhere,
+        );
+        final local = _FakeRepository(items: [missedNative, cachedMissedLeg]);
+        final repository = ReconciledCallHistoryRepository(
+          local: local,
+          server: _FakeRepository(
+            items: [cachedMissedLeg, answeredElsewhereLeg],
+          ),
+        );
+
+        final result = await repository.getCallHistory();
+
+        expect(result, hasLength(1));
+        expect(
+          result.single.effectiveDisposition,
+          CallHistoryDisposition.answeredElsewhere,
+        );
+        expect(local.synced, hasLength(1));
+      },
+    );
+
+    test('keeps sequential calls from the same caller separate', () async {
+      final first = _item(
+        id: 'call-1',
+        remoteNumber: '211',
+        startedAt: startedAt,
+        disposition: CallHistoryDisposition.missed,
+        direction: CallDirection.missed,
+      );
+      final second = _item(
+        id: 'call-2',
+        remoteNumber: '211',
+        startedAt: startedAt.add(const Duration(minutes: 1)),
+        disposition: CallHistoryDisposition.missed,
+        direction: CallDirection.missed,
+      );
+      final repository = ReconciledCallHistoryRepository(
+        local: _FakeRepository(),
+        server: _FakeRepository(items: [first, second]),
+      );
+
+      expect(await repository.getCallHistory(), hasLength(2));
+    });
+
     test('new call events are written only to local storage', () async {
       final local = _FakeRepository();
       final server = _FakeRepository();

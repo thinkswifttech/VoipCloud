@@ -15,6 +15,7 @@ import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_quality_info.dart';
 import '../../calls/domain/call_status.dart';
 import '../../calls/domain/voip_call.dart';
+import '../../dialer/domain/post_dial_sequence.dart';
 import '../domain/sip_message.dart';
 import '../domain/sip_config.dart';
 import '../domain/sip_registration_state.dart';
@@ -30,6 +31,8 @@ class LinphoneSipService implements SipService {
     String turnServer = '',
     this.isDndEnabled,
     SipLogStore? sipLogStore,
+    this.postDialPause = const Duration(seconds: 2),
+    this.postDialToneGap = const Duration(milliseconds: 120),
   }) : _callHistoryRepository = callHistoryRepository,
        _onCallHistoryChanged = onCallHistoryChanged,
        _platformChannel = platformChannel ?? const VoipPlatformChannel(),
@@ -50,6 +53,8 @@ class LinphoneSipService implements SipService {
   final SipLogStore? _sipLogStore;
   final String _stunServer;
   final String _turnServer;
+  final Duration postDialPause;
+  final Duration postDialToneGap;
   final StreamController<SipRegistrationState> _registrationController =
       StreamController<SipRegistrationState>.broadcast();
   final StreamController<VoipCall?> _callController =
@@ -58,6 +63,8 @@ class LinphoneSipService implements SipService {
       StreamController<List<VoipCall>>.broadcast();
   final StreamController<SipMessage> _messageController =
       StreamController<SipMessage>.broadcast();
+  final StreamController<PostDialPrompt?> _postDialPromptController =
+      StreamController<PostDialPrompt?>.broadcast();
 
   StreamSubscription<Map<String, dynamic>>? _registrationSubscription;
   StreamSubscription<Map<String, dynamic>>? _callSubscription;
@@ -83,6 +90,9 @@ class LinphoneSipService implements SipService {
   bool _windowsSyncInFlight = false;
   final Stopwatch _callTraceClock = Stopwatch()..start();
   int _callTraceSequence = 0;
+  _PostDialPlan? _pendingPostDialPlan;
+  final Map<String, _PostDialPlan> _postDialPlans = {};
+  PostDialPrompt? _postDialPrompt;
 
   static const _pbxDndToggleCode = '*76';
 
@@ -104,6 +114,13 @@ class LinphoneSipService implements SipService {
 
   @override
   Stream<SipMessage> get messageStream => _messageController.stream;
+
+  @override
+  PostDialPrompt? get postDialPrompt => _postDialPrompt;
+
+  @override
+  Stream<PostDialPrompt?> get postDialPromptStream =>
+      _postDialPromptController.stream;
 
   @override
   SipRegistrationState getRegistrationState() => _registrationState;
@@ -326,7 +343,8 @@ class LinphoneSipService implements SipService {
   @override
   Future<void> makeCall(String destination) async {
     final trimmed = destination.trim();
-    if (trimmed.isEmpty) {
+    final postDial = PostDialSequence.parse(trimmed);
+    if (postDial.destination.isEmpty) {
       throw const VoipException(
         message: 'Missing destination',
         userMessage: 'Enter a number or SIP address.',
@@ -343,7 +361,7 @@ class LinphoneSipService implements SipService {
     final started = Stopwatch()..start();
     final placeholder = VoipCall(
       id: 'local-outgoing-${DateTime.now().microsecondsSinceEpoch}',
-      remoteUri: trimmed,
+      remoteUri: postDial.destination,
       direction: CallDirection.outgoing,
       status: CallStatus.dialing,
       startedAt: DateTime.now(),
@@ -353,19 +371,23 @@ class LinphoneSipService implements SipService {
     _callController.add(placeholder);
     _liveCallsController.add(_orderedLiveCalls());
     _startWindowsCallReconciliation();
-    _traceCall('make_call_requested', identity: trimmed);
+    _pendingPostDialPlan = postDial.hasCommands
+        ? _PostDialPlan(postDial.commands)
+        : null;
+    _traceCall('make_call_requested', identity: postDial.destination);
     try {
-      await _platformChannel.makeCall(trimmed);
+      await _platformChannel.makeCall(postDial.destination);
       _traceCall(
         'make_call_native_accepted',
-        identity: trimmed,
+        identity: postDial.destination,
         detail: 'durationMs=${started.elapsedMilliseconds}',
       );
     } on PlatformException catch (error) {
       _clearOutgoingPlaceholder(placeholder);
+      _pendingPostDialPlan = null;
       _traceCall(
         'make_call_failed',
-        identity: trimmed,
+        identity: postDial.destination,
         detail: 'durationMs=${started.elapsedMilliseconds} code=${error.code}',
         error: error,
       );
@@ -385,8 +407,24 @@ class LinphoneSipService implements SipService {
       );
     } on Object {
       _clearOutgoingPlaceholder(placeholder);
+      _pendingPostDialPlan = null;
       rethrow;
     }
+  }
+
+  @override
+  Future<void> continuePostDial(String callId) async {
+    final plan = _postDialPlans[callId];
+    if (plan == null || !plan.waiting) return;
+    plan.waiting = false;
+    _setPostDialPrompt(null);
+    await _runPostDial(callId, plan);
+  }
+
+  @override
+  void cancelPostDial(String callId) {
+    _postDialPlans.remove(callId)?.cancelled = true;
+    if (_postDialPrompt?.callId == callId) _setPostDialPrompt(null);
   }
 
   void _clearOutgoingPlaceholder(VoipCall placeholder) {
@@ -814,25 +852,169 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> transferCall({
+  Future<void> blindTransfer({
     required String callId,
     required String destination,
-  }) {
-    final trimmed = destination.trim();
-    if (trimmed.isEmpty) {
+  }) async {
+    final call = _knownCalls[callId];
+    if (call == null || call.status != CallStatus.active) {
       throw const VoipException(
-        message: 'Missing transfer destination',
-        userMessage: 'Choose a directory extension to transfer to.',
+        message: 'Blind transfer requires an active call',
+        userMessage: 'The call must be connected before it can be transferred.',
       );
     }
-    final call = _activeCall;
-    if (call == null || call.id != callId) {
+    final digits = _transferDigits(destination);
+    if (digits.isEmpty) {
       throw const VoipException(
-        message: 'No active call to transfer',
-        userMessage: 'There is no active call to transfer.',
+        message: 'Missing transfer destination digits',
+        userMessage: 'Choose a valid extension or phone number to transfer to.',
       );
     }
-    return _platformChannel.transferCall(callId: callId, destination: trimmed);
+
+    // FreePBX's in-call blind transfer sequence. Send one RFC2833/SIP INFO
+    // event at a time: every native bridge deliberately accepts a single DTMF
+    // symbol, and a small gap prevents adjacent digits being coalesced by the
+    // media stack or PBX feature-code detector.
+    for (final tone in '##$digits'.split('')) {
+      await _platformChannel.sendDtmf(tone);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+    _traceCall(
+      'blind_transfer_feature_code_sent',
+      identity: digits,
+      detail: 'callId=$callId',
+    );
+  }
+
+  @override
+  Future<void> startAttendedTransfer({
+    required String originalCallId,
+    required String destination,
+  }) async {
+    final original = _knownCalls[originalCallId];
+    if (original == null || original.status != CallStatus.active) {
+      throw const VoipException(
+        message: 'Attended transfer requires an active original call',
+        userMessage: 'The original call is no longer available.',
+      );
+    }
+    if (_orderedLiveCalls().any((call) => call.id != originalCallId)) {
+      throw const VoipException(
+        message: 'Attended transfer already has another call',
+        userMessage:
+            'Finish or merge the other call before starting a transfer.',
+      );
+    }
+
+    await hold(originalCallId);
+    await _waitForCallStatus(
+      originalCallId,
+      (status) => status == CallStatus.held,
+      operation: 'hold the original caller',
+    );
+    try {
+      await makeCall(destination);
+    } catch (_) {
+      unawaited(_resumeIfHeld(originalCallId));
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> completeAttendedTransfer({
+    required String originalCallId,
+    required String consultationCallId,
+  }) async {
+    final original = _knownCalls[originalCallId];
+    final consultation = _knownCalls[consultationCallId];
+    if (original == null || original.status != CallStatus.held) {
+      throw const VoipException(
+        message: 'Original transfer call is not held',
+        userMessage: 'The original caller is no longer waiting.',
+      );
+    }
+    if (consultation == null || consultation.status != CallStatus.active) {
+      throw const VoipException(
+        message: 'Consultation call is not connected',
+        userMessage:
+            'Wait for the consultation call to connect before transferring.',
+      );
+    }
+    await _platformChannel.completeAttendedTransfer(
+      originalCallId: originalCallId,
+      consultationCallId: consultationCallId,
+    );
+    _traceCall(
+      'attended_transfer_requested',
+      detail:
+          'originalCallId=$originalCallId consultationCallId=$consultationCallId',
+    );
+  }
+
+  @override
+  Future<void> cancelAttendedTransfer({
+    required String originalCallId,
+    required String consultationCallId,
+  }) async {
+    final consultation = _knownCalls[consultationCallId];
+    if (consultation != null && !_isFinished(consultation.status)) {
+      await endCall(consultationCallId);
+      await _waitForCallStatus(
+        consultationCallId,
+        _isFinished,
+        operation: 'end the consultation call',
+      );
+    }
+    await _resumeIfHeld(originalCallId);
+  }
+
+  @override
+  Future<void> mergeCalls({
+    required String activeCallId,
+    required String heldCallId,
+  }) async {
+    final active = _knownCalls[activeCallId];
+    final held = _knownCalls[heldCallId];
+    final liveCalls = _orderedLiveCalls();
+    if (liveCalls.length != 2 ||
+        active == null ||
+        active.status != CallStatus.active ||
+        held == null ||
+        held.status != CallStatus.held) {
+      throw const VoipException(
+        message: 'Conference merge requires one active and one held call',
+        userMessage:
+            'Connect one call and place the other on hold before merging.',
+      );
+    }
+    await _platformChannel.mergeCalls(
+      activeCallId: activeCallId,
+      heldCallId: heldCallId,
+    );
+    _traceCall(
+      'conference_merge_requested',
+      detail: 'activeCallId=$activeCallId heldCallId=$heldCallId',
+    );
+  }
+
+  String _transferDigits(String destination) {
+    var value = destination.trim();
+    if (value.toLowerCase().startsWith('sip:')) value = value.substring(4);
+    final at = value.indexOf('@');
+    if (at >= 0) value = value.substring(0, at);
+    return value.replaceAll(RegExp(r'[^0-9]'), '');
+  }
+
+  Future<void> _resumeIfHeld(String callId) async {
+    final call = _knownCalls[callId];
+    if (call?.status != CallStatus.held) return;
+    try {
+      await resume(callId);
+    } catch (error) {
+      AppLogger.warning(
+        'Unable to restore original call after transfer: $error',
+      );
+    }
   }
 
   @override
@@ -880,6 +1062,7 @@ class LinphoneSipService implements SipService {
     await _callController.close();
     await _liveCallsController.close();
     await _messageController.close();
+    await _postDialPromptController.close();
   }
 
   Future<void> _configureNativeAccount(SipConfig config) {
@@ -1033,6 +1216,7 @@ class LinphoneSipService implements SipService {
       call,
       historyEventId: _nullableString(event['historyEventId']),
     );
+    _bindOrAdvancePostDial(call);
     final previousActive = _activeCall;
     _publishCallState();
     if (_activeCall == null && call.answeredElsewhere) {
@@ -1062,6 +1246,71 @@ class LinphoneSipService implements SipService {
         _flushPendingPbxDndToggleIfIdle();
       }
     }
+  }
+
+  void _bindOrAdvancePostDial(VoipCall call) {
+    if (call.direction != CallDirection.outgoing) return;
+    final pending = _pendingPostDialPlan;
+    if (pending != null && !_isFinished(call.status)) {
+      _pendingPostDialPlan = null;
+      _postDialPlans[call.id] = pending;
+    }
+    final plan = _postDialPlans[call.id];
+    if (plan == null) return;
+    if (_isFinished(call.status)) {
+      cancelPostDial(call.id);
+    } else if (call.status == CallStatus.active &&
+        !plan.running &&
+        !plan.waiting) {
+      unawaited(_runPostDial(call.id, plan));
+    }
+  }
+
+  Future<void> _runPostDial(String callId, _PostDialPlan plan) async {
+    if (plan.running || plan.waiting || plan.cancelled) return;
+    plan.running = true;
+    try {
+      while (plan.index < plan.commands.length && !plan.cancelled) {
+        final call = _knownCalls[callId];
+        if (call == null || _isFinished(call.status)) {
+          cancelPostDial(callId);
+          return;
+        }
+        if (call.status != CallStatus.active) return;
+        final value = plan.commands[plan.index++];
+        if (value == ',') {
+          await Future<void>.delayed(postDialPause);
+          continue;
+        }
+        if (value == ';') {
+          plan.waiting = true;
+          final digits = _nextPostDialSegment(plan);
+          _setPostDialPrompt(PostDialPrompt(callId: callId, digits: digits));
+          return;
+        }
+        if (RegExp(r'^[0-9A-Da-d*#]$').hasMatch(value)) {
+          await _platformChannel.sendDtmf(value.toUpperCase());
+          await Future<void>.delayed(postDialToneGap);
+        }
+      }
+      _postDialPlans.remove(callId);
+      if (_postDialPrompt?.callId == callId) _setPostDialPrompt(null);
+    } finally {
+      plan.running = false;
+    }
+  }
+
+  String _nextPostDialSegment(_PostDialPlan plan) {
+    final remaining = plan.commands.substring(plan.index);
+    final nextWait = remaining.indexOf(';');
+    return (nextWait < 0 ? remaining : remaining.substring(0, nextWait))
+        .replaceAll(',', ' pause ')
+        .trim();
+  }
+
+  void _setPostDialPrompt(PostDialPrompt? prompt) {
+    _postDialPrompt = prompt;
+    if (!_disposed) _postDialPromptController.add(prompt);
   }
 
   List<VoipCall> _orderedLiveCalls() {
@@ -1214,6 +1463,12 @@ class LinphoneSipService implements SipService {
     final direction = _callDirection('${event['direction']}');
     final eventRemoteUri = _string(event['remoteUri']);
     final eventStartedAt = _date(event['startedAt']);
+    // Windows persists terminal call events before Dart sees them. Older
+    // native builds did not include call timestamps in that payload, so a
+    // replay after relaunch must use the durable write time instead of the
+    // current time. Otherwise opening the app manufactures a new missed call
+    // at the launch time.
+    final historyPersistedAt = _date(event['historyPersistedAtEpochMs']);
     final previous =
         _knownCalls[id] ??
         _promotePreviousCallIdentity(
@@ -1246,20 +1501,29 @@ class LinphoneSipService implements SipService {
             : null) ??
         previous?.audioRoute ??
         AudioOutputRoute.earpiece;
+    final remoteUri = _preferredCallIdentity(
+      previous?.remoteUri,
+      eventRemoteUri,
+    );
+    final remoteDisplayName = _preferredCallDisplayName(
+      previous?.remoteDisplayName,
+      _nullableString(event['remoteDisplayName']),
+    );
 
     return VoipCall(
       id: id,
-      remoteUri: _string(
-        event['remoteUri'],
-        fallback: previous?.remoteUri ?? '',
-      ),
-      remoteDisplayName:
-          _nullableString(event['remoteDisplayName']) ??
-          previous?.remoteDisplayName,
+      remoteUri: remoteUri,
+      remoteDisplayName: remoteDisplayName,
       direction: direction,
       status: status,
-      startedAt: previous?.startedAt ?? eventStartedAt ?? DateTime.now(),
-      endedAt: endedAt ?? (_isFinished(status) ? DateTime.now() : null),
+      startedAt:
+          previous?.startedAt ??
+          eventStartedAt ??
+          historyPersistedAt ??
+          DateTime.now(),
+      endedAt:
+          endedAt ??
+          (_isFinished(status) ? historyPersistedAt ?? DateTime.now() : null),
       isMuted: hasMutedFlag
           ? event['isMuted'] == true
           : (previous?.isMuted ?? false),
@@ -1312,6 +1576,8 @@ class LinphoneSipService implements SipService {
     }
 
     _knownCalls.remove(candidate.id);
+    final postDial = _postDialPlans.remove(candidate.id);
+    if (postDial != null) _postDialPlans[newId] = postDial;
     if (_featureCodeCallIds.remove(candidate.id)) {
       _featureCodeCallIds.add(newId);
     }
@@ -1582,6 +1848,16 @@ class LinphoneSipService implements SipService {
   }
 }
 
+class _PostDialPlan {
+  _PostDialPlan(this.commands);
+
+  final String commands;
+  int index = 0;
+  bool running = false;
+  bool waiting = false;
+  bool cancelled = false;
+}
+
 String _diagnosticCorrelation(String? value) {
   final normalized = value?.trim().toLowerCase() ?? '';
   if (normalized.isEmpty) return 'none';
@@ -1598,6 +1874,51 @@ bool _isFinished(CallStatus status) {
     CallStatus.ended || CallStatus.missed || CallStatus.failed => true,
     _ => false,
   };
+}
+
+String _preferredCallIdentity(String? previous, String current) {
+  final previousValue = previous?.trim() ?? '';
+  final currentValue = current.trim();
+  if (previousValue.isEmpty) return current;
+  if (currentValue.isEmpty) return previousValue;
+  final previousHasPrefix = _hasQueuePrefix(previousValue);
+  final currentHasPrefix = _hasQueuePrefix(currentValue);
+  if (previousHasPrefix != currentHasPrefix) {
+    return previousHasPrefix ? previousValue : currentValue;
+  }
+  return current;
+}
+
+String? _preferredCallDisplayName(String? previous, String? current) {
+  final previousValue = previous?.trim() ?? '';
+  final currentValue = current?.trim() ?? '';
+  if (previousValue.isEmpty) return currentValue.isEmpty ? null : currentValue;
+  if (currentValue.isEmpty) return previousValue;
+  final previousHasPrefix = _hasQueuePrefix(previousValue);
+  final currentHasPrefix = _hasQueuePrefix(currentValue);
+  if (previousHasPrefix != currentHasPrefix) {
+    return previousHasPrefix ? previousValue : currentValue;
+  }
+  return currentValue;
+}
+
+bool _hasQueuePrefix(String value) {
+  var candidate = value.trim();
+  final lower = candidate.toLowerCase();
+  if (lower.startsWith('sips:')) {
+    candidate = candidate.substring(5);
+  } else if (lower.startsWith('sip:')) {
+    candidate = candidate.substring(4);
+  }
+  candidate = candidate.split('@').first.split(';').first;
+  try {
+    candidate = Uri.decodeComponent(candidate);
+  } on ArgumentError {
+    // Preserve malformed SIP identities best-effort.
+  } on FormatException {
+    // Preserve malformed SIP identities best-effort.
+  }
+  return RegExp(r'^[A-Za-z][A-Za-z0-9._ -]{0,31}:').hasMatch(candidate);
 }
 
 String _displayNumber(String value) {

@@ -14,11 +14,13 @@ import '../../contacts/presentation/contacts_providers.dart';
 import '../../directory/presentation/directory_providers.dart';
 import '../../dialer/presentation/dialer_input_platform.dart';
 import '../../session/presentation/session_controller.dart';
+import '../../sip/application/sip_service.dart';
 import '../domain/audio_output_route.dart';
 import '../domain/call_quality_info.dart';
 import '../domain/call_status.dart';
 import '../domain/voip_call.dart';
 import 'audio_route_picker.dart';
+import 'call_duration.dart';
 import 'call_quality_sheet.dart';
 import 'call_session_providers.dart';
 import 'caller_avatar.dart';
@@ -62,6 +64,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   String _dtmfBuffer = '';
   CallQualityInfo? _quality;
   Timer? _qualityTimer;
+  Timer? _durationTimer;
 
   @override
   void initState() {
@@ -71,6 +74,13 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     }
     _qualityTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       _refreshQuality();
+    });
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final active = ref.read(activeCallProvider).value;
+      if (active != null && _canReadQuality(active.status)) {
+        setState(() {});
+      }
     });
   }
 
@@ -90,6 +100,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   @override
   void dispose() {
     _qualityTimer?.cancel();
+    _durationTimer?.cancel();
     _dtmfKeyboardFocus.dispose();
     _setProximity(false);
     super.dispose();
@@ -125,13 +136,19 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     // Prefer the live session call so keypad ↔ controls share the same
     // mute / audio-route state without relying on a stale widget snapshot.
     final live = ref.watch(activeCallProvider).value;
-    // Only one VoIP call is supported. Linphone may promote its temporary
-    // object ID to the SIP Call-ID after this widget was created, so the live
-    // provider snapshot is always the authoritative control target.
+    // Linphone may promote a temporary object ID to the SIP Call-ID after this
+    // widget was created, so the live provider snapshot is always the
+    // authoritative control target, including during multi-call workflows.
     final call = isInCallUiCall(live) ? live! : widget.call;
     final contacts = ref.watch(contactsProvider).value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
     final calls = ref.watch(liveCallsProvider).value ?? const <VoipCall>[];
+    final postDialPrompt = ref.watch(postDialPromptProvider).value;
+    final attendedSession = ref.watch(attendedTransferSessionProvider);
+    final activeConferenceCalls = calls
+        .where((candidate) => candidate.status == CallStatus.active)
+        .toList(growable: false);
+    final conferenceActive = activeConferenceCalls.length > 1;
     VoipCall? heldCall;
     for (final candidate in calls) {
       if (candidate.id != call.id && candidate.status == CallStatus.held) {
@@ -152,6 +169,28 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             contacts: contacts,
             directory: directory,
           );
+
+    if (attendedSession != null) {
+      final original = calls
+          .where((candidate) => candidate.id == attendedSession.originalCallId)
+          .firstOrNull;
+      final consultationExists = calls.any(
+        (candidate) => candidate.id != attendedSession.originalCallId,
+      );
+      // Ending/cancelling the consultation automatically restores the held
+      // caller. Clear the UI workflow only after that restoration is visible;
+      // do not clear it during the short gap before the outgoing leg appears.
+      if (original == null ||
+          (!consultationExists && original.status == CallStatus.active)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final current = ref.read(attendedTransferSessionProvider);
+          if (current == attendedSession) {
+            ref.read(attendedTransferSessionProvider.notifier).clear();
+          }
+        });
+      }
+    }
 
     ref.listen(activeCallProvider, (_, next) {
       next.whenData((liveCall) {
@@ -197,8 +236,12 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                   identity,
                   displayName,
                   desktopLayout: acceptsKeyboardInput,
+                  calls: calls,
+                  attendedSession: attendedSession,
+                  conferenceActive: conferenceActive,
                   heldCall: heldCall,
                   heldIdentity: heldIdentity,
+                  postDialPrompt: postDialPrompt,
                 ),
               ),
       ),
@@ -211,8 +254,12 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     CallerIdentity identity,
     String displayName, {
     required bool desktopLayout,
+    required List<VoipCall> calls,
+    required AttendedTransferSession? attendedSession,
+    required bool conferenceActive,
     VoipCall? heldCall,
     CallerIdentity? heldIdentity,
+    PostDialPrompt? postDialPrompt,
   }) {
     final theme = Theme.of(context);
     final quality = _quality;
@@ -220,6 +267,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     final qualityColor = _qualityColor(qualityScore);
     final qualityLabel = quality?.qualityLabel ?? 'Checking…';
     final bars = _qualityBars(qualityScore);
+    final durationLabel = _durationLabel(call);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -236,6 +284,17 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
         final actionGap = dense ? 8.0 : 14.0;
         final transferAvailable =
             ref.watch(sessionControllerProvider).value?.directoryAccess != null;
+        final consultationCall = attendedSession == null
+            ? null
+            : calls
+                  .where((item) => item.id != attendedSession.originalCallId)
+                  .firstOrNull;
+        final attendedTransferActive =
+            attendedSession != null &&
+            heldCall?.id == attendedSession.originalCallId &&
+            consultationCall != null;
+        final consultationConnected =
+            consultationCall?.status == CallStatus.active;
 
         final actions = <Widget>[
           _CallAction(
@@ -256,14 +315,15 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
               selectedRoute: call.audioRoute,
             ),
           ),
-          _CallAction(
-            icon: AppIcons.hold,
-            label: 'Hold',
-            selected: call.status == CallStatus.held,
-            compact: compactActions,
-            prominent: prominentMobileActions,
-            onPressed: () => unawaited(_toggleHold(context, call)),
-          ),
+          if (!conferenceActive)
+            _CallAction(
+              icon: AppIcons.hold,
+              label: 'Hold',
+              selected: call.status == CallStatus.held,
+              compact: compactActions,
+              prominent: prominentMobileActions,
+              onPressed: () => unawaited(_toggleHold(context, call)),
+            ),
           _CallAction(
             icon: AppIcons.navDialer,
             label: 'Dialpad',
@@ -274,16 +334,85 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
               _setProximity(false);
             }),
           ),
-          if (transferAvailable)
+          if (transferAvailable &&
+              attendedSession == null &&
+              heldCall == null &&
+              call.status == CallStatus.active &&
+              !conferenceActive)
             _CallAction(
               icon: AppIcons.callForward,
-              label: 'Transfer',
+              label: 'Blind transfer',
               compact: compactActions,
               prominent: prominentMobileActions,
               onPressed: () {
-                ref.read(callTransferModeProvider.notifier).begin();
+                ref
+                    .read(callTransferModeProvider.notifier)
+                    .begin(
+                      kind: CallTransferKind.blind,
+                      originalCallId: call.id,
+                    );
                 context.go(RoutePaths.directory);
               },
+            ),
+          if (transferAvailable &&
+              attendedSession == null &&
+              heldCall == null &&
+              call.status == CallStatus.active &&
+              !conferenceActive)
+            _CallAction(
+              icon: AppIcons.attendedTransfer,
+              label: 'Attended',
+              compact: compactActions,
+              prominent: prominentMobileActions,
+              onPressed: () {
+                ref
+                    .read(callTransferModeProvider.notifier)
+                    .begin(
+                      kind: CallTransferKind.attended,
+                      originalCallId: call.id,
+                    );
+                context.go(RoutePaths.directory);
+              },
+            ),
+          if (attendedTransferActive)
+            _CallAction(
+              icon: AppIcons.callForward,
+              label: 'Complete transfer',
+              compact: compactActions,
+              prominent: prominentMobileActions,
+              onPressed: consultationConnected
+                  ? () => unawaited(
+                      _completeAttendedTransfer(
+                        context,
+                        attendedSession,
+                        consultationCall,
+                      ),
+                    )
+                  : null,
+            ),
+          if (attendedTransferActive)
+            _CallAction(
+              icon: AppIcons.close,
+              label: 'Cancel transfer',
+              compact: compactActions,
+              prominent: prominentMobileActions,
+              onPressed: () => unawaited(
+                _cancelAttendedTransfer(
+                  context,
+                  attendedSession,
+                  consultationCall,
+                ),
+              ),
+            ),
+          if (heldCall != null &&
+              call.status == CallStatus.active &&
+              attendedSession == null)
+            _CallAction(
+              icon: AppIcons.mergeCalls,
+              label: 'Merge',
+              compact: compactActions,
+              prominent: prominentMobileActions,
+              onPressed: () => unawaited(_mergeCalls(context, call, heldCall)),
             ),
         ];
 
@@ -332,12 +461,19 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                                       letterSpacing: 0,
                                     ),
                           ),
-                          if (identity.isResolvedName &&
-                              identity.number.isNotEmpty &&
-                              identity.number != displayName) ...[
+                          if ((identity.isResolvedName &&
+                                  identity.number.isNotEmpty &&
+                                  identity.number != displayName) ||
+                              durationLabel != null) ...[
                             const SizedBox(height: 4),
                             Text(
-                              identity.number,
+                              [
+                                if (identity.isResolvedName &&
+                                    identity.number.isNotEmpty &&
+                                    identity.number != displayName)
+                                  identity.number,
+                                ?durationLabel,
+                              ].join(' · '),
                               textAlign: TextAlign.center,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -350,13 +486,30 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                           ],
                           const SizedBox(height: 6),
                           Text(
-                            _statusLabel(call.status),
+                            conferenceActive
+                                ? 'Conference · ${calls.where((candidate) => candidate.status == CallStatus.active).length} participants'
+                                : _statusLabel(call.status),
                             style: theme.textTheme.labelLarge?.copyWith(
                               color: theme.colorScheme.primary,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0,
                             ),
                           ),
+                          if (postDialPrompt?.callId == call.id)
+                            Padding(
+                              padding: EdgeInsets.only(top: dense ? 8 : 12),
+                              child: _PostDialPromptCard(
+                                digits: postDialPrompt!.digits,
+                                onSend: () => unawaited(
+                                  ref
+                                      .read(sipServiceProvider)
+                                      .continuePostDial(call.id),
+                                ),
+                                onCancel: () => ref
+                                    .read(sipServiceProvider)
+                                    .cancelPostDial(call.id),
+                              ),
+                            ),
                           AnimatedSwitcher(
                             duration: const Duration(milliseconds: 220),
                             switchInCurve: Curves.easeOutCubic,
@@ -371,8 +524,14 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                                     child: _HeldCallCard(
                                       identity: heldIdentity,
                                       compact: dense,
-                                      onSwap: () =>
-                                          unawaited(_swapToCall(heldCall.id)),
+                                      workflowLabel: attendedTransferActive
+                                          ? 'Original caller on hold'
+                                          : 'On hold',
+                                      onSwap: attendedTransferActive
+                                          ? null
+                                          : () => unawaited(
+                                              _swapToCall(heldCall.id),
+                                            ),
                                     ),
                                   ),
                           ),
@@ -592,8 +751,19 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   }
 
   Future<void> _endCall(VoipCall call) async {
+    final liveCalls = ref.read(liveCallsProvider).value ?? const <VoipCall>[];
+    final conferenceCalls = liveCalls
+        .where((candidate) => candidate.status == CallStatus.active)
+        .toList(growable: false);
     try {
-      await ref.read(sipServiceProvider).endCall(call.id);
+      final service = ref.read(sipServiceProvider);
+      if (conferenceCalls.length > 1) {
+        for (final participant in conferenceCalls) {
+          await service.endCall(participant.id);
+        }
+      } else {
+        await service.endCall(call.id);
+      }
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -612,6 +782,78 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
         const SnackBar(
           content: Text('Unable to switch calls. Please try again.'),
         ),
+      );
+      await ref.read(sipServiceProvider).syncCurrentCall();
+    }
+  }
+
+  Future<void> _completeAttendedTransfer(
+    BuildContext context,
+    AttendedTransferSession session,
+    VoipCall consultationCall,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref
+          .read(sipServiceProvider)
+          .completeAttendedTransfer(
+            originalCallId: session.originalCallId,
+            consultationCallId: consultationCall.id,
+          );
+      ref.read(attendedTransferSessionProvider.notifier).clear();
+      messenger.showSnackBar(
+        SnackBar(content: Text('Transferring to ${session.destinationLabel}…')),
+      );
+    } catch (error) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Unable to complete the attended transfer.'),
+        ),
+      );
+      await ref.read(sipServiceProvider).syncCurrentCall();
+    }
+  }
+
+  Future<void> _cancelAttendedTransfer(
+    BuildContext context,
+    AttendedTransferSession session,
+    VoipCall consultationCall,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref
+          .read(sipServiceProvider)
+          .cancelAttendedTransfer(
+            originalCallId: session.originalCallId,
+            consultationCallId: consultationCall.id,
+          );
+      ref.read(attendedTransferSessionProvider.notifier).clear();
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Unable to cancel the attended transfer.'),
+        ),
+      );
+      await ref.read(sipServiceProvider).syncCurrentCall();
+    }
+  }
+
+  Future<void> _mergeCalls(
+    BuildContext context,
+    VoipCall activeCall,
+    VoipCall heldCall,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref
+          .read(sipServiceProvider)
+          .mergeCalls(activeCallId: activeCall.id, heldCallId: heldCall.id);
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Calls merged into a conference.')),
+      );
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Unable to merge these calls.')),
       );
       await ref.read(sipServiceProvider).syncCurrentCall();
     }
@@ -637,6 +879,62 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       CallStatus.failed => 'Failed',
     };
   }
+
+  String? _durationLabel(VoipCall call) {
+    if (!_canReadQuality(call.status)) return null;
+    final quality = _quality;
+    final matchesCall = quality != null && quality.callId == call.id;
+    final seconds = estimatedCallDurationSeconds(
+      sampledSeconds: matchesCall ? quality.durationSeconds : null,
+      sampledAt: matchesCall ? quality.capturedAt : null,
+      now: DateTime.now(),
+    );
+    return formatCallDuration(seconds);
+  }
+}
+
+class _PostDialPromptCard extends StatelessWidget {
+  const _PostDialPromptCard({
+    required this.digits,
+    required this.onSend,
+    required this.onCancel,
+  });
+
+  final String digits;
+  final VoidCallback onSend;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 420),
+      child: Material(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+          child: Row(
+            children: [
+              const Icon(Icons.pause_circle_outline_rounded),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  digits.isEmpty
+                      ? 'Continue post-dial sequence?'
+                      : 'Send $digits?',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(onPressed: onCancel, child: const Text('Cancel')),
+              FilledButton(onPressed: onSend, child: const Text('Send')),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _HeldCallCard extends StatelessWidget {
@@ -644,11 +942,13 @@ class _HeldCallCard extends StatelessWidget {
     required this.identity,
     required this.onSwap,
     required this.compact,
+    this.workflowLabel = 'On hold',
   });
 
   final CallerIdentity identity;
-  final VoidCallback onSwap;
+  final VoidCallback? onSwap;
   final bool compact;
+  final String workflowLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -688,7 +988,7 @@ class _HeldCallCard extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text('On hold', style: theme.textTheme.labelMedium),
+                      Text(workflowLabel, style: theme.textTheme.labelMedium),
                       Text(
                         identity.label,
                         maxLines: 1,
@@ -711,43 +1011,45 @@ class _HeldCallCard extends StatelessWidget {
                     ],
                   ),
                 ),
-                SizedBox(width: compact ? 6 : 12),
-                Semantics(
-                  button: true,
-                  label: 'Swap to ${identity.label}',
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primaryContainer,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: compact ? 10 : 12,
-                        vertical: 9,
+                if (onSwap != null) ...[
+                  SizedBox(width: compact ? 6 : 12),
+                  Semantics(
+                    button: true,
+                    label: 'Swap to ${identity.label}',
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primaryContainer,
+                        borderRadius: BorderRadius.circular(999),
                       ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            AppIcons.swapCalls,
-                            size: 20,
-                            color: theme.colorScheme.onPrimaryContainer,
-                          ),
-                          if (!compact) ...[
-                            const SizedBox(width: 6),
-                            Text(
-                              'Swap',
-                              style: theme.textTheme.labelLarge?.copyWith(
-                                color: theme.colorScheme.onPrimaryContainer,
-                                fontWeight: FontWeight.w700,
-                              ),
+                      child: Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: compact ? 10 : 12,
+                          vertical: 9,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              AppIcons.swapCalls,
+                              size: 20,
+                              color: theme.colorScheme.onPrimaryContainer,
                             ),
+                            if (!compact) ...[
+                              const SizedBox(width: 6),
+                              Text(
+                                'Swap',
+                                style: theme.textTheme.labelLarge?.copyWith(
+                                  color: theme.colorScheme.onPrimaryContainer,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -933,13 +1235,13 @@ class _DtmfKey extends StatelessWidget {
   const _DtmfKey({
     required this.value,
     required this.letters,
-    required this.onPressed,
+    this.onPressed,
     this.compact = false,
   });
 
   final String value;
   final String letters;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final bool compact;
 
   @override
@@ -991,7 +1293,7 @@ class _CallAction extends StatelessWidget {
     this.selected = false,
     this.compact = false,
     this.prominent = false,
-    required this.onPressed,
+    this.onPressed,
   });
 
   final IconData icon;
@@ -999,7 +1301,7 @@ class _CallAction extends StatelessWidget {
   final bool selected;
   final bool compact;
   final bool prominent;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -1023,6 +1325,11 @@ class _CallAction extends StatelessWidget {
               foregroundColor: selected
                   ? theme.colorScheme.onPrimary
                   : theme.colorScheme.onSurfaceVariant,
+              disabledBackgroundColor: AppTheme.sheetControlBackground(
+                theme.brightness,
+              ).withValues(alpha: 0.55),
+              disabledForegroundColor: theme.colorScheme.onSurfaceVariant
+                  .withValues(alpha: 0.45),
             ),
           ),
           SizedBox(height: compact ? 5 : 8),
@@ -1035,7 +1342,11 @@ class _CallAction extends StatelessWidget {
                         ? theme.textTheme.bodyMedium
                         : theme.textTheme.labelMedium)
                     ?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+                      color: onPressed == null
+                          ? theme.colorScheme.onSurfaceVariant.withValues(
+                              alpha: 0.45,
+                            )
+                          : theme.colorScheme.onSurfaceVariant,
                       letterSpacing: 0,
                     ),
             textAlign: TextAlign.center,

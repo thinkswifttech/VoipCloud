@@ -16,6 +16,7 @@ import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../features/directory/domain/directory_entry.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../shared/icons/app_icons.dart';
+import '../../../shared/platform/desktop_platform.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
@@ -85,67 +86,96 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
       scrollable: false,
       safeAreaBottom: false,
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
-      child: history.when(
-        data: (items) {
-          if (items.isEmpty) {
-            return Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
-                child: const EmptyState(
-                  framed: false,
-                  icon: AppIcons.navHistory,
-                  title: 'No calls yet',
-                  message: 'Completed calls from this device will appear here.',
+      child: Column(
+        children: [
+          if (isDesktopPlatform)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: IconButton.outlined(
+                  tooltip: 'Refresh call history',
+                  onPressed: history.isLoading
+                      ? null
+                      : () => unawaited(
+                          ref.read(callHistoryProvider.notifier).refresh(),
+                        ),
+                  icon: const Icon(AppIcons.refresh),
                 ),
               ),
-            );
-          }
-
-          return RefreshIndicator(
-            onRefresh: () => ref.read(callHistoryProvider.notifier).refresh(),
-            child: ListView.builder(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.only(bottom: 28),
-              itemCount: _listEntryCount(items),
-              itemBuilder: (context, index) {
-                final entry = _listEntryAt(items, index);
-                if (entry is _DateHeader) {
-                  return _HistoryDateHeader(label: entry.label);
+            ),
+          Expanded(
+            child: history.when(
+              data: (items) {
+                if (items.isEmpty) {
+                  return Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 360),
+                      child: const EmptyState(
+                        framed: false,
+                        icon: AppIcons.navHistory,
+                        title: 'No calls yet',
+                        message:
+                            'Completed calls from this device will appear here.',
+                      ),
+                    ),
+                  );
                 }
-                final item = (entry as _HistoryRow).item;
-                return _CallHistoryTile(
-                  item: item,
-                  party: _partyForCaller(item, contacts, quickDial, directory),
-                  onDial: (destination) {
-                    ref
-                        .read(dialerControllerProvider.notifier)
-                        .setDestination(destination);
-                    context.go(RoutePaths.dialer);
-                  },
+
+                return RefreshIndicator(
+                  onRefresh: () =>
+                      ref.read(callHistoryProvider.notifier).refresh(),
+                  child: ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.only(bottom: 28),
+                    itemCount: _listEntryCount(items),
+                    itemBuilder: (context, index) {
+                      final entry = _listEntryAt(items, index);
+                      if (entry is _DateHeader) {
+                        return _HistoryDateHeader(label: entry.label);
+                      }
+                      final item = (entry as _HistoryRow).item;
+                      return _CallHistoryTile(
+                        item: item,
+                        party: _partyForCaller(
+                          item,
+                          contacts,
+                          quickDial,
+                          directory,
+                        ),
+                        onDial: (destination) {
+                          ref
+                              .read(dialerControllerProvider.notifier)
+                              .setDestination(destination);
+                          context.go(RoutePaths.dialer);
+                        },
+                      );
+                    },
+                  ),
                 );
               },
-            ),
-          );
-        },
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) => Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 360),
-            child: EmptyState(
-              framed: false,
-              icon: AppIcons.navHistory,
-              title: 'History unavailable',
-              message:
-                  'We could not load call history. Pull to refresh and try again.',
-              action: OutlinedButton.icon(
-                onPressed: () =>
-                    ref.read(callHistoryProvider.notifier).refresh(),
-                icon: const Icon(AppIcons.refresh, size: AppIconSize.sm),
-                label: const Text('Try again'),
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (_, _) => Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: EmptyState(
+                    framed: false,
+                    icon: AppIcons.navHistory,
+                    title: 'History unavailable',
+                    message:
+                        'We could not load call history. Pull to refresh and try again.',
+                    action: OutlinedButton.icon(
+                      onPressed: () =>
+                          ref.read(callHistoryProvider.notifier).refresh(),
+                      icon: const Icon(AppIcons.refresh, size: AppIconSize.sm),
+                      label: const Text('Try again'),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }

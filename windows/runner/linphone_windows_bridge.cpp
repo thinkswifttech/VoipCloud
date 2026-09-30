@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -57,6 +58,7 @@ constexpr wchar_t kMicrophoneVolumeRegistryValue[] = L"MicrophoneVolume";
 constexpr wchar_t kCallAudioVolumeRegistryValue[] = L"CallAudioVolume";
 constexpr wchar_t kRingtoneVolumeRegistryValue[] = L"RingtoneVolume";
 constexpr wchar_t kRingbackVolumeRegistryValue[] = L"RingbackVolume";
+constexpr wchar_t kSipInstanceUuidRegistryValue[] = L"SipInstanceUuid";
 constexpr char kVoipCloudVersion[] =
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MAJOR) "."
     VOIPCLOUD_STRINGIFY(FLUTTER_VERSION_MINOR) "."
@@ -376,6 +378,7 @@ struct LinphoneAccountParams;
 struct LinphoneAccount;
 struct LinphoneCallParams;
 struct LinphoneCall;
+struct LinphoneCallLog;
 struct LinphoneEvent;
 struct LinphoneContent;
 struct LinphoneErrorInfo;
@@ -492,12 +495,37 @@ void SaveRegistryString(const wchar_t* name, const std::string& value) {
   RegCloseKey(key);
 }
 
+std::string StableSipInstanceUuid() {
+  std::string existing = LoadRegistryString(kSipInstanceUuidRegistryValue);
+  if (!existing.empty()) return existing;
+  GUID guid{};
+  if (FAILED(CoCreateGuid(&guid))) return {};
+  wchar_t buffer[40] = {};
+  if (StringFromGUID2(guid, buffer, 40) <= 0) return {};
+  std::wstring value(buffer);
+  if (value.size() >= 2 && value.front() == L'{' && value.back() == L'}') {
+    value = value.substr(1, value.size() - 2);
+  }
+  std::string generated = WideToUtf8(value);
+  std::transform(generated.begin(), generated.end(), generated.begin(),
+                 [](unsigned char value) {
+                   return static_cast<char>(std::tolower(value));
+                 });
+  SaveRegistryString(kSipInstanceUuidRegistryValue, generated);
+  return generated;
+}
+
 int LoadRegistryLevel(const wchar_t* name) {
-  DWORD value = 100;
+  const std::wstring key_name(name == nullptr ? L"" : name);
+  const int safe_default =
+      key_name == kCallAudioVolumeRegistryValue ? 70 :
+      key_name == kRingtoneVolumeRegistryValue ? 55 :
+      key_name == kRingbackVolumeRegistryValue ? 45 : 100;
+  DWORD value = static_cast<DWORD>(safe_default);
   DWORD size = sizeof(value);
   if (RegGetValueW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, name,
                    RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS) {
-    return 100;
+    return safe_default;
   }
   return std::clamp(static_cast<int>(value), 0, 100);
 }
@@ -986,6 +1014,11 @@ class LinphoneApi {
         "linphone_core_unref");
     linphone_core_iterate = LoadSymbol<void (*)(LinphoneCore*)>(
         "linphone_core_iterate");
+    linphone_core_get_config = LoadSymbol<void* (*)(LinphoneCore*)>(
+        "linphone_core_get_config");
+    linphone_config_set_string =
+        LoadSymbol<void (*)(void*, const char*, const char*, const char*)>(
+            "linphone_config_set_string");
     linphone_factory_create_core_cbs =
         LoadSymbol<LinphoneCoreCbs* (*)(LinphoneFactory*)>(
             "linphone_factory_create_core_cbs");
@@ -1153,6 +1186,15 @@ class LinphoneApi {
         "linphone_call_resume");
     linphone_call_send_dtmf = LoadSymbol<int (*)(LinphoneCall*, char)>(
         "linphone_call_send_dtmf");
+    linphone_call_transfer_to_another =
+        LoadSymbol<int (*)(LinphoneCall*, LinphoneCall*)>(
+            "linphone_call_transfer_to_another");
+    linphone_core_add_to_conference =
+        LoadSymbol<int (*)(LinphoneCore*, LinphoneCall*)>(
+            "linphone_core_add_to_conference");
+    linphone_core_remove_from_conference =
+        LoadSymbol<int (*)(LinphoneCore*, LinphoneCall*)>(
+            "linphone_core_remove_from_conference");
     linphone_call_get_remote_address =
         LoadSymbol<const LinphoneAddress* (*)(const LinphoneCall*)>(
             "linphone_call_get_remote_address");
@@ -1160,6 +1202,12 @@ class LinphoneApi {
         LoadSymbol<int (*)(const LinphoneCall*)>("linphone_call_get_state");
     linphone_call_get_dir = LoadSymbol<int (*)(const LinphoneCall*)>(
         "linphone_call_get_dir");
+    linphone_call_get_call_log =
+        LoadSymbol<const LinphoneCallLog* (*)(const LinphoneCall*)>(
+            "linphone_call_get_call_log");
+    linphone_call_log_get_start_date =
+        LoadSymbol<std::time_t (*)(const LinphoneCallLog*)>(
+            "linphone_call_log_get_start_date");
     linphone_core_set_mic_enabled = LoadSymbol<void (*)(LinphoneCore*, int)>(
         "linphone_core_set_mic_enabled");
     linphone_core_enable_mic = LoadSymbol<void (*)(LinphoneCore*, int)>(
@@ -1321,6 +1369,9 @@ class LinphoneApi {
   void (*linphone_core_stop)(LinphoneCore*) = nullptr;
   void (*linphone_core_unref)(LinphoneCore*) = nullptr;
   void (*linphone_core_iterate)(LinphoneCore*) = nullptr;
+  void* (*linphone_core_get_config)(LinphoneCore*) = nullptr;
+  void (*linphone_config_set_string)(void*, const char*, const char*,
+                                      const char*) = nullptr;
   LinphoneCoreCbs* (*linphone_factory_create_core_cbs)(LinphoneFactory*) =
       nullptr;
   void (*linphone_core_cbs_set_registration_state_changed)(
@@ -1422,10 +1473,20 @@ class LinphoneApi {
   int (*linphone_call_pause)(LinphoneCall*) = nullptr;
   int (*linphone_call_resume)(LinphoneCall*) = nullptr;
   int (*linphone_call_send_dtmf)(LinphoneCall*, char) = nullptr;
+  int (*linphone_call_transfer_to_another)(LinphoneCall*, LinphoneCall*) =
+      nullptr;
+  int (*linphone_core_add_to_conference)(LinphoneCore*, LinphoneCall*) =
+      nullptr;
+  int (*linphone_core_remove_from_conference)(LinphoneCore*, LinphoneCall*) =
+      nullptr;
   const LinphoneAddress* (*linphone_call_get_remote_address)(
       const LinphoneCall*) = nullptr;
   int (*linphone_call_get_state)(const LinphoneCall*) = nullptr;
   int (*linphone_call_get_dir)(const LinphoneCall*) = nullptr;
+  const LinphoneCallLog* (*linphone_call_get_call_log)(
+      const LinphoneCall*) = nullptr;
+  std::time_t (*linphone_call_log_get_start_date)(
+      const LinphoneCallLog*) = nullptr;
   void (*linphone_core_set_mic_enabled)(LinphoneCore*, int) = nullptr;
   void (*linphone_core_enable_mic)(LinphoneCore*, int) = nullptr;
   const char* const* (*linphone_core_get_sound_devices)(LinphoneCore*) = nullptr;
@@ -1612,6 +1673,8 @@ class LinphoneWindowsBridge::Impl {
     TraceNative("Method " + method);
     if (method == "initialize") {
       Initialize(std::move(result));
+    } else if (method == "getSipInstanceId") {
+      GetSipInstanceId(std::move(result));
     } else if (method == "configureAccount") {
       ConfigureAccount(ArgsMap(call), std::move(result));
     } else if (method == "register") {
@@ -1688,6 +1751,10 @@ class LinphoneWindowsBridge::Impl {
       result->Success();
     } else if (method == "sendDtmf") {
       SendDtmf(StringArg(ArgsMap(call), "value"), std::move(result));
+    } else if (method == "completeAttendedTransfer") {
+      CompleteAttendedTransfer(ArgsMap(call), std::move(result));
+    } else if (method == "mergeCalls") {
+      MergeCalls(ArgsMap(call), std::move(result));
     } else if (method == "sendMessage") {
       result->Error("LINPHONE_UNSUPPORTED",
                     "Windows SIP messaging is not implemented yet.");
@@ -1741,6 +1808,17 @@ class LinphoneWindowsBridge::Impl {
       if (core_ == nullptr) {
         result->Error("LINPHONE_ERROR", "Unable to create Linphone core.");
         return false;
+      }
+      sip_instance_id_ = StableSipInstanceUuid();
+      if (!sip_instance_id_.empty() &&
+          api_.linphone_core_get_config != nullptr &&
+          api_.linphone_config_set_string != nullptr) {
+        void* config = api_.linphone_core_get_config(core_);
+        if (config != nullptr) {
+          api_.linphone_config_set_string(config, "misc", "uuid",
+                                          sip_instance_id_.c_str());
+          TraceNative("EnsureReady stable SIP instance configured");
+        }
       }
       if (api_.linphone_core_set_user_agent != nullptr) {
         api_.linphone_core_set_user_agent(core_, "VoIPCloud-Windows",
@@ -2209,10 +2287,76 @@ class LinphoneWindowsBridge::Impl {
     result->Success();
   }
 
-  bool ApplyMicrophoneMuted(bool muted) {
-    if (core_ == nullptr) {
-      return false;
+  void GetSipInstanceId(std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    result->Success(sip_instance_id_.empty()
+                        ? EncodableValue()
+                        : EncodableValue(sip_instance_id_));
+  }
+
+  void CompleteAttendedTransfer(const EncodableMap& args,
+                                std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    if (api_.linphone_call_transfer_to_another == nullptr) {
+      result->Error("LINPHONE_UNSUPPORTED",
+                    "This Linphone runtime does not support attended transfer.");
+      return;
     }
+    LinphoneCall* original = FindCall(StringArg(args, "originalCallId"));
+    LinphoneCall* consultation =
+        FindCall(StringArg(args, "consultationCallId"));
+    if (original == nullptr || consultation == nullptr ||
+        original == consultation) {
+      result->Error("CALL_ENDED",
+                    "Two established calls are required for attended transfer.");
+      return;
+    }
+    if (api_.linphone_call_transfer_to_another(original, consultation) != 0) {
+      result->Error("LINPHONE_ERROR", "Attended call transfer failed.");
+      return;
+    }
+    TraceNative("Attended transfer requested");
+    result->Success();
+  }
+
+  void MergeCalls(const EncodableMap& args,
+                  std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    if (api_.linphone_core_add_to_conference == nullptr) {
+      result->Error("LINPHONE_UNSUPPORTED",
+                    "This Linphone runtime does not support local conferences.");
+      return;
+    }
+    LinphoneCall* active = FindCall(StringArg(args, "activeCallId"));
+    LinphoneCall* held = FindCall(StringArg(args, "heldCallId"));
+    if (active == nullptr || held == nullptr || active == held) {
+      result->Error("CALL_ENDED",
+                    "Two established calls are required to merge.");
+      return;
+    }
+    if (api_.linphone_core_add_to_conference(core_, active) != 0) {
+      result->Error("LINPHONE_ERROR", "Unable to create the conference.");
+      return;
+    }
+    if (api_.linphone_core_add_to_conference(core_, held) != 0) {
+      if (api_.linphone_core_remove_from_conference != nullptr) {
+        api_.linphone_core_remove_from_conference(core_, active);
+      }
+      result->Error("LINPHONE_ERROR",
+                    "Unable to add the held call to the conference.");
+      return;
+    }
+    TraceNative("Calls merged into local conference");
+    result->Success();
+  }
+
+  bool ApplyMicrophoneMuted(bool muted) {
+      if (core_ == nullptr) {
+        return false;
+      }
     if (api_.linphone_core_set_mic_enabled != nullptr) {
       api_.linphone_core_set_mic_enabled(core_, muted ? 0 : 1);
     } else if (api_.linphone_core_enable_mic != nullptr) {
@@ -3395,8 +3539,29 @@ class LinphoneWindowsBridge::Impl {
     }
     const bool terminal = state == 13 || state == 14 || state == 19;
     const std::string call_id = PointerId(call);
+    const int64_t event_at_ms = CurrentEpochMilliseconds();
+    int64_t durable_started_at_ms = 0;
+    if (api_.linphone_call_get_call_log != nullptr &&
+        api_.linphone_call_log_get_start_date != nullptr) {
+      const LinphoneCallLog* call_log = api_.linphone_call_get_call_log(call);
+      if (call_log != nullptr) {
+        const std::time_t started_at =
+            api_.linphone_call_log_get_start_date(call_log);
+        if (started_at > 0) {
+          durable_started_at_ms = static_cast<int64_t>(started_at) * 1000;
+        }
+      }
+    }
+    const auto started_at_it =
+        call_started_at_ms_
+            .try_emplace(call_id, durable_started_at_ms > 0
+                                      ? durable_started_at_ms
+                                      : event_at_ms)
+            .first;
+    const int64_t started_at_ms = started_at_it->second;
     if (terminal) {
       live_calls_.erase(call_id);
+      call_started_at_ms_.erase(call_id);
       if (active_call_ == call) active_call_ = FirstLiveCall();
       // Linphone's microphone flag belongs to the core, not an individual
       // call. Restore it after the final call so a later call never inherits
@@ -3494,6 +3659,11 @@ class LinphoneWindowsBridge::Impl {
       owner_->ClearIncomingCallNotification();
     }
     return EncodableMap{{EncodableValue("id"), EncodableValue(call_id)},
+                     {EncodableValue("startedAt"),
+                      EncodableValue(started_at_ms)},
+                     {EncodableValue("endedAt"),
+                      terminal ? EncodableValue(event_at_ms)
+                               : EncodableValue()},
                      {EncodableValue("remoteUri"), EncodableValue(remote_uri)},
                      {EncodableValue("remoteDisplayName"),
                       EncodableValue(remote_name)},
@@ -3533,12 +3703,14 @@ class LinphoneWindowsBridge::Impl {
   LinphoneAccount* account_ = nullptr;
   LinphoneCall* active_call_ = nullptr;
   std::unordered_map<std::string, LinphoneCall*> live_calls_;
+  std::unordered_map<std::string, int64_t> call_started_at_ms_;
   LinphoneCall* notified_incoming_call_ = nullptr;
   LinphoneCall* dnd_declined_incoming_call_ = nullptr;
   std::unordered_map<LinphoneEvent*,
                      std::pair<std::string, std::string>>
       presence_subscriptions_;
   std::string sip_domain_;
+  std::string sip_instance_id_;
   std::string ringtone_source_path_;
   std::string ringback_source_path_;
   std::vector<std::wstring> tone_files_;

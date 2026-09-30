@@ -7,6 +7,7 @@ import '../../../app/theme/app_theme.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_card.dart';
+import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
@@ -59,7 +60,7 @@ class ContactsScreen extends ConsumerWidget {
   }
 
   Future<void> _showAddContactSheet(BuildContext context, WidgetRef ref) {
-    return showModalBottomSheet<void>(
+    return showAppModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
@@ -72,7 +73,7 @@ class ContactsScreen extends ConsumerWidget {
     WidgetRef ref,
     Contact contact,
   ) {
-    return showModalBottomSheet<void>(
+    return showAppModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
@@ -88,7 +89,7 @@ class ContactsScreen extends ConsumerWidget {
     final phoneNumber = contact.phoneNumber.trim();
     final extension = contact.extension?.trim() ?? '';
     if (phoneNumber.isNotEmpty && extension.isNotEmpty) {
-      final destination = await showModalBottomSheet<String>(
+      final destination = await showAppModalBottomSheet<String>(
         context: context,
         showDragHandle: true,
         builder: (sheetContext) {

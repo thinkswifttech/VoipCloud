@@ -6,6 +6,13 @@ import '../domain/sip_message.dart';
 import '../domain/sip_config.dart';
 import '../domain/sip_registration_state.dart';
 
+class PostDialPrompt {
+  const PostDialPrompt({required this.callId, required this.digits});
+
+  final String callId;
+  final String digits;
+}
+
 abstract class SipService {
   Future<void> initialize(SipConfig config);
 
@@ -43,6 +50,10 @@ abstract class SipService {
 
   Stream<SipMessage> get messageStream;
 
+  PostDialPrompt? get postDialPrompt;
+
+  Stream<PostDialPrompt?> get postDialPromptStream;
+
   Future<void> makeCall(String destination);
 
   /// Silently dial the PBX-wide DND feature toggle. No in-call UI or history.
@@ -76,10 +87,10 @@ abstract class SipService {
 
   Future<void> setAudioInputDevice(String endpointId);
 
-  /// Returns VoipCloud's app-local desktop audio levels (0...100).
+  /// Returns VoipCloud's app-local audio levels (0...100).
   Future<AudioVolumeLevels> getAudioVolumeLevels();
 
-  /// Changes one app-local desktop audio level without changing system volume.
+  /// Changes one app-local audio level without changing system volume.
   Future<void> setAudioVolume(AudioVolumeKind kind, int level);
 
   /// Plays a short, local sound through the configured desktop output.
@@ -98,11 +109,42 @@ abstract class SipService {
 
   Future<void> sendDtmf(String value);
 
+  /// Continues a dial string after a `;` wait marker.
+  Future<void> continuePostDial(String callId);
+
+  /// Discards the remaining post-dial digits for [callId].
+  void cancelPostDial(String callId);
+
   Future<CallQualityInfo> getCallQuality({String? callId});
 
-  Future<void> transferCall({
+  /// Uses the PBX's in-call blind-transfer feature code (`##destination`).
+  Future<void> blindTransfer({
     required String callId,
     required String destination,
+  });
+
+  /// Holds [originalCallId] and starts a consultation call to [destination].
+  Future<void> startAttendedTransfer({
+    required String originalCallId,
+    required String destination,
+  });
+
+  /// Completes a consultation transfer using SIP REFER with Replaces.
+  Future<void> completeAttendedTransfer({
+    required String originalCallId,
+    required String consultationCallId,
+  });
+
+  /// Ends the consultation leg and restores the original held caller.
+  Future<void> cancelAttendedTransfer({
+    required String originalCallId,
+    required String consultationCallId,
+  });
+
+  /// Merges one active and one held call into a local audio conference.
+  Future<void> mergeCalls({
+    required String activeCallId,
+    required String heldCallId,
   });
 
   Future<void> sendMessage({required String destination, required String text});

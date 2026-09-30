@@ -5,9 +5,10 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../features/messages/domain/messaging_platform.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../icons/app_icons.dart';
+import 'app_modal_bottom_sheet.dart';
 
 Future<void> showHelpSupportSheet(BuildContext context) {
-  return showModalBottomSheet<void>(
+  return showAppModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,

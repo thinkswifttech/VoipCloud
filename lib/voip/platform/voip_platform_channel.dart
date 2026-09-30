@@ -62,6 +62,13 @@ class VoipPlatformChannel {
     return _channel.invokeMethod<void>('initialize');
   }
 
+  /// Returns the UUID advertised in this installation's SIP `+sip.instance`.
+  Future<String?> getSipInstanceId() async {
+    final value = await _channel.invokeMethod<String>('getSipInstanceId');
+    final normalized = value?.trim() ?? '';
+    return normalized.isEmpty ? null : normalized;
+  }
+
   Future<void> configureAccount(Map<String, Object?> account) {
     return _channel.invokeMethod<void>('configureAccount', account);
   }
@@ -300,13 +307,23 @@ class VoipPlatformChannel {
     return const {};
   }
 
-  Future<void> transferCall({
-    required String callId,
-    required String destination,
+  Future<void> completeAttendedTransfer({
+    required String originalCallId,
+    required String consultationCallId,
   }) {
-    return _channel.invokeMethod<void>('transferCall', {
-      'callId': callId,
-      'destination': destination,
+    return _channel.invokeMethod<void>('completeAttendedTransfer', {
+      'originalCallId': originalCallId,
+      'consultationCallId': consultationCallId,
+    });
+  }
+
+  Future<void> mergeCalls({
+    required String activeCallId,
+    required String heldCallId,
+  }) {
+    return _channel.invokeMethod<void>('mergeCalls', {
+      'activeCallId': activeCallId,
+      'heldCallId': heldCallId,
     });
   }
 
