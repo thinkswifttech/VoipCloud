@@ -123,7 +123,10 @@ abstract class SipService {
     required String destination,
   });
 
-  /// Holds [originalCallId] and starts a consultation call to [destination].
+  /// Confirms the original caller is held before browsing transfer targets.
+  Future<void> prepareAttendedTransfer(String originalCallId);
+
+  /// Holds [originalCallId] if needed and starts a consultation call.
   Future<void> startAttendedTransfer({
     required String originalCallId,
     required String destination,

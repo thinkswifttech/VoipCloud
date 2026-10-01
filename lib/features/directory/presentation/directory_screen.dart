@@ -424,7 +424,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
                 const SizedBox(height: 8),
                 Text(
                   attended
-                      ? 'The current caller will be placed on hold while you speak with ${entry.displayName} · $destination.'
+                      ? 'The current caller is on hold while you choose who to speak with. Call ${entry.displayName} · $destination to consult before transferring.'
                       : 'Send the PBX transfer code ##$destination for ${entry.displayName}.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,

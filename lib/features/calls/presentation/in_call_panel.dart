@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -61,6 +60,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   final _dtmfKeyboardFocus = FocusNode(debugLabel: 'in-call-dtmf-keypad');
   bool _proximityEnabled = false;
   bool _showKeypad = false;
+  bool _preparingTransfer = false;
   String _dtmfBuffer = '';
   CallQualityInfo? _quality;
   Timer? _qualityTimer;
@@ -293,8 +293,13 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             attendedSession != null &&
             heldCall?.id == attendedSession.originalCallId &&
             consultationCall != null;
-        final consultationConnected =
-            consultationCall?.status == CallStatus.active;
+        final consultationConnected = call.status == CallStatus.active;
+        final transferSession = resolveConsultationTransferSession(
+          displayedCall: call,
+          heldCall: heldCall,
+          destinationLabel: displayName,
+          session: attendedSession,
+        );
 
         final actions = <Widget>[
           _CallAction(
@@ -364,29 +369,19 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
               label: 'Attended',
               compact: compactActions,
               prominent: prominentMobileActions,
-              onPressed: () {
-                ref
-                    .read(callTransferModeProvider.notifier)
-                    .begin(
-                      kind: CallTransferKind.attended,
-                      originalCallId: call.id,
-                    );
-                context.go(RoutePaths.directory);
-              },
+              onPressed: _preparingTransfer
+                  ? null
+                  : () => unawaited(_prepareAttendedTransfer(context, call)),
             ),
-          if (attendedTransferActive)
+          if (transferSession != null && !conferenceActive)
             _CallAction(
               icon: AppIcons.callForward,
-              label: 'Complete transfer',
+              label: 'Transfer',
               compact: compactActions,
               prominent: prominentMobileActions,
               onPressed: consultationConnected
                   ? () => unawaited(
-                      _completeAttendedTransfer(
-                        context,
-                        attendedSession,
-                        consultationCall,
-                      ),
+                      _completeAttendedTransfer(context, transferSession, call),
                     )
                   : null,
             ),
@@ -406,7 +401,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             ),
           if (heldCall != null &&
               call.status == CallStatus.active &&
-              attendedSession == null)
+              !conferenceActive)
             _CallAction(
               icon: AppIcons.mergeCalls,
               label: 'Merge',
@@ -787,6 +782,39 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     }
   }
 
+  Future<void> _prepareAttendedTransfer(
+    BuildContext context,
+    VoipCall call,
+  ) async {
+    if (_preparingTransfer) return;
+    setState(() => _preparingTransfer = true);
+    final service = ref.read(sipServiceProvider);
+    try {
+      await service.prepareAttendedTransfer(call.id);
+      if (!mounted || !context.mounted) {
+        if (service.liveCalls.length == 1 &&
+            service.liveCalls.single.id == call.id &&
+            service.liveCalls.single.status == CallStatus.held) {
+          await service.resume(call.id);
+        }
+        return;
+      }
+      ref
+          .read(callTransferModeProvider.notifier)
+          .begin(kind: CallTransferKind.attended, originalCallId: call.id);
+      context.go(RoutePaths.directory);
+    } catch (_) {
+      if (!mounted || !context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Unable to hold the caller. Please try again.'),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _preparingTransfer = false);
+    }
+  }
+
   Future<void> _completeAttendedTransfer(
     BuildContext context,
     AttendedTransferSession session,
@@ -848,6 +876,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       await ref
           .read(sipServiceProvider)
           .mergeCalls(activeCallId: activeCall.id, heldCallId: heldCall.id);
+      ref.read(attendedTransferSessionProvider.notifier).clear();
       messenger.showSnackBar(
         const SnackBar(content: Text('Calls merged into a conference.')),
       );
@@ -1357,9 +1386,8 @@ class _CallAction extends StatelessWidget {
   }
 }
 
-/// Keeps the same app-owned audio icon on every platform. On iOS a transparent,
-/// non-subclassed AVRoutePickerView is the actual tap target, so Apple owns the
-/// output list and route transition while Flutter owns only the artwork.
+/// Opens the shared audio sheet on every platform. The iOS system route picker
+/// lives inside that sheet alongside the call-volume controls.
 class _AudioRouteAction extends StatelessWidget {
   const _AudioRouteAction({
     required this.route,
@@ -1375,62 +1403,6 @@ class _AudioRouteAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      final theme = Theme.of(context);
-      final selected = route != AudioOutputRoute.earpiece;
-      final buttonSize = compact ? 54.0 : (prominent ? 76.0 : 64.0);
-      final itemWidth = compact ? 66.0 : (prominent ? 88.0 : 76.0);
-      return SizedBox(
-        width: itemWidth,
-        child: Column(
-          children: [
-            SizedBox.square(
-              dimension: buttonSize,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  IgnorePointer(
-                    child: IconButton(
-                      tooltip: 'Audio',
-                      onPressed: () {},
-                      icon: Icon(
-                        _audioRouteIcon(route),
-                        size: prominent ? 30 : null,
-                      ),
-                      style: IconButton.styleFrom(
-                        fixedSize: Size.square(buttonSize),
-                        backgroundColor: selected
-                            ? theme.colorScheme.primary
-                            : AppTheme.sheetControlBackground(theme.brightness),
-                        foregroundColor: selected
-                            ? theme.colorScheme.onPrimary
-                            : theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  const UiKitView(viewType: 'voipcloud/audio_route_picker'),
-                ],
-              ),
-            ),
-            SizedBox(height: compact ? 5 : 8),
-            Text(
-              'Audio',
-              maxLines: 1,
-              style:
-                  (prominent
-                          ? theme.textTheme.bodyMedium
-                          : theme.textTheme.labelMedium)
-                      ?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        letterSpacing: 0,
-                      ),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      );
-    }
-
     return _CallAction(
       icon: _audioRouteIcon(route),
       label: 'Audio',

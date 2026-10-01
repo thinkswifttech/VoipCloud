@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "flutter_window.h"
+#include "startup_directory.h"
 #include "utils.h"
 
 namespace {
@@ -56,6 +57,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   const bool start_hidden =
       std::find(command_line_arguments.begin(), command_line_arguments.end(),
                 "--background") != command_line_arguments.end();
+
+  if (!UseExecutableWorkingDirectory()) {
+    OutputDebugStringW(L"VoipCloud: unable to establish startup directory.\n");
+    if (!start_hidden) {
+      MessageBoxW(nullptr,
+                  L"VoipCloud could not access its installation folder. "
+                  L"Please repair or reinstall the application.",
+                  L"VoipCloud could not start", MB_OK | MB_ICONERROR);
+    }
+    return EXIT_FAILURE;
+  }
 
   HANDLE single_instance_mutex =
       CreateMutex(nullptr, TRUE, kSingleInstanceMutexName);

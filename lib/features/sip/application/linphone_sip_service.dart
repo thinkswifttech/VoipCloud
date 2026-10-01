@@ -887,12 +887,10 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> startAttendedTransfer({
-    required String originalCallId,
-    required String destination,
-  }) async {
+  Future<void> prepareAttendedTransfer(String originalCallId) async {
     final original = _knownCalls[originalCallId];
-    if (original == null || original.status != CallStatus.active) {
+    if (original == null ||
+        !{CallStatus.active, CallStatus.held}.contains(original.status)) {
       throw const VoipException(
         message: 'Attended transfer requires an active original call',
         userMessage: 'The original call is no longer available.',
@@ -906,12 +904,20 @@ class LinphoneSipService implements SipService {
       );
     }
 
-    await hold(originalCallId);
+    if (original.status == CallStatus.active) await hold(originalCallId);
     await _waitForCallStatus(
       originalCallId,
       (status) => status == CallStatus.held,
       operation: 'hold the original caller',
     );
+  }
+
+  @override
+  Future<void> startAttendedTransfer({
+    required String originalCallId,
+    required String destination,
+  }) async {
+    await prepareAttendedTransfer(originalCallId);
     try {
       await makeCall(destination);
     } catch (_) {

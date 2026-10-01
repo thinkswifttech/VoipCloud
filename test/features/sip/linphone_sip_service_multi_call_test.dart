@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:phone_app/core/config/sip_transport.dart';
 import 'package:phone_app/features/call_history/domain/call_history_item.dart';
 import 'package:phone_app/features/call_history/domain/call_history_repository.dart';
 import 'package:phone_app/features/calls/domain/call_direction.dart';
 import 'package:phone_app/features/calls/domain/call_status.dart';
+import 'package:phone_app/features/calls/presentation/call_session_providers.dart';
 import 'package:phone_app/features/sip/application/linphone_sip_service.dart';
 import 'package:phone_app/features/sip/domain/sip_config.dart';
 import 'package:phone_app/voip/platform/voip_platform_channel.dart';
@@ -177,6 +179,71 @@ void main() {
         CallStatus.held,
       );
     });
+
+    test('holds before choosing an attended-transfer destination', () async {
+      platform.emitCall(_event('original', 'active', direction: 'incoming'));
+      await _flushEvents();
+      await service.prepareAttendedTransfer('original');
+      expect(platform.actions, ['hold:original']);
+      expect(service.liveCalls.single.status, CallStatus.held);
+
+      await service.startAttendedTransfer(
+        originalCallId: 'original',
+        destination: '211',
+      );
+      expect(platform.actions, ['hold:original', 'call:211']);
+    });
+
+    test('preparing an already held caller does not hold twice', () async {
+      platform.emitCall(_event('original', 'held', direction: 'incoming'));
+      await _flushEvents();
+      await service.prepareAttendedTransfer('original');
+      expect(platform.actions, isEmpty);
+    });
+
+    test('does not prepare a transfer when another call is open', () async {
+      platform.emitCall(_event('original', 'active', direction: 'incoming'));
+      platform.emitCall(_event('other', 'ringing'));
+      await _flushEvents();
+      await expectLater(
+        service.prepareAttendedTransfer('original'),
+        throwsA(anything),
+      );
+      expect(platform.actions, isEmpty);
+    });
+
+    test('cancelling target selection resumes the original caller', () async {
+      platform.emitCall(_event('original', 'held', direction: 'incoming'));
+      await _flushEvents();
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      final controller = container.read(callTransferModeProvider.notifier);
+      controller.begin(
+        kind: CallTransferKind.attended,
+        originalCallId: 'original',
+      );
+      await controller.cancelSelection(service);
+      expect(platform.actions, ['resume:original']);
+      expect(container.read(callTransferModeProvider), isNull);
+    });
+
+    test(
+      'cancelling selection does not resume over a new incoming call',
+      () async {
+        platform.emitCall(_event('original', 'held', direction: 'incoming'));
+        platform.emitCall(_event('waiting', 'ringing'));
+        await _flushEvents();
+        final container = ProviderContainer();
+        addTearDown(container.dispose);
+        final controller = container.read(callTransferModeProvider.notifier);
+        controller.begin(
+          kind: CallTransferKind.attended,
+          originalCallId: 'original',
+        );
+        await controller.cancelSelection(service);
+        expect(platform.actions, isEmpty);
+      },
+    );
 
     test('completes attended transfer using the two exact calls', () async {
       platform.emitCall(_event('original', 'held', direction: 'incoming'));

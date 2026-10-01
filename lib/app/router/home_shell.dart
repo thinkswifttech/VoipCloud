@@ -105,7 +105,11 @@ class HomeShell extends ConsumerWidget {
           void selectDestination(int next) {
             if (next < 0 || next >= navigationPaths.length) return;
             if (transferMode && navigationPaths[next] != RoutePaths.directory) {
-              ref.read(callTransferModeProvider.notifier).clear();
+              unawaited(
+                ref
+                    .read(callTransferModeProvider.notifier)
+                    .cancelSelection(ref.read(sipServiceProvider)),
+              );
             }
             context.go(navigationPaths[next]);
           }
@@ -121,7 +125,9 @@ class HomeShell extends ConsumerWidget {
                               // Cancel transfer only — never end the active call.
                               ref
                                   .read(callTransferModeProvider.notifier)
-                                  .clear();
+                                  .cancelSelection(
+                                    ref.read(sipServiceProvider),
+                                  );
                               context.go(RoutePaths.dialer);
                             },
                             icon: const Icon(AppIcons.close),

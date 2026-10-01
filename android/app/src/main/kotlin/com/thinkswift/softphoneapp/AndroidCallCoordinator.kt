@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Process-wide authority for Android call lifecycle and audio routing.
@@ -105,6 +106,7 @@ internal object AndroidCallCoordinator {
         val finished: CompletableDeferred<Unit> = CompletableDeferred(),
         var telecomJob: Job? = null,
         var timeoutJob: Job? = null,
+        var holdJob: Job? = null,
         var outgoingReady: ((Result<Unit>) -> Unit)? = null
     )
 
@@ -298,18 +300,10 @@ internal object AndroidCallCoordinator {
         onReady: (Result<Unit>) -> Unit
     ) {
         initialize(context)
-        val current = preferredSession()
-        if (current != null) {
-            if (!current.snapshot.isTerminal) {
-                onReady(Result.failure(IllegalStateException("Another call is already active.")))
-                return
-            }
-            // Never retain dial intent past the initiating user action. A
-            // delayed coroutine here can place an unexpected call long after
-            // the user dismissed the error or left the dialer.
-            onReady(Result.failure(IllegalStateException(
-                "The previous call is still closing. Please try again."
-            )))
+        val peers = managedSessions()
+        val rejection = OutgoingCallAdmission.rejection(peers.map { it.snapshot.state })
+        if (rejection != null) {
+            onReady(Result.failure(IllegalStateException(rejection)))
             return
         }
         val id = UUID.randomUUID().toString()
@@ -340,16 +334,34 @@ internal object AndroidCallCoordinator {
             finishFallback(context, "telecom_unavailable", newSession)
             return
         }
-        val unavailableReason = telecomUnavailableReason(context, Direction.OUTGOING)
-        if (unavailableReason != null) {
-            Log.w(TAG, "Outgoing Telecom preflight rejected reason=$unavailableReason")
-            onReady(Result.failure(IllegalStateException(
-                "Android Telecom cannot start this call right now."
-            )))
-            finishFallback(context, unavailableReason, newSession)
-            return
+        scope.launch {
+            // SIP's held event reaches Flutter before Core-Telecom necessarily
+            // finishes setInactive. Await that transition, bounded to this user
+            // action, instead of testing platform capacity while it is still active.
+            val heldReady = withTimeoutOrNull(5_000L) {
+                peers.forEach { it.holdJob?.join() }
+                true
+            } == true
+            if (!owns(newSession) || newSession.snapshot.isTerminal) return@launch
+            val peerRejection = OutgoingCallAdmission.rejection(
+                managedSessions().filter { it !== newSession }.map { it.snapshot.state }
+            )
+            val unavailableReason = if (!heldReady) "telecom_hold_timeout"
+                else if (peerRejection != null) "peer_call_not_held"
+                else telecomUnavailableReason(context, Direction.OUTGOING)
+            if (unavailableReason != null) {
+                Log.w(TAG, "Outgoing Telecom preflight rejected reason=$unavailableReason")
+                newSession.outgoingReady?.also {
+                    newSession.outgoingReady = null
+                    it(Result.failure(IllegalStateException(
+                        peerRejection ?: "Android Telecom cannot start this call right now."
+                    )))
+                }
+                finishFallback(context, unavailableReason, newSession)
+                return@launch
+            }
+            addToTelecom(context, newSession)
         }
-        addToTelecom(context, newSession)
     }
 
     /**
@@ -631,7 +643,7 @@ internal object AndroidCallCoordinator {
                 }
                 logControlResult("active", target, result)
             }
-            State.HELD -> scope.launch {
+            State.HELD -> target.holdJob = scope.launch {
                 if (target.pendingSystemActive == true) {
                     if (LinphoneBridgeAccessor.resume(context, target.snapshot.sipCallId)) {
                         target.pendingSystemActive = null

@@ -10,7 +10,7 @@ void main() {
   });
 
   test('deleted conversation markers survive controller recreation', () async {
-    final deletedAt = DateTime.utc(2026, 9, 1, 13, 30);
+    final deletedAt = DateTime.now().toUtc().subtract(const Duration(days: 1));
     await MessagingDeletionStore(storage).mark(
       inboxId: 'inbox-a',
       remoteNumber: '+14165550123',
@@ -24,16 +24,17 @@ void main() {
 
   test('markers are isolated by inbox and can be removed', () async {
     final store = MessagingDeletionStore(storage);
+    final deletedAt = DateTime.now().toUtc().subtract(const Duration(days: 1));
     await Future.wait([
       store.mark(
         inboxId: 'inbox-a',
         remoteNumber: '+14165550123',
-        deletedAt: DateTime.utc(2026, 9, 1, 13, 30),
+        deletedAt: deletedAt,
       ),
       store.mark(
         inboxId: 'inbox-b',
         remoteNumber: '+14165550124',
-        deletedAt: DateTime.utc(2026, 9, 1, 13, 31),
+        deletedAt: deletedAt.add(const Duration(minutes: 1)),
       ),
     ]);
 

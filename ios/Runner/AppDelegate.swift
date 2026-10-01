@@ -440,7 +440,7 @@ final class ExternalCommunicationIntentBridge {
 }
 
 /// Hosts Apple's supported output-route picker without subclassing or
-/// traversing its private view hierarchy. Flutter draws the app's audio icon;
+/// traversing its private view hierarchy. Flutter draws the sheet's route icon;
 /// the transparent AVRoutePickerView above it remains the native tap target.
 private final class SoftphoneAudioRoutePlatformView: NSObject, FlutterPlatformView {
   private let routePicker: AVRoutePickerView

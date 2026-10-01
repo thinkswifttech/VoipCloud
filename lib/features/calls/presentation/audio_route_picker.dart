@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/audio_output_route.dart';
 import '../domain/audio_volume_levels.dart';
+import '../domain/call_status.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_modal_bottom_sheet.dart';
@@ -21,7 +22,11 @@ Future<void> showAudioRoutePicker({
   final messenger = ScaffoldMessenger.of(context);
 
   // Don't block the sheet on the Bluetooth permission prompt.
-  unawaited(service.ensureBluetoothPermission());
+  if ((!choosingDefaults && Platform.isAndroid) ||
+      Platform.isWindows ||
+      Platform.isMacOS) {
+    unawaited(service.ensureBluetoothPermission());
+  }
 
   if (!context.mounted) {
     return;
@@ -68,15 +73,21 @@ class _AudioRoutePickerSheetState
   AudioVolumeLevels? _volumeLevels;
   bool _volumeLoadFailed = false;
 
+  bool get _showDeviceList =>
+      !(Platform.isAndroid || Platform.isIOS) ||
+      (!widget.choosingDefaults && !Platform.isIOS);
+
   @override
   void initState() {
     super.initState();
-    unawaited(_reloadRoutes());
+    if (_showDeviceList) unawaited(_reloadRoutes());
     unawaited(_loadVolumeLevels());
     // Refresh while open so Bluetooth connect/disconnect appears live.
-    _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      unawaited(_reloadRoutes(silent: true));
-    });
+    if (_showDeviceList) {
+      _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        unawaited(_reloadRoutes(silent: true));
+      });
+    }
   }
 
   @override
@@ -124,9 +135,6 @@ class _AudioRoutePickerSheetState
       // Settings volume controls do not depend on route discovery. Keep the
       // sheet open so a temporary Bluetooth/audio-route failure cannot hide
       // the mobile safety controls.
-      if (!widget.choosingDefaults) {
-        Navigator.of(context).maybePop();
-      }
     } finally {
       _reloadInFlight = false;
     }
@@ -167,7 +175,10 @@ class _AudioRoutePickerSheetState
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Audio',
+                  widget.choosingDefaults &&
+                          (Platform.isAndroid || Platform.isIOS)
+                      ? 'Audio settings'
+                      : 'Audio',
                   style: Theme.of(context).textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w700,
                     letterSpacing: 0,
@@ -175,7 +186,10 @@ class _AudioRoutePickerSheetState
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  hasSeparateDevices
+                  widget.choosingDefaults &&
+                          (Platform.isAndroid || Platform.isIOS)
+                      ? 'Adjust call audio, alerts, and ringing.'
+                      : hasSeparateDevices
                       ? widget.choosingDefaults
                             ? 'Choose the speaker and microphone VoipCloud uses.'
                             : 'Choose a speaker and microphone for this call.'
@@ -185,12 +199,14 @@ class _AudioRoutePickerSheetState
                   ),
                 ),
                 const SizedBox(height: 8),
-                if (_loading && outputs == null)
+                if (Platform.isIOS && !widget.choosingDefaults)
+                  const _IosSystemAudioOutput(),
+                if (_showDeviceList && _loading && outputs == null)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 24),
                     child: Center(child: CircularProgressIndicator()),
                   )
-                else if (outputs != null) ...[
+                else if (_showDeviceList && outputs != null) ...[
                   if (hasSeparateDevices)
                     const _AudioDeviceSectionLabel('Speaker'),
                   for (final option in outputs)
@@ -310,6 +326,11 @@ class _AudioRoutePickerSheetState
                   if (_volumeLevels case final levels?)
                     _DesktopVolumeControls(
                       levels: levels,
+                      callControlsOnly: !widget.choosingDefaults,
+                      showRingback:
+                          widget.choosingDefaults ||
+                          liveCall?.status == CallStatus.dialing ||
+                          liveCall?.status == CallStatus.connecting,
                       onChanged: _changeVolume,
                       onChangeEnd: _commitVolume,
                     )
@@ -355,12 +376,6 @@ class _AudioRoutePickerSheetState
         );
       }
       if (!mounted) return;
-      if (option.direction == AudioDeviceDirection.output &&
-          !Platform.isWindows &&
-          !Platform.isMacOS) {
-        Navigator.of(context).pop();
-        return;
-      }
       setState(() => _selectingDeviceKey = null);
       await _reloadRoutes(silent: true);
     } catch (_) {
@@ -412,14 +427,57 @@ class _AudioRoutePickerSheetState
   }
 }
 
+/// Apple owns the route list; our sheet owns the adjacent volume controls.
+/// The supported native view remains the actual touch target.
+class _IosSystemAudioOutput extends StatelessWidget {
+  const _IosSystemAudioOutput();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        children: [
+          const Expanded(
+            child: ListTile(
+              title: Text('Audio output'),
+              subtitle: Text('Change speaker, headphones, or Bluetooth'),
+            ),
+          ),
+          SizedBox.square(
+            dimension: 48,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                IgnorePointer(
+                  child: IconButton.outlined(
+                    tooltip: 'Change audio output',
+                    onPressed: () {},
+                    icon: const Icon(Icons.speaker_rounded),
+                  ),
+                ),
+                const UiKitView(viewType: 'voipcloud/audio_route_picker'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _DesktopVolumeControls extends StatelessWidget {
   const _DesktopVolumeControls({
     required this.levels,
     required this.onChanged,
     required this.onChangeEnd,
+    this.callControlsOnly = false,
+    this.showRingback = true,
   });
 
   final AudioVolumeLevels levels;
+  final bool callControlsOnly;
+  final bool showRingback;
   final void Function(AudioVolumeKind kind, double value) onChanged;
   final void Function(AudioVolumeKind kind, double value) onChangeEnd;
 
@@ -444,7 +502,7 @@ class _DesktopVolumeControls extends StatelessWidget {
           onChanged: (value) => onChanged(AudioVolumeKind.callAudio, value),
           onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.callAudio, value),
         ),
-        if (!Platform.isIOS)
+        if (!callControlsOnly && !Platform.isIOS)
           _VolumeSlider(
             icon: Icons.notifications_active_rounded,
             label: 'Incoming call ringtone',
@@ -454,15 +512,17 @@ class _DesktopVolumeControls extends StatelessWidget {
             onChangeEnd: (value) =>
                 onChangeEnd(AudioVolumeKind.ringtone, value),
           ),
-        _VolumeSlider(
-          icon: Icons.call_outlined,
-          label: 'Outgoing ringback',
-          description: 'Ringing you hear while the other phone rings',
-          value: levels.ringback,
-          onChanged: (value) => onChanged(AudioVolumeKind.ringback, value),
-          onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.ringback, value),
-        ),
-        if (Platform.isAndroid)
+        if (showRingback)
+          _VolumeSlider(
+            icon: Icons.call_outlined,
+            label: 'Outgoing ringback',
+            description: 'Ringing you hear while the other phone rings',
+            value: levels.ringback,
+            onChanged: (value) => onChanged(AudioVolumeKind.ringback, value),
+            onChangeEnd: (value) =>
+                onChangeEnd(AudioVolumeKind.ringback, value),
+          ),
+        if (!callControlsOnly && Platform.isAndroid)
           _VolumeSlider(
             icon: Icons.add_ic_call_rounded,
             label: 'Call waiting alert',
@@ -471,25 +531,6 @@ class _DesktopVolumeControls extends StatelessWidget {
             onChanged: (value) => onChanged(AudioVolumeKind.callWaiting, value),
             onChangeEnd: (value) =>
                 onChangeEnd(AudioVolumeKind.callWaiting, value),
-          ),
-        if (Platform.isIOS)
-          const Column(
-            children: [
-              ListTile(
-                leading: Icon(Icons.phone_iphone_rounded),
-                title: Text('Incoming ringtone'),
-                subtitle: Text(
-                  'iPhone call ringing follows the system Ringer & Alerts volume.',
-                ),
-              ),
-              ListTile(
-                leading: Icon(Icons.add_ic_call_rounded),
-                title: Text('Call waiting alert'),
-                subtitle: Text(
-                  'While a call is active, iPhone uses the system in-call volume for the waiting alert.',
-                ),
-              ),
-            ],
           ),
       ],
     );

@@ -35,7 +35,11 @@ class ReturnToCallBar extends ConsumerWidget {
       call: call!,
       label: identity.label,
       onReturn: () {
-        ref.read(callTransferModeProvider.notifier).clear();
+        unawaited(
+          ref
+              .read(callTransferModeProvider.notifier)
+              .cancelSelection(ref.read(sipServiceProvider)),
+        );
         context.go(RoutePaths.dialer);
       },
     );

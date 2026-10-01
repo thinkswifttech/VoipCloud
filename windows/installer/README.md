@@ -21,6 +21,11 @@ Windows resources. Both are selected by default:
 - start VoipCloud in the notification area when the current user signs in to
   Windows.
 
+Before initializing Flutter or the SIP SDK, the executable sets its working
+directory to its own installation folder. MSI completion, Windows sign-in, and
+update relaunches must not depend on an inherited installer/system directory;
+native SDK resource initialization can otherwise abort before a window appears.
+
 The completed page presents the standard preselected **Launch VoipCloud**
 checkbox. Launching from that page also displays the app-owned, dismissible
 taskbar pin offer. Install-time properties are marked secure so desktop and
