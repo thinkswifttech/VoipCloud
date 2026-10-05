@@ -10,6 +10,7 @@ import '../../../core/files/downloads_saver.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../features/directory/domain/directory_entry.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
+import '../../../features/directory/presentation/directory_presence_providers.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/empty_state.dart';
@@ -17,6 +18,7 @@ import '../data/device_contacts_repository.dart';
 import '../domain/contact.dart';
 import '../domain/quick_dial_csv.dart';
 import '../domain/quick_dial_entry.dart';
+import '../domain/quick_dial_presence.dart';
 import 'contacts_providers.dart';
 import 'quick_dial_providers.dart';
 
@@ -26,6 +28,12 @@ class QuickDialPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final quickDial = ref.watch(quickDialProvider);
+    final directStates =
+        ref.watch(quickDialLivePresenceProvider).asData?.value ??
+        const <String, DirectoryPresence>{};
+    final directory =
+        ref.watch(liveDirectoryProvider).asData?.value ??
+        const <DirectoryEntry>[];
 
     return quickDial.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -101,13 +109,15 @@ class QuickDialPanel extends ConsumerWidget {
                   separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final entry = entries[index];
-                    final canEdit = entry.source != QuickDialSource.directory;
                     return _QuickDialTile(
                       entry: entry,
+                      presence: quickDialPresence(
+                        entry,
+                        directory,
+                        directStates: directStates,
+                      ),
                       onCall: () => _callEntry(context, ref, entry),
-                      onEdit: canEdit
-                          ? () => _showEditSheet(context, ref, entry)
-                          : null,
+                      onEdit: () => _showEditSheet(context, ref, entry),
                       onRemove: () => _confirmRemove(context, ref, entry),
                     );
                   },
@@ -242,6 +252,7 @@ class QuickDialPanel extends ConsumerWidget {
             sourceId: entry.sourceId,
             photoBytes: byId[entry.sourceId!]!.photo,
             createdAt: entry.createdAt,
+            showBlf: entry.showBlf,
           )
         else
           entry,
@@ -325,19 +336,31 @@ class QuickDialPanel extends ConsumerWidget {
     if (confirmed != true || !context.mounted) {
       return;
     }
-    await ref.read(quickDialProvider.notifier).remove(entry.id);
+    try {
+      await ref.read(quickDialProvider.notifier).remove(entry.id);
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not remove this Quick Dial contact.'),
+          ),
+        );
+      }
+    }
   }
 }
 
 class _QuickDialTile extends StatelessWidget {
   const _QuickDialTile({
     required this.entry,
+    required this.presence,
     required this.onCall,
     required this.onEdit,
     required this.onRemove,
   });
 
   final QuickDialEntry entry;
+  final DirectoryPresence? presence;
   final VoidCallback onCall;
   final VoidCallback? onEdit;
   final VoidCallback onRemove;
@@ -357,7 +380,20 @@ class _QuickDialTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 10),
           child: Row(
             children: [
-              _QuickDialAvatar(entry: entry),
+              Stack(
+                children: [
+                  _QuickDialAvatar(entry: entry),
+                  if (presence != null)
+                    Positioned(
+                      top: 0,
+                      right: 0,
+                      child: _QuickDialBlfBadge(
+                        key: ValueKey('quick-dial-blf-${entry.id}'),
+                        presence: presence!,
+                      ),
+                    ),
+                ],
+              ),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -436,6 +472,47 @@ class _QuickDialTile extends StatelessWidget {
 }
 
 enum _QuickDialAction { edit, remove }
+
+class _QuickDialBlfBadge extends StatelessWidget {
+  const _QuickDialBlfBadge({required this.presence, super.key});
+
+  final DirectoryPresence presence;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (presence) {
+      DirectoryPresence.available => ('Available', const Color(0xFF16A34A)),
+      DirectoryPresence.busy => ('On a call', const Color(0xFFDC2626)),
+      DirectoryPresence.ringing => ('Ringing', const Color(0xFFF59E0B)),
+      DirectoryPresence.unregistered => ('Offline', const Color(0xFF9CA3AF)),
+      DirectoryPresence.unknown => (
+        'Status unavailable',
+        const Color(0xFF9CA3AF),
+      ),
+    };
+    return Semantics(
+      label: 'BLF status: $label',
+      child: ExcludeSemantics(
+        child: Tooltip(
+          message: label,
+          child: Container(
+            width: 14,
+            height: 14,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              // Separate the badge from photos and initials in both themes.
+              border: Border.all(
+                color: Theme.of(context).colorScheme.surface,
+                width: 2,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _QuickDialAvatar extends StatelessWidget {
   const _QuickDialAvatar({required this.entry});
@@ -1020,6 +1097,7 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
   Uint8List? _photoBytes;
   var _clearPhoto = false;
   var _saving = false;
+  var _showBlf = false;
 
   @override
   void initState() {
@@ -1028,6 +1106,7 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
     _nameController = TextEditingController(text: entry?.displayName ?? '');
     _numberController = TextEditingController(text: entry?.number ?? '');
     _photoBytes = entry?.photoBytes;
+    _showBlf = entry?.showBlf ?? false;
   }
 
   @override
@@ -1041,6 +1120,7 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isEditing = widget.entry != null;
+    final isDirectory = widget.entry?.source == QuickDialSource.directory;
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return Padding(
@@ -1103,18 +1183,41 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
               textInputAction: TextInputAction.next,
               onTapOutside: (_) =>
                   FocusManager.instance.primaryFocus?.unfocus(),
-              decoration: const InputDecoration(labelText: 'Display name'),
+              decoration: InputDecoration(
+                labelText: 'Display name',
+                helperText: isDirectory
+                    ? 'Changes apply only to Quick Dial, not the directory.'
+                    : null,
+                helperMaxLines: 2,
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _numberController,
+              readOnly: isDirectory,
               keyboardType: TextInputType.phone,
               textInputAction: TextInputAction.done,
               onTapOutside: (_) =>
                   FocusManager.instance.primaryFocus?.unfocus(),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Phone number or extension',
+                helperText: isDirectory
+                    ? 'Directory extension cannot be changed.'
+                    : null,
               ),
+            ),
+            const SizedBox(height: 12),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Show BLF status'),
+              subtitle: const Text(
+                'Request status for an extension on your PBX, even if it is not '
+                'in the directory. Unsupported numbers show status unavailable.',
+              ),
+              value: _showBlf,
+              onChanged: _saving
+                  ? null
+                  : (value) => setState(() => _showBlf = value),
             ),
             const SizedBox(height: 20),
             FilledButton(
@@ -1175,6 +1278,7 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
           displayName: name,
           number: number,
           source: QuickDialSource.custom,
+          showBlf: _showBlf,
           photoBytes: _photoBytes,
         );
       } else {
@@ -1184,6 +1288,7 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
           number: number,
           photoBytes: _photoBytes,
           clearPhoto: _clearPhoto && _photoBytes == null,
+          showBlf: _showBlf,
         );
       }
       if (!mounted) {

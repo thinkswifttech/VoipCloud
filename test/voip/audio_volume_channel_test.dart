@@ -63,4 +63,31 @@ void main() {
     expect(levels.ringback, 0);
     expect(levels.callWaiting, AudioVolumeLevels.defaults.callWaiting);
   });
+
+  test('waiting preview sends the selected bounded level', () async {
+    const channel = MethodChannel('voipcloud/test_waiting_preview');
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null),
+    );
+    const platform = VoipPlatformChannel(channel: channel);
+    await platform.previewCallWaitingAlert(25);
+    await platform.previewCallWaitingAlert(-1);
+    await platform.previewCallWaitingAlert(120);
+    expect(
+      calls.map((call) => call.method),
+      everyElement('previewCallWaitingAlert'),
+    );
+    expect(calls.map((call) => call.arguments), [
+      {'level': 25},
+      {'level': 0},
+      {'level': 100},
+    ]);
+  });
 }

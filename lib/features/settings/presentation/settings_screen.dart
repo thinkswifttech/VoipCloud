@@ -24,6 +24,7 @@ import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import 'liblinphone_attribution.dart';
 import 'settings_controller.dart';
+import 'windows_always_on_top_tile.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -141,7 +142,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         : 'Audio settings',
                     subtitle: Platform.isWindows || Platform.isMacOS
                         ? 'Choose devices and adjust call sounds'
-                        : 'Adjust call audio, alerts, and ringing',
+                        : 'Adjust call waiting alert',
                     trailing: IconButton(
                       tooltip: Platform.isWindows || Platform.isMacOS
                           ? 'Choose audio devices'
@@ -243,6 +244,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ],
               const SizedBox(height: 16),
               cards[2],
+              if (Platform.isWindows) ...[
+                const SizedBox(height: 16),
+                const AppCard(
+                  title: 'Window',
+                  child: WindowsAlwaysOnTopTile(),
+                ),
+              ],
               const SizedBox(height: 16),
               cards[3],
               const SizedBox(height: 16),

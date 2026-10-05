@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1403,13 +1404,23 @@ class _AudioRouteAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _CallAction(
+    final action = _CallAction(
       icon: _audioRouteIcon(route),
       label: 'Audio',
       selected: route != AudioOutputRoute.earpiece,
       compact: compact,
       prominent: prominent,
       onPressed: onPressed,
+    );
+    if (!Platform.isIOS) return action;
+    // Apple's public picker is the direct tap target, not a second sheet.
+    return Stack(
+      children: [
+        IgnorePointer(child: action),
+        const Positioned.fill(
+          child: UiKitView(viewType: 'voipcloud/audio_route_picker'),
+        ),
+      ],
     );
   }
 }

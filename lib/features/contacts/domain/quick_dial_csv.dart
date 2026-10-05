@@ -6,7 +6,8 @@ import 'quick_dial_entry.dart';
 class QuickDialCsvCodec {
   const QuickDialCsvCodec._();
 
-  static const header = 'displayName,number,source,sourceId,photoBase64';
+  static const header =
+      'displayName,number,source,sourceId,photoBase64,showBlf';
 
   static String encode(List<QuickDialEntry> entries) {
     final buffer = StringBuffer(header)..writeln();
@@ -19,6 +20,7 @@ class QuickDialCsvCodec {
           _escape(entry.source.name),
           _escape(entry.sourceId ?? ''),
           _escape(photo == null || photo.isEmpty ? '' : base64Encode(photo)),
+          entry.showBlf.toString(),
         ].join(','),
       );
     }
@@ -76,6 +78,13 @@ class QuickDialCsvCodec {
           number: number.replaceAll(RegExp(r'\s+'), ''),
           source: source,
           sourceId: sourceId.isEmpty ? null : sourceId,
+          showBlf: fields.length > 5
+              ? switch (fields[5].trim().toLowerCase()) {
+                  'true' => true,
+                  'false' => false,
+                  _ => null,
+                }
+              : null,
           photoBytes: photo,
           createdAt: now.add(Duration(microseconds: i)),
         ),

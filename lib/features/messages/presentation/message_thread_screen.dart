@@ -108,6 +108,10 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final messagesById = {for (final message in messages) message.id: message};
     final desktopInteractions = isSupportedDesktopPlatform();
     final isBlocked = messaging.isBlocked(widget.remoteNumber);
+    final canReplyToRemote = ref
+        .read(messagesControllerProvider.notifier)
+        .destinationForRaw(widget.remoteNumber)
+        .isNotEmpty;
     final draftText = _outboundText(_controller.text.trim(), _replyingTo);
     final smsSegments = _attachment == null && draftText.isNotEmpty
         ? messaging.outboundSmsUsesIndependentParts
@@ -137,6 +141,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       }
     }
     final canAddContact =
+        canReplyToRemote &&
         savedContact == null &&
         contactsState.hasValue &&
         identity.number.isNotEmpty &&
@@ -202,7 +207,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
             ),
           ),
           actions: [
-            if (identity.number.isNotEmpty)
+            if (identity.number.isNotEmpty && canReplyToRemote)
               IconButton(
                 tooltip: 'Call ${identity.label}',
                 onPressed: () => _openDialer(identity.number),
@@ -214,31 +219,33 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                 onPressed: () => unawaited(_refreshConversation()),
                 icon: const Icon(Icons.refresh),
               ),
-            PopupMenuButton<_ThreadAction>(
-              tooltip: 'Conversation options',
-              icon: const Icon(AppIcons.moreVertical),
-              onSelected: (action) =>
-                  _handleThreadAction(action, isBlocked, identity.number),
-              itemBuilder: (_) => [
-                if (canAddContact)
-                  const PopupMenuItem(
-                    value: _ThreadAction.addContact,
-                    child: ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.person_add_alt_1_outlined),
-                      title: Text('Add to contacts'),
+            if (canReplyToRemote)
+              PopupMenuButton<_ThreadAction>(
+                tooltip: 'Conversation options',
+                icon: const Icon(AppIcons.moreVertical),
+                onSelected: (action) =>
+                    _handleThreadAction(action, isBlocked, identity.number),
+                itemBuilder: (_) => [
+                  if (canAddContact)
+                    const PopupMenuItem(
+                      value: _ThreadAction.addContact,
+                      child: ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.person_add_alt_1_outlined),
+                        title: Text('Add to contacts'),
+                      ),
                     ),
-                  ),
-                PopupMenuItem(
-                  value: isBlocked
-                      ? _ThreadAction.unblock
-                      : _ThreadAction.block,
-                  child: Text(
-                    isBlocked ? 'Unblock messages' : 'Block messages',
-                  ),
-                ),
-              ],
-            ),
+                  if (canReplyToRemote)
+                    PopupMenuItem(
+                      value: isBlocked
+                          ? _ThreadAction.unblock
+                          : _ThreadAction.block,
+                      child: Text(
+                        isBlocked ? 'Unblock messages' : 'Block messages',
+                      ),
+                    ),
+                ],
+              ),
           ],
         ),
         body: CallbackShortcuts(
@@ -400,6 +407,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                               onPressed:
                                   messaging.canSendMms &&
                                       !isBlocked &&
+                                      canReplyToRemote &&
                                       !_isSending
                                   ? _chooseAttachmentSource
                                   : null,
@@ -435,12 +443,15 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                                   enabled:
                                       messaging.canSend &&
                                       !isBlocked &&
+                                      canReplyToRemote &&
                                       !_isSending,
                                   minLines: 1,
                                   maxLines: 5,
                                   textInputAction: TextInputAction.newline,
                                   decoration: InputDecoration(
-                                    hintText: isBlocked
+                                    hintText: !canReplyToRemote
+                                        ? 'Replies are unavailable for this sender'
+                                        : isBlocked
                                         ? 'Messaging is blocked for this number'
                                         : messaging.canSend
                                         ? 'Message'
@@ -475,6 +486,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                               onPressed:
                                   messaging.canSend &&
                                       !isBlocked &&
+                                      canReplyToRemote &&
                                       !_isSending &&
                                       !exceedsSmsLimit
                                   ? _send
@@ -1032,6 +1044,12 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
   }
 
   Future<void> _send() async {
+    if (ref
+        .read(messagesControllerProvider.notifier)
+        .destinationForRaw(widget.remoteNumber)
+        .isEmpty) {
+      return;
+    }
     final typedText = _controller.text.trim();
     final reply = _replyingTo;
     final text = _outboundText(typedText, reply);

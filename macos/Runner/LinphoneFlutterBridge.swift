@@ -10,6 +10,42 @@ import UserNotifications
 import linphonesw
 #endif
 
+#if canImport(linphonesw)
+/// Matches mobile: original 440 Hz / 400 ms tone, 25 ms soft edges.
+private enum DesktopWaitingTonePolicy {
+  static func wave(level: Int) -> Data {
+    let sampleRate = 8_000
+    let count = sampleRate
+    var wave = Data()
+    wave.append(contentsOf: "RIFF".utf8)
+    wave.appendLittleEndian(UInt32(36 + count * 2))
+    wave.append(contentsOf: "WAVEfmt ".utf8)
+    wave.appendLittleEndian(UInt32(16))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt32(sampleRate))
+    wave.appendLittleEndian(UInt32(sampleRate * 2))
+    wave.appendLittleEndian(UInt16(2))
+    wave.appendLittleEndian(UInt16(16))
+    wave.append(contentsOf: "data".utf8)
+    wave.appendLittleEndian(UInt32(count * 2))
+    let amplitude = 0.08 * Double(min(100, max(0, level))) / 100
+    for index in 0..<count {
+      let time = Double(index) / Double(sampleRate)
+      var sample: Int16 = 0
+      if time < 0.4 {
+        let ramp = max(0, min(1, min(time / 0.025, (0.4 - time) / 0.025)))
+        let envelope = 0.5 - 0.5 * cos(.pi * ramp)
+        sample = Int16(sin(2 * .pi * 440 * time) * amplitude * envelope * 32767)
+      }
+      wave.appendLittleEndian(sample)
+    }
+    return wave
+  }
+}
+
+#endif
+
 private enum DesktopDndStore {
   static let key = "device_dnd_enabled"
 
@@ -321,6 +357,7 @@ private enum DesktopAudioVolumeStore {
   static let callAudioKey = "voipcloud_call_audio_volume"
   static let ringtoneKey = "voipcloud_ringtone_volume"
   static let ringbackKey = "voipcloud_ringback_volume"
+  static let waitingKey = "voipcloud_call_waiting_volume"
 
   static func level(for key: String) -> Int {
     guard UserDefaults.standard.object(forKey: key) != nil else {
@@ -328,6 +365,7 @@ private enum DesktopAudioVolumeStore {
       case callAudioKey: return 70
       case ringtoneKey: return 55
       case ringbackKey: return 45
+      case waitingKey: return 30
       default: return 100
       }
     }
@@ -393,6 +431,7 @@ private final class UnavailableLinphoneController: LinphoneController {
          "getAudioVolumeLevels",
          "setAudioVolume",
          "playAudioTestSound",
+         "previewCallWaitingAlert",
          "startAudioInputTest",
          "getAudioInputLevel",
          "stopAudioInputTest",
@@ -424,6 +463,8 @@ private final class NativeLinphoneController: LinphoneController {
   private let presenceEvents: LinphoneEventStreamHandler
 
   private var core: Core?
+  private var waitingAlertTimer: Timer?
+  private var waitingPreviewPlayer: AVAudioPlayer?
   private var account: Account?
   private var delegate: CoreDelegateStub?
   private var calls: [String: Call] = [:]
@@ -573,6 +614,22 @@ private final class NativeLinphoneController: LinphoneController {
         ))
       case "getAudioVolumeLevels":
         result(audioVolumeLevels())
+      case "previewCallWaitingAlert":
+        guard findCurrentCall() == nil else {
+          result(FlutterError(code: "AUDIO_TEST_BUSY", message: "Finish all calls before previewing the alert.", details: nil))
+          return
+        }
+        let args = call.arguments as? [String: Any] ?? [:]
+        let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue ?? 30))
+        waitingPreviewPlayer?.stop()
+        let player = try AVAudioPlayer(data: DesktopWaitingTonePolicy.wave(level: level))
+        player.numberOfLoops = 0
+        waitingPreviewPlayer = player
+        guard player.play() else {
+          throw NSError(domain: "VoIPCloud", code: 1404,
+            userInfo: [NSLocalizedDescriptionKey: "Unable to play the alert preview."])
+        }
+        result(nil)
       case "setAudioVolume":
         try setAudioVolume(call: call)
         result(nil)
@@ -666,12 +723,18 @@ private final class NativeLinphoneController: LinphoneController {
     newCore.avpfMode = .Disabled
     configureDesktopCallSounds(on: newCore)
     restoreAudioVolumes(on: newCore)
+    // Never use the SDK's unattenuated synthesized waiting fallback.
+    let waitingTone = try waitingAlertFile(level: DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.waitingKey))
+    newCore.setTone(toneId: .CallWaiting, audiofile: waitingTone.path)
 
     let newDelegate = CoreDelegateStub(
       onCallStateChanged: { [weak self] _, call, state, message in
         guard let self else { return }
+        self.waitingPreviewPlayer?.stop()
+        self.waitingPreviewPlayer = nil
         let id = self.callId(call)
         self.calls[id] = call
+        self.reconcileWaitingAlert()
         let featureKey = ObjectIdentifier(call)
         if self.pendingFeatureCodeDial {
           self.featureCodeCalls.insert(featureKey)
@@ -752,6 +815,48 @@ private final class NativeLinphoneController: LinphoneController {
     delegate = newDelegate
     restorePreferredAudioDevices()
     registrationEvents.send(["status": "unregistered", "message": nil])
+  }
+
+  private func waitingAlertFile(level: Int) throws -> URL {
+    let directory = try FileManager.default.url(for: .applicationSupportDirectory,
+      in: .userDomainMask, appropriateFor: nil, create: true)
+      .appendingPathComponent("VoipCloud/Audio", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let file = directory.appendingPathComponent("call-waiting-v1-\(level).wav")
+    let expected = DesktopWaitingTonePolicy.wave(level: level)
+    if (try? Data(contentsOf: file)) != expected { try expected.write(to: file, options: .atomic) }
+    return file
+  }
+
+  private var shouldRepeatWaitingAlert: Bool {
+    let current = core?.calls ?? []
+    return current.contains { $0.state == .IncomingReceived || $0.state == .IncomingEarlyMedia } &&
+      current.contains { $0.state == .Connected || $0.state == .StreamsRunning }
+  }
+
+  private func reconcileWaitingAlert() {
+    guard shouldRepeatWaitingAlert else {
+      waitingAlertTimer?.invalidate()
+      waitingAlertTimer = nil
+      return
+    }
+    guard waitingAlertTimer == nil else { return }
+    let timer = Timer(timeInterval: 5, repeats: true) { [weak self] timer in
+      guard let self, self.shouldRepeatWaitingAlert, let currentCore = self.core else {
+        timer.invalidate()
+        self?.waitingAlertTimer = nil
+        return
+      }
+      let level = DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.waitingKey)
+      guard level > 0 else { return }
+      do {
+        try currentCore.playLocal(audiofile: self.waitingAlertFile(level: level).path)
+      } catch {
+        NSLog("VoipCloud/Audio waiting alert repeat failed")
+      }
+    }
+    waitingAlertTimer = timer
+    RunLoop.main.add(timer, forMode: .common)
   }
 
   private func playAudioTestSound() throws {
@@ -1524,7 +1629,8 @@ private final class NativeLinphoneController: LinphoneController {
       ),
       "ringback": DesktopAudioVolumeStore.level(
         for: DesktopAudioVolumeStore.ringbackKey
-      )
+      ),
+      "callWaiting": DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.waitingKey)
     ]
   }
 
@@ -1717,6 +1823,10 @@ private final class NativeLinphoneController: LinphoneController {
     case "ringback":
       try applyRingbackVolume(on: currentCore, level: level)
       DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.ringbackKey)
+    case "callWaiting":
+      let tone = try waitingAlertFile(level: level)
+      currentCore.setTone(toneId: .CallWaiting, audiofile: tone.path)
+      DesktopAudioVolumeStore.set(level, for: DesktopAudioVolumeStore.waitingKey)
     default:
       throw NSError(
         domain: "VoIPCloud",
@@ -2011,7 +2121,19 @@ private final class NativeLinphoneController: LinphoneController {
     ])
   }
 
+  private func findCallStrict(id: String) -> Call? {
+    guard !id.isEmpty else { return nil }
+    if let call = calls[id], !isTerminalCallState(call.state) { return call }
+    return core?.calls.first(where: {
+      !isTerminalCallState($0.state) && callId($0) == id
+    })
+  }
+
   private func dispose() {
+    waitingPreviewPlayer?.stop()
+    waitingPreviewPlayer = nil
+    waitingAlertTimer?.invalidate()
+    waitingAlertTimer = nil
     stopAudioInputTest()
     stopPresenceSubscriptions()
     if let delegate {
@@ -2076,13 +2198,6 @@ private extension Data {
     }
   }
 
-  private func findCallStrict(id: String) -> Call? {
-    guard !id.isEmpty else { return nil }
-    if let call = calls[id], !isTerminalCallState(call.state) { return call }
-    return core?.calls.first(where: {
-      !isTerminalCallState($0.state) && callId($0) == id
-    })
-  }
 }
 
 private func normalizeSipAddress(_ value: String) -> String {

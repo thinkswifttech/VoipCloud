@@ -36,6 +36,7 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
     required QuickDialSource source,
     String? sourceId,
     Uint8List? photoBytes,
+    bool? showBlf,
   }) async {
     final normalizedNumber = _normalizeNumber(number);
     if (normalizedNumber.isEmpty) {
@@ -59,6 +60,7 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
       sourceId: sourceId,
       photoBytes: photoBytes,
       createdAt: DateTime.now(),
+      showBlf: showBlf,
     );
     final next = [...current, entry];
     await ref.read(quickDialRepositoryProvider).saveEntries(next);
@@ -72,6 +74,7 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
     required String number,
     Uint8List? photoBytes,
     bool clearPhoto = false,
+    bool? showBlf,
   }) async {
     final normalizedNumber = _normalizeNumber(number);
     if (normalizedNumber.isEmpty) {
@@ -87,8 +90,9 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
     if (index < 0) {
       throw StateError('Quick dial entry not found');
     }
-    if (current[index].source == QuickDialSource.directory) {
-      throw StateError('Directory Quick Dial entries cannot be edited');
+    if (current[index].source == QuickDialSource.directory &&
+        normalizedNumber != current[index].number) {
+      throw StateError('A directory Quick Dial extension cannot be changed');
     }
     if (_hasNumber(current, normalizedNumber, excludingId: id)) {
       throw QuickDialDuplicateException(normalizedNumber);
@@ -99,6 +103,7 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
       number: normalizedNumber,
       photoBytes: photoBytes,
       clearPhoto: clearPhoto,
+      showBlf: showBlf,
     );
     current[index] = updated;
     await ref.read(quickDialRepositoryProvider).saveEntries(current);
@@ -111,6 +116,17 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
     final next = current.where((entry) => entry.id != id).toList();
     await ref.read(quickDialRepositoryProvider).saveEntries(next);
     state = AsyncData(next);
+  }
+
+  Future<void> setBlfVisibility(String id, bool visible) async {
+    final current = [...(state.asData?.value ?? await future)];
+    final index = current.indexWhere((entry) => entry.id == id);
+    if (index < 0) throw StateError('Quick dial entry not found');
+    current[index] = current[index].copyWith(showBlf: visible);
+    final saved = await ref
+        .read(quickDialRepositoryProvider)
+        .saveEntries(current);
+    state = AsyncData(saved);
   }
 
   /// Imports entries, skipping numbers that already exist.
@@ -152,6 +168,7 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
           number: number,
           source: candidate.source,
           sourceId: candidate.sourceId,
+          showBlf: candidate.showBlf,
           photoBytes: candidate.photoBytes,
           createdAt: DateTime.now().add(Duration(microseconds: i)),
         ),

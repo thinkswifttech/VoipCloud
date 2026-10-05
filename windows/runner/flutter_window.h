@@ -3,6 +3,7 @@
 
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
+#include <flutter/method_channel.h>
 
 #include <memory>
 #include <shellapi.h>
@@ -31,6 +32,8 @@ class FlutterWindow : public Win32Window {
  private:
   void RestoreWindowBounds();
   void SaveWindowBounds();
+  void RestoreAlwaysOnTop();
+  void InitializeWindowChannel();
   void AddTrayIcon();
   void RemoveTrayIcon();
   void ShowAndActivate();
@@ -45,6 +48,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<TaskbarPinBridge> taskbar_pin_bridge_;
   std::unique_ptr<WindowsUpdateBridge> windows_update_bridge_;
   std::unique_ptr<WindowsEmailBridge> windows_email_bridge_;
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> window_channel_;
   NOTIFYICONDATA tray_icon_{};
   bool tray_icon_added_ = false;
   bool quitting_ = false;

@@ -12,7 +12,8 @@ class QuickDialEntry {
     required this.createdAt,
     this.sourceId,
     this.photoBytes,
-  });
+    bool? showBlf,
+  }) : showBlf = showBlf ?? source == QuickDialSource.directory;
 
   final String id;
   final String displayName;
@@ -21,12 +22,14 @@ class QuickDialEntry {
   final String? sourceId;
   final Uint8List? photoBytes;
   final DateTime createdAt;
+  final bool showBlf;
 
   QuickDialEntry copyWith({
     String? displayName,
     String? number,
     Uint8List? photoBytes,
     bool clearPhoto = false,
+    bool? showBlf,
   }) {
     return QuickDialEntry(
       id: id,
@@ -36,6 +39,7 @@ class QuickDialEntry {
       sourceId: sourceId,
       photoBytes: clearPhoto ? null : photoBytes ?? this.photoBytes,
       createdAt: createdAt,
+      showBlf: showBlf ?? this.showBlf,
     );
   }
 
@@ -46,6 +50,7 @@ class QuickDialEntry {
       'number': number,
       'source': source.name,
       'sourceId': sourceId,
+      'showBlf': showBlf,
       'photoBase64': photoBytes == null ? null : base64Encode(photoBytes!),
       'createdAt': createdAt.toIso8601String(),
     };
@@ -74,6 +79,7 @@ class QuickDialEntry {
         orElse: () => QuickDialSource.custom,
       ),
       sourceId: _nullableString(json['sourceId']),
+      showBlf: json['showBlf'] is bool ? json['showBlf'] as bool : null,
       photoBytes: photo,
       createdAt:
           DateTime.tryParse(_string(json['createdAt'])) ?? DateTime.now(),

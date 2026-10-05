@@ -45,6 +45,7 @@ class LocalQuickDialRepository {
       );
     } catch (error) {
       AppLogger.warning('Quick dial write skipped', data: error);
+      rethrow; // Do not report a preference saved when persistence failed.
     }
     return limited;
   }

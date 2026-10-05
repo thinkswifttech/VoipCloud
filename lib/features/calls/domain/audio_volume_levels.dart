@@ -23,6 +23,14 @@ class AudioVolumeLevels {
   final int ringback;
   final int callWaiting;
 
+  int levelFor(AudioVolumeKind kind) => switch (kind) {
+    AudioVolumeKind.microphone => microphone,
+    AudioVolumeKind.callAudio => callAudio,
+    AudioVolumeKind.ringtone => ringtone,
+    AudioVolumeKind.ringback => ringback,
+    AudioVolumeKind.callWaiting => callWaiting,
+  };
+
   AudioVolumeLevels copyWith({
     int? microphone,
     int? callAudio,

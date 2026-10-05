@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/audio_output_route.dart';
+import '../application/reset_audio_volumes.dart';
 import '../domain/audio_volume_levels.dart';
-import '../domain/call_status.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_modal_bottom_sheet.dart';
@@ -72,6 +72,9 @@ class _AudioRoutePickerSheetState
   Timer? _volumeCommitTimer;
   AudioVolumeLevels? _volumeLevels;
   bool _volumeLoadFailed = false;
+  bool _resettingVolumes = false;
+  bool _previewingWaitingAlert = false;
+  Future<void> _volumeWrites = Future<void>.value();
 
   bool get _showDeviceList =>
       !(Platform.isAndroid || Platform.isIOS) ||
@@ -81,7 +84,9 @@ class _AudioRoutePickerSheetState
   void initState() {
     super.initState();
     if (_showDeviceList) unawaited(_reloadRoutes());
-    unawaited(_loadVolumeLevels());
+    if (widget.choosingDefaults || !(Platform.isAndroid || Platform.isIOS)) {
+      unawaited(_loadVolumeLevels());
+    }
     // Refresh while open so Bluetooth connect/disconnect appears live.
     if (_showDeviceList) {
       _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -188,7 +193,8 @@ class _AudioRoutePickerSheetState
                 Text(
                   widget.choosingDefaults &&
                           (Platform.isAndroid || Platform.isIOS)
-                      ? 'Adjust call audio, alerts, and ringing.'
+                      ? 'Adjust call-waiting alerts. '
+                            'Use your phone’s volume controls for calls and incoming ringing.'
                       : hasSeparateDevices
                       ? widget.choosingDefaults
                             ? 'Choose the speaker and microphone VoipCloud uses.'
@@ -264,6 +270,7 @@ class _AudioRoutePickerSheetState
                         if (_volumeLevels case final levels?)
                           _DesktopVolumeControls(
                             levels: levels,
+                            enabled: !_resettingVolumes,
                             onChanged: _changeVolume,
                             onChangeEnd: _commitVolume,
                           )
@@ -319,18 +326,15 @@ class _AudioRoutePickerSheetState
                     ],
                   ],
                 ],
-                if (Platform.isAndroid || Platform.isIOS) ...[
+                if (widget.choosingDefaults &&
+                    (Platform.isAndroid || Platform.isIOS)) ...[
                   const Divider(),
                   const _AudioDeviceSectionLabel('Volume'),
                   const _AudioSafetyNotice(),
                   if (_volumeLevels case final levels?)
                     _DesktopVolumeControls(
                       levels: levels,
-                      callControlsOnly: !widget.choosingDefaults,
-                      showRingback:
-                          widget.choosingDefaults ||
-                          liveCall?.status == CallStatus.dialing ||
-                          liveCall?.status == CallStatus.connecting,
+                      enabled: !_resettingVolumes,
                       onChanged: _changeVolume,
                       onChangeEnd: _commitVolume,
                     )
@@ -350,6 +354,48 @@ class _AudioRoutePickerSheetState
                       ),
                     ),
                 ],
+                if (widget.choosingDefaults && _volumeLevels != null) ...[
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.volume_up_outlined),
+                      label: const Text('Preview call waiting alert'),
+                      onPressed:
+                          liveCall != null ||
+                              _resettingVolumes ||
+                              _previewingWaitingAlert
+                          ? null
+                          : () => unawaited(_previewWaitingAlert()),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      liveCall != null
+                          ? 'Finish all calls to preview the alert.'
+                          : 'One short beep at the selected level. Device volume and audio output also affect loudness.',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+                if (widget.choosingDefaults)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                    child: OutlinedButton.icon(
+                      onPressed: _volumeLevels == null || _resettingVolumes
+                          ? null
+                          : () => unawaited(_resetVolumeDefaults()),
+                      icon: _resettingVolumes
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.restore_rounded),
+                      label: Text(
+                        _resettingVolumes ? 'Resetting…' : 'Reset to defaults',
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -390,6 +436,7 @@ class _AudioRoutePickerSheetState
   }
 
   void _changeVolume(AudioVolumeKind kind, double value) {
+    if (_resettingVolumes) return;
     final current = _volumeLevels;
     if (current == null) return;
     final level = value.round().clamp(0, 100);
@@ -410,19 +457,88 @@ class _AudioRoutePickerSheetState
   }
 
   void _commitVolume(AudioVolumeKind kind, double value) {
+    if (_resettingVolumes) return;
     _volumeCommitTimer?.cancel();
     unawaited(_saveVolume(kind, value.round().clamp(0, 100)));
   }
 
-  Future<void> _saveVolume(AudioVolumeKind kind, int level) async {
+  Future<void> _saveVolume(AudioVolumeKind kind, int level) {
+    // Serialize slider writes so an older request cannot overwrite a reset.
+    final service = ref.read(sipServiceProvider);
+    _volumeWrites = _volumeWrites.then((_) async {
+      try {
+        await service.setAudioVolume(kind, level);
+      } catch (_) {
+        if (!mounted) return;
+        widget.messenger.showSnackBar(
+          const SnackBar(content: Text('Unable to save that volume level.')),
+        );
+        await _loadVolumeLevels();
+      }
+    });
+    return _volumeWrites;
+  }
+
+  Future<void> _resetVolumeDefaults() async {
+    if (_resettingVolumes) return;
+    _volumeCommitTimer?.cancel();
+    final service = ref.read(sipServiceProvider);
+    setState(() => _resettingVolumes = true);
     try {
-      await ref.read(sipServiceProvider).setAudioVolume(kind, level);
-    } catch (_) {
-      if (!mounted) return;
-      widget.messenger.showSnackBar(
-        const SnackBar(content: Text('Unable to save that volume level.')),
+      await _volumeWrites;
+      await resetAudioVolumes(
+        save: service.setAudioVolume,
+        mobileControlsOnly: Platform.isAndroid || Platform.isIOS,
       );
-      await _loadVolumeLevels();
+      if (mounted) {
+        widget.messenger.showSnackBar(
+          const SnackBar(content: Text('Audio levels reset to defaults.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        widget.messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Some audio levels could not be reset. Please try again.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      // Read the actual persisted levels, including a partially failed reset.
+      if (mounted) {
+        await _loadVolumeLevels();
+        if (mounted) setState(() => _resettingVolumes = false);
+      }
+    }
+  }
+
+  Future<void> _previewWaitingAlert() async {
+    if (_previewingWaitingAlert || _volumeLevels == null) return;
+    _volumeCommitTimer?.cancel();
+    final level = _volumeLevels!.callWaiting;
+    setState(() => _previewingWaitingAlert = true);
+    try {
+      // Serialize with slider writes; preview the displayed value, without
+      // relying on an older persisted value or changing the system mixer.
+      await _volumeWrites;
+      final service = ref.read(sipServiceProvider);
+      await service.setAudioVolume(AudioVolumeKind.callWaiting, level);
+      await service.previewCallWaitingAlert(level);
+      await Future<void>.delayed(const Duration(seconds: 1));
+    } catch (_) {
+      if (mounted) {
+        widget.messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Unable to preview the alert. Finish all calls and try again.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _previewingWaitingAlert = false);
     }
   }
 }
@@ -471,68 +587,73 @@ class _DesktopVolumeControls extends StatelessWidget {
     required this.levels,
     required this.onChanged,
     required this.onChangeEnd,
-    this.callControlsOnly = false,
-    this.showRingback = true,
+    this.enabled = true,
   });
 
   final AudioVolumeLevels levels;
-  final bool callControlsOnly;
-  final bool showRingback;
+  final bool enabled;
   final void Function(AudioVolumeKind kind, double value) onChanged;
   final void Function(AudioVolumeKind kind, double value) onChangeEnd;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _VolumeSlider(
-          icon: Icons.mic_rounded,
-          label: 'Microphone',
-          description: 'How loudly other people hear you',
-          value: levels.microphone,
-          onChanged: (value) => onChanged(AudioVolumeKind.microphone, value),
-          onChangeEnd: (value) =>
-              onChangeEnd(AudioVolumeKind.microphone, value),
-        ),
-        _VolumeSlider(
-          icon: Icons.headphones_rounded,
-          label: 'Call audio',
-          description: 'Speaker or headset volume during calls',
-          value: levels.callAudio,
-          onChanged: (value) => onChanged(AudioVolumeKind.callAudio, value),
-          onChangeEnd: (value) => onChangeEnd(AudioVolumeKind.callAudio, value),
-        ),
-        if (!callControlsOnly && !Platform.isIOS)
-          _VolumeSlider(
-            icon: Icons.notifications_active_rounded,
-            label: 'Incoming call ringtone',
-            description: 'Ringing volume before you answer',
-            value: levels.ringtone,
-            onChanged: (value) => onChanged(AudioVolumeKind.ringtone, value),
-            onChangeEnd: (value) =>
-                onChangeEnd(AudioVolumeKind.ringtone, value),
-          ),
-        if (showRingback)
-          _VolumeSlider(
-            icon: Icons.call_outlined,
-            label: 'Outgoing ringback',
-            description: 'Ringing you hear while the other phone rings',
-            value: levels.ringback,
-            onChanged: (value) => onChanged(AudioVolumeKind.ringback, value),
-            onChangeEnd: (value) =>
-                onChangeEnd(AudioVolumeKind.ringback, value),
-          ),
-        if (!callControlsOnly && Platform.isAndroid)
+    return AbsorbPointer(
+      absorbing: !enabled,
+      child: Column(
+        children: [
+          if (!(Platform.isAndroid || Platform.isIOS)) ...[
+            _VolumeSlider(
+              icon: Icons.mic_rounded,
+              label: 'Microphone',
+              description: 'How loudly other people hear you',
+              value: levels.microphone,
+              onChanged: (value) =>
+                  onChanged(AudioVolumeKind.microphone, value),
+              onChangeEnd: (value) =>
+                  onChangeEnd(AudioVolumeKind.microphone, value),
+            ),
+            _VolumeSlider(
+              icon: Icons.headphones_rounded,
+              label: 'Call audio',
+              description: 'Speaker or headset volume during calls',
+              value: levels.callAudio,
+              onChanged: (value) => onChanged(AudioVolumeKind.callAudio, value),
+              onChangeEnd: (value) =>
+                  onChangeEnd(AudioVolumeKind.callAudio, value),
+            ),
+          ],
+          if (!(Platform.isAndroid || Platform.isIOS))
+            _VolumeSlider(
+              icon: Icons.notifications_active_rounded,
+              label: 'Incoming call ringtone',
+              description: 'Ringing volume before you answer',
+              value: levels.ringtone,
+              onChanged: (value) => onChanged(AudioVolumeKind.ringtone, value),
+              onChangeEnd: (value) =>
+                  onChangeEnd(AudioVolumeKind.ringtone, value),
+            ),
+          if (!(Platform.isAndroid || Platform.isIOS))
+            _VolumeSlider(
+              icon: Icons.call_outlined,
+              label: 'Outgoing ringback',
+              description: 'Ringing you hear while the other phone rings',
+              value: levels.ringback,
+              onChanged: (value) => onChanged(AudioVolumeKind.ringback, value),
+              onChangeEnd: (value) =>
+                  onChangeEnd(AudioVolumeKind.ringback, value),
+            ),
           _VolumeSlider(
             icon: Icons.add_ic_call_rounded,
             label: 'Call waiting alert',
-            description: 'Alert heard while another call is active',
+            description:
+                'Repeating beeps during calls; changes apply to the next beep',
             value: levels.callWaiting,
             onChanged: (value) => onChanged(AudioVolumeKind.callWaiting, value),
             onChangeEnd: (value) =>
                 onChangeEnd(AudioVolumeKind.callWaiting, value),
           ),
-      ],
+        ],
+      ),
     );
   }
 }

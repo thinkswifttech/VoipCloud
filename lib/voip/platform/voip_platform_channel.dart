@@ -280,6 +280,12 @@ class VoipPlatformChannel {
     return _channel.invokeMethod<void>('playAudioTestSound');
   }
 
+  Future<void> previewCallWaitingAlert(int level) {
+    return _channel.invokeMethod<void>('previewCallWaitingAlert', {
+      'level': level.clamp(0, 100),
+    });
+  }
+
   Future<void> startAudioInputTest() {
     return _channel.invokeMethod<void>('startAudioInputTest');
   }

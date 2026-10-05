@@ -1,58 +1,59 @@
-# Flutter and Dart
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.packages
-.pub-cache/
-.pub/
-build/
-coverage/
-**/doc/api/
-
-# IDE and operating-system files
-.idea/
-.vscode/
-*.iml
+# Miscellaneous
+*.class
+*.log
+*.pyc
 *.swp
 .DS_Store
-
-# Generated platform files
-android/.gradle/
-android/app/debug/
-android/app/profile/
-android/app/release/
-android/build/
-ios/Flutter/.last_build_id
-ios/Pods/
-ios/.symlinks/
-macos/Flutter/ephemeral/
-linux/flutter/ephemeral/
-windows/flutter/ephemeral/
-
-# Signing material and local credentials
-android/key.properties
-*.jks
-*.keystore
-*.p12
-*.pem
-*.mobileprovision
-
-# Project-specific service configuration
-android/app/google-services.json
-ios/Runner/GoogleService-Info.plist
-macos/Runner/GoogleService-Info.plist
-.env
-.env.*
-!.env.example
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+.codex-doc-edit/
+docs-update-staging/
+tool/
+tools/
 /config/dev.json
 /config/production.json
+/server_staging
+/store_release
+/ops
+/server
 
-# Locally supplied Linphone SDK binaries
-windows/third_party/linphone/linphone-sdk/
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
 
-# Logs and release outputs
-*.log
-*.symbols
-*.map.json
-store_release/
-server_staging/
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Local build configuration
+/config/dev.json
+/config/production.json

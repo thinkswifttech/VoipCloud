@@ -39,6 +39,49 @@ void main() {
       await platform.close();
     });
 
+    test('DND dials *76 twice and never enters call UI or history', () async {
+      for (var index = 0; index < 2; index++) {
+        await service.syncPbxDndToggle();
+        platform.emitCall({
+          'id': 'feature-dnd',
+          'direction': 'outgoing',
+          'status': 'dialing',
+          'featureCode': true,
+        });
+        await _flushEvents();
+        expect(service.activeCall, isNull);
+        expect(service.liveCalls, isEmpty);
+        platform.emitCall({
+          'id': 'feature-dnd',
+          'direction': 'outgoing',
+          'status': 'ended',
+          'featureCode': true,
+        });
+        await _flushEvents();
+      }
+      expect(platform.actions, ['feature:*76', 'feature:*76']);
+      expect(history.items, isEmpty);
+    });
+
+    test('DND feature dial waits for the current call to end', () async {
+      platform.emitCall(_event('conversation', 'active'));
+      await _flushEvents();
+      await service.syncPbxDndToggle();
+      expect(platform.actions, isEmpty);
+      platform.emitCall(_event('conversation', 'ended'));
+      await _flushEvents();
+      expect(platform.actions, ['feature:*76']);
+      platform.emitCall({
+        'id': 'feature-dnd',
+        'direction': 'outgoing',
+        'status': 'ended',
+        'featureCode': true,
+      });
+      await _flushEvents();
+      expect(history.items, hasLength(1));
+      expect(history.items.single.id, 'conversation');
+    });
+
     test('holds the active call before answering a waiting call', () async {
       platform.emitCall(_event('first', 'active', direction: 'outgoing'));
       platform.emitCall(_event('second', 'ringing'));
@@ -684,6 +727,12 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   Future<void> makeCall(String destination) async {
     actions.add('call:$destination');
     emitCall(_event('outgoing-$destination', 'dialing', direction: 'outgoing'));
+  }
+
+  @override
+  Future<String?> dialFeatureCode(String code) async {
+    actions.add('feature:$code');
+    return 'feature-dnd';
   }
 
   @override

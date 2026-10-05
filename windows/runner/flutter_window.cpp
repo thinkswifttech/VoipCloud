@@ -2,6 +2,7 @@
 
 #include <shellapi.h>
 #include <windows.h>
+#include <flutter/standard_method_codec.h>
 
 #include <algorithm>
 #include <optional>
@@ -19,6 +20,17 @@ constexpr wchar_t kActivateExistingMessageName[] =
 constexpr wchar_t kWindowStateRegistryPath[] =
     L"Software\\ThinkSwift\\VoipCloud";
 constexpr wchar_t kWindowBoundsRegistryValue[] = L"WindowBounds";
+constexpr wchar_t kAlwaysOnTopRegistryValue[] = L"AlwaysOnTop";
+
+bool IsAlwaysOnTop(HWND window) {
+  return (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+}
+
+bool ApplyAlwaysOnTop(HWND window, bool enabled) {
+  return SetWindowPos(window, enabled ? HWND_TOPMOST : HWND_NOTOPMOST,
+                      0, 0, 0, 0,
+                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) != FALSE;
+}
 constexpr LONG kMinimumWindowWidth = 480;
 constexpr LONG kMinimumWindowHeight = 640;
 
@@ -45,6 +57,7 @@ bool FlutterWindow::OnCreate() {
   }
 
   RestoreWindowBounds();
+  RestoreAlwaysOnTop();
 
   RECT frame = GetClientArea();
 
@@ -57,6 +70,7 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  InitializeWindowChannel();
   linphone_bridge_ = std::make_unique<LinphoneWindowsBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
   taskbar_pin_bridge_ = std::make_unique<TaskbarPinBridge>(
@@ -85,6 +99,7 @@ bool FlutterWindow::OnCreate() {
 void FlutterWindow::OnDestroy() {
   SaveWindowBounds();
   RemoveTrayIcon();
+  window_channel_ = nullptr;
   taskbar_pin_bridge_ = nullptr;
   windows_update_bridge_ = nullptr;
   windows_email_bridge_ = nullptr;
@@ -203,6 +218,62 @@ void FlutterWindow::RestoreWindowBounds() {
                               info.rcWork.bottom - height);
   SetWindowPos(GetHandle(), nullptr, left, top, width, height,
                SWP_NOACTIVATE | SWP_NOZORDER);
+}
+
+void FlutterWindow::RestoreAlwaysOnTop() {
+  DWORD enabled = 0;
+  DWORD size = sizeof(enabled);
+  if (RegGetValueW(HKEY_CURRENT_USER, kWindowStateRegistryPath,
+                   kAlwaysOnTopRegistryValue, RRF_RT_REG_DWORD, nullptr,
+                   &enabled, &size) == ERROR_SUCCESS && enabled == 1) {
+    ApplyAlwaysOnTop(GetHandle(), true);
+  }
+}
+
+void FlutterWindow::InitializeWindowChannel() {
+  window_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "voipcloud/windows_window",
+          &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        if (call.method_name() == "getAlwaysOnTop") {
+          result->Success(flutter::EncodableValue(IsAlwaysOnTop(GetHandle())));
+          return;
+        }
+        if (call.method_name() != "setAlwaysOnTop") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* enabled = call.arguments()
+            ? std::get_if<bool>(call.arguments()) : nullptr;
+        if (!enabled) {
+          result->Error("invalid_arguments", "A boolean is required.");
+          return;
+        }
+        const bool previous = IsAlwaysOnTop(GetHandle());
+        if (!ApplyAlwaysOnTop(GetHandle(), *enabled)) {
+          result->Error("window_update_failed", "Unable to change window order.");
+          return;
+        }
+        HKEY key = nullptr;
+        LSTATUS status = RegCreateKeyExW(
+            HKEY_CURRENT_USER, kWindowStateRegistryPath, 0, nullptr,
+            REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &key, nullptr);
+        if (status == ERROR_SUCCESS) {
+          const DWORD value = *enabled ? 1 : 0;
+          status = RegSetValueExW(key, kAlwaysOnTopRegistryValue, 0, REG_DWORD,
+                                  reinterpret_cast<const BYTE*>(&value),
+                                  sizeof(value));
+          RegCloseKey(key);
+        }
+        if (status != ERROR_SUCCESS) {
+          ApplyAlwaysOnTop(GetHandle(), previous);
+          result->Error("preference_save_failed", "Unable to save window preference.");
+          return;
+        }
+        result->Success(flutter::EncodableValue(IsAlwaysOnTop(GetHandle())));
+      });
 }
 
 void FlutterWindow::SaveWindowBounds() {

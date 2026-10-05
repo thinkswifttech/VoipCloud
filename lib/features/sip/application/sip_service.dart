@@ -96,6 +96,9 @@ abstract class SipService {
   /// Plays a short, local sound through the configured desktop output.
   Future<void> playAudioTestSound();
 
+  /// Plays one call-waiting beep at the selected level, only while idle.
+  Future<void> previewCallWaitingAlert(int level);
+
   /// Starts a temporary desktop microphone meter without retaining audio.
   Future<void> startAudioInputTest();
 

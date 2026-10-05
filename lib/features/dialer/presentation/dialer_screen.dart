@@ -19,6 +19,7 @@ import '../../calls/presentation/call_session_providers.dart';
 import '../../calls/presentation/in_call_panel.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../settings/presentation/settings_controller.dart';
+import '../../settings/presentation/dnd_settings_section.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import 'dialer_controller.dart';
 import 'dialer_input_platform.dart';
@@ -880,94 +881,15 @@ class _AccountDetailSheet extends ConsumerWidget {
             ),
           ],
           const SizedBox(height: 22),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Do not disturb',
-                  style: theme.textTheme.titleMedium,
-                ),
-              ),
-              Switch.adaptive(
-                value: dndEnabled,
-                activeThumbColor: Colors.white,
-                activeTrackColor: theme.colorScheme.primary,
-                inactiveThumbColor: Colors.white,
-                inactiveTrackColor: theme.brightness == Brightness.dark
-                    ? const Color(0xFF5C616A)
-                    : const Color(0xFFB8BCC4),
-                trackOutlineColor: WidgetStateProperty.resolveWith((states) {
-                  if (states.contains(WidgetState.selected)) {
-                    return Colors.transparent;
-                  }
-                  return theme.brightness == Brightness.dark
-                      ? const Color(0xFF8A909A)
-                      : const Color(0xFF8E949E);
-                }),
-                onChanged: (enabled) {
-                  ref
-                      .read(settingsControllerProvider.notifier)
-                      .setDndEnabled(enabled: enabled);
-                },
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'When enabled, silence calls on',
-            style: theme.textTheme.labelLarge?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 10),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<DndScope>(
-              segments: const [
-                ButtonSegment(
-                  value: DndScope.thisDevice,
-                  icon: Icon(AppIcons.call),
-                  label: Text('This device'),
-                ),
-                ButtonSegment(
-                  value: DndScope.allDevices,
-                  icon: Icon(AppIcons.cloud),
-                  label: Text('All devices'),
-                ),
-              ],
-              selected: {dndScope},
-              showSelectedIcon: false,
-              expandedInsets: EdgeInsets.zero,
-              style: ButtonStyle(
-                backgroundColor: WidgetStateProperty.resolveWith((states) {
-                  return states.contains(WidgetState.selected)
-                      ? theme.colorScheme.primary
-                      : Colors.transparent;
-                }),
-                foregroundColor: WidgetStateProperty.resolveWith((states) {
-                  return states.contains(WidgetState.selected)
-                      ? Colors.white
-                      : theme.colorScheme.onSurfaceVariant;
-                }),
-              ),
-              onSelectionChanged: (selection) {
-                ref
-                    .read(settingsControllerProvider.notifier)
-                    .setDndScope(selection.single);
-              },
-            ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            dndScope == DndScope.thisDevice
-                ? 'Only this device will stay silent. Calls will continue '
-                      'ringing on your other signed-in devices.'
-                : 'Every device signed in to this extension will stay silent.',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              height: 1.45,
-            ),
+          DndSettingsSection(
+            enabled: dndEnabled,
+            scope: dndScope,
+            onEnabledChanged: (enabled) => ref
+                .read(settingsControllerProvider.notifier)
+                .setDndEnabled(enabled: enabled),
+            onScopeChanged: (scope) => ref
+                .read(settingsControllerProvider.notifier)
+                .setDndScope(scope),
           ),
           const SizedBox(height: 8),
         ],

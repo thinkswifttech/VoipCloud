@@ -16,6 +16,8 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.media.MediaPlayer
+import android.media.AudioAttributes
 import android.net.Uri
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -737,7 +739,8 @@ private class LinphoneBridge private constructor(private val context: android.co
     private var audioRouteCallId: String? = null
     private var requestedAudioRoute = "earpiece"
     private var callWaitingAlertCall: Call? = null
-    private var callWaitingTone: ToneGenerator? = null
+    private var callWaitingTone: MediaPlayer? = null
+    private var waitingPreviewPlayer: MediaPlayer? = null
     private var outgoingRingbackCall: Call? = null
     private var outgoingRingbackTone: ToneGenerator? = null
     private var ringtoneSourcePath: String? = null
@@ -769,6 +772,8 @@ private class LinphoneBridge private constructor(private val context: android.co
             message: String
         ) {
             val currentState = state ?: call.state
+            waitingPreviewPlayer?.release()
+            waitingPreviewPlayer = null
             updateCallToneLevel(core, call, currentState)
             // inviteAddressWithParams can notify synchronously before dialFeatureCode
             // adds the Call to featureCodeCalls — adopt it while a feature dial is pending.
@@ -1026,10 +1031,19 @@ private class LinphoneBridge private constructor(private val context: android.co
                 "getAudioVolumeLevels" -> {
                     result.success(audioVolumeLevels())
                 }
+                "previewCallWaitingAlert" -> {
+                    if (hasActiveCall()) {
+                        result.error("AUDIO_TEST_BUSY", "Finish all calls before previewing the alert.", null)
+                    } else {
+                        runCatching { previewWaitingAlert((call.argument<Int>("level") ?: 30).coerceIn(0, 100)) }
+                            .onSuccess { result.success(null) }
+                            .onFailure { result.error("AUDIO_TEST_FAILED", "Unable to play the alert preview.", null) }
+                    }
+                }
                 "setAudioVolume" -> {
                     val kind = call.argument<String>("kind").orEmpty()
-                    val level = (call.argument<Int>("level") ?: defaultAudioLevel(kind))
-                        .coerceIn(0, 100)
+                    val level = if (kind in setOf("microphone", "callAudio", "ringtone", "ringback")) 100
+                        else (call.argument<Int>("level") ?: defaultAudioLevel(kind)).coerceIn(0, 100)
                     if (kind !in setOf("microphone", "callAudio", "ringtone", "ringback", "callWaiting")) {
                         result.error("AUDIO_VOLUME", "Unknown audio volume control.", null)
                     } else {
@@ -1272,7 +1286,7 @@ private class LinphoneBridge private constructor(private val context: android.co
             }
             Call.State.OutgoingEarlyMedia -> {
                 stopOutgoingRingback(call)
-                audioLevel("ringback")
+                if (hasOtherLiveCall) 100 else audioLevel("ringback")
             }
             else -> {
                 stopCallWaitingAlert(call)
@@ -1286,43 +1300,103 @@ private class LinphoneBridge private constructor(private val context: android.co
 
     private val callWaitingAlertRunnable = object : Runnable {
         override fun run() {
-            val waitingCall = callWaitingAlertCall ?: return
-            val stillRinging = core?.calls?.any { candidate ->
-                candidate === waitingCall && isIncomingRinging(candidate)
-            } == true
-            if (!stillRinging) {
+            if (callWaitingAlertCall == null) return
+            val currentCalls = core?.calls.orEmpty()
+            val waitingCall = currentCalls.firstOrNull { isIncomingRinging(it) }
+            val hasConversation = currentCalls.any {
+                it.state == Call.State.Connected || it.state == Call.State.StreamsRunning
+            }
+            if (waitingCall == null || !hasConversation) {
                 stopCallWaitingAlert()
                 return
             }
 
-            callWaitingTone?.release()
-            callWaitingTone = null
+            // Reconcile from the native list, not a cached Java wrapper identity.
+            callWaitingAlertCall = waitingCall
             val level = audioLevel("callWaiting")
-            if (level > 0) {
+            if (level == 0) {
+                callWaitingTone?.release()
+                callWaitingTone = null
+            } else if (callWaitingTone == null) {
+                val player = MediaPlayer()
                 callWaitingTone = runCatching {
-                    ToneGenerator(AudioManager.STREAM_VOICE_CALL, level).also {
-                        it.startTone(ToneGenerator.TONE_PROP_BEEP, 180)
+                    val file = java.io.File(context.filesDir, "voipcloud-call-waiting-v1.wav")
+                    val expected = CallWaitingTonePolicy.wave()
+                    if (!file.exists() || !file.readBytes().contentEquals(expected)) {
+                        val candidate = java.io.File(context.filesDir, "voipcloud-call-waiting-v1.tmp")
+                        candidate.writeBytes(expected)
+                        check(candidate.renameTo(file)) { "Unable to prepare waiting tone" }
                     }
+                    player.setAudioAttributes(AudioAttributes.Builder()
+                        .setLegacyStreamType(AudioManager.STREAM_VOICE_CALL).build())
+                    player.setDataSource(file.absolutePath)
+                    player.isLooping = true
+                    player.setVolume(level / 100f, level / 100f)
+                    player.setOnErrorListener { failed, _, _ ->
+                        if (callWaitingTone === failed) callWaitingTone = null
+                        failed.release()
+                        Log.w("VoIPCloud/Audio", "Call-waiting audio playback failed")
+                        true
+                    }
+                    player.prepare()
+                    player.start()
+                    player
                 }.onFailure { error ->
+                    player.release()
                     Log.w("VoIPCloud/Audio", "Unable to play call-waiting alert", error)
                 }.getOrNull()
+            } else {
+                callWaitingTone?.setVolume(level / 100f, level / 100f)
             }
-            mainHandler.postDelayed(this, 10_000)
+            // The file owns the 5-second cadence; this watchdog promptly stops
+            // cancelled/answered calls and applies the user's volume changes.
+            mainHandler.postDelayed(this, if (level > 0 && callWaitingTone == null) 8_000 else 500)
         }
     }
 
     private fun startCallWaitingAlert(call: Call) {
-        if (callWaitingAlertCall === call) return
-        stopCallWaitingAlert()
+        if (callWaitingAlertCall != null) {
+            callWaitingAlertCall = call
+            return
+        }
         callWaitingAlertCall = call
         mainHandler.post(callWaitingAlertRunnable)
     }
 
+    private fun previewWaitingAlert(level: Int) {
+        waitingPreviewPlayer?.release()
+        waitingPreviewPlayer = null
+        val file = java.io.File(context.cacheDir, "voipcloud-waiting-preview.wav")
+        file.writeBytes(CallWaitingTonePolicy.wave(preview = true))
+        val player = MediaPlayer()
+        try {
+            player.setAudioAttributes(AudioAttributes.Builder()
+                .setLegacyStreamType(AudioManager.STREAM_VOICE_CALL).build())
+            player.setDataSource(file.absolutePath)
+            player.setVolume(level / 100f, level / 100f)
+            player.setOnCompletionListener { completed ->
+                if (waitingPreviewPlayer === completed) waitingPreviewPlayer = null
+                completed.release()
+            }
+            player.setOnErrorListener { failed, _, _ ->
+                if (waitingPreviewPlayer === failed) waitingPreviewPlayer = null
+                failed.release()
+                true
+            }
+            player.prepare()
+            waitingPreviewPlayer = player
+            player.start()
+        } catch (error: Exception) {
+            waitingPreviewPlayer = null
+            player.release()
+            throw error
+        }
+    }
+
     private fun stopCallWaitingAlert(call: Call? = null) {
-        if (call != null && callWaitingAlertCall !== call) return
+        if (call != null && callWaitingAlertCall?.let { callId(it) != callId(call) } == true) return
         callWaitingAlertCall = null
         mainHandler.removeCallbacks(callWaitingAlertRunnable)
-        callWaitingTone?.stopTone()
         callWaitingTone?.release()
         callWaitingTone = null
     }
@@ -1409,9 +1483,9 @@ private class LinphoneBridge private constructor(private val context: android.co
         val source = ringtoneSourcePath
             ?: audioLevelPrefs.getString("ringtoneSourcePath", null)
             ?: return
-        scaledPcmWave(source, audioLevel("ringtone"), "ringtone")?.let { scaled ->
-            currentCore.ring = scaled
-        }
+        // Restore the original ringtone, including when upgrading from an
+        // older app-scaled WAV. Android's system ringer volume is authoritative.
+        currentCore.ring = source
     }
 
     private fun scaledPcmWave(sourcePath: String, level: Int, name: String): String? {
@@ -1493,13 +1567,15 @@ private class LinphoneBridge private constructor(private val context: android.co
         "microphone" -> 100
         "callAudio" -> 70
         "ringtone" -> 55
-        "ringback" -> 45
+        "ringback" -> 100
         "callWaiting" -> 30
         else -> 0
     }
 
     private fun audioLevel(kind: String): Int =
-        audioLevelPrefs.getInt(kind, defaultAudioLevel(kind)).coerceIn(0, 100)
+        // Unity gain for system-owned volume; ignore old app slider values.
+        if (kind in setOf("microphone", "callAudio", "ringtone", "ringback")) 100
+        else audioLevelPrefs.getInt(kind, defaultAudioLevel(kind)).coerceIn(0, 100)
 
     private fun gainDb(level: Int): Float {
         if (level <= 0) return -80.0f
@@ -2888,6 +2964,8 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun dispose() {
+        waitingPreviewPlayer?.release()
+        waitingPreviewPlayer = null
         pushCallReconcileGeneration++
         stopCallWaitingAlert()
         stopOutgoingRingback()

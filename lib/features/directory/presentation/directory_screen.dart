@@ -17,11 +17,8 @@ import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
-import '../../../voip/platform/voip_platform_channel.dart';
-import '../data/dialog_presence_parser.dart';
-import '../data/directory_presence.dart';
-import '../data/presence_subscription_target.dart';
 import '../domain/directory_entry.dart';
+import 'directory_presence_providers.dart';
 import 'directory_providers.dart';
 
 enum _DirectoryTab { company, external }
@@ -60,11 +57,6 @@ class DirectoryScreen extends ConsumerStatefulWidget {
 
 class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   final _searchController = TextEditingController();
-  final _presencePlatform = const VoipPlatformChannel();
-  final Map<String, DirectoryPresence> _dialogPresence = {};
-  final Map<String, DirectoryPresence> _availabilityPresence = {};
-  StreamSubscription<Map<String, dynamic>>? _presenceSubscription;
-  String _presenceSubscriptionKey = '';
   String _query = '';
   _DirectoryTab _tab = _DirectoryTab.company;
   _DirectorySort _sort = _DirectorySort.displayName;
@@ -77,18 +69,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   bool? _lastAscending;
 
   @override
-  void initState() {
-    super.initState();
-    _presenceSubscription = _presencePlatform.presenceEvents().listen(
-      _handlePresenceEvent,
-      onError: (_) {},
-    );
-  }
-
-  @override
   void dispose() {
-    unawaited(_presenceSubscription?.cancel());
-    unawaited(_presencePlatform.stopPresenceSubscriptions().catchError((_) {}));
     _searchController.dispose();
     super.dispose();
   }
@@ -96,6 +77,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   @override
   Widget build(BuildContext context) {
     final directory = ref.watch(directoryProvider);
+    final liveDirectory = ref.watch(liveDirectoryProvider);
     final transferMode = ref.watch(callTransferModeProvider) != null;
 
     ref.listen<CallTransferRequest?>(callTransferModeProvider, (
@@ -120,10 +102,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
       padding: const EdgeInsets.fromLTRB(20, 12, 8, 0),
       child: directory.when(
         data: (items) {
-          _schedulePresenceSubscriptions(items);
-          final displayedItems = items
-              .map(_withLivePresence)
-              .toList(growable: false);
+          final displayedItems = liveDirectory.asData?.value ?? items;
           final hasExternalContacts = displayedItems.any(
             (entry) => entry.isExternal,
           );
@@ -192,71 +171,6 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
         ),
       ),
     );
-  }
-
-  void _schedulePresenceSubscriptions(List<DirectoryEntry> entries) {
-    final extensions =
-        entries
-            .where((entry) => entry.isCompany)
-            .expand((entry) => entry.numbers)
-            .map((number) => number.trim())
-            .where(isPresenceSubscriptionTarget)
-            .toSet()
-            .toList()
-          ..sort();
-    final key = extensions.join(',');
-    if (key == _presenceSubscriptionKey) return;
-    _presenceSubscriptionKey = key;
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted || key != _presenceSubscriptionKey) return;
-      if (_dialogPresence.isNotEmpty || _availabilityPresence.isNotEmpty) {
-        setState(() {
-          _dialogPresence.clear();
-          _availabilityPresence.clear();
-        });
-      }
-      try {
-        if (extensions.isEmpty) {
-          await _presencePlatform.stopPresenceSubscriptions();
-        } else {
-          await _presencePlatform.startPresenceSubscriptions(extensions);
-        }
-      } on Object {
-        // Presence is supplementary; unsupported platforms still show contacts.
-      }
-    });
-  }
-
-  void _handlePresenceEvent(Map<String, dynamic> event) {
-    if (!mounted) return;
-    final extension = '${event['extension'] ?? ''}'.trim();
-    if (extension.isEmpty) return;
-    final update = parseSipPresenceEvent(event);
-    if (update == null) return;
-    final target = update.package == SipPresencePackage.dialog
-        ? _dialogPresence
-        : _availabilityPresence;
-    if (target[extension] == update.presence) return;
-    setState(() => target[extension] = update.presence);
-  }
-
-  DirectoryEntry _withLivePresence(DirectoryEntry entry) {
-    if (!entry.isCompany) return entry;
-    final states = entry.numbers
-        .map((number) => _dialogPresence[number.trim()])
-        .whereType<DirectoryPresence>()
-        .toList(growable: false);
-    final availabilityStates = entry.numbers
-        .map((number) => _availabilityPresence[number.trim()])
-        .whereType<DirectoryPresence>()
-        .toList(growable: false);
-    if (states.isEmpty && availabilityStates.isEmpty) return entry;
-    final presence = directoryPresenceWithRegistration(
-      entry: entry,
-      liveStates: states,
-      availabilityStates: availabilityStates,
-    );
-    return entry.copyWith(presence: presence);
   }
 
   List<DirectoryEntry> _tabEntries(

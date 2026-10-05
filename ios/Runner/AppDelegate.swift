@@ -12,6 +12,109 @@ import UserNotifications
 
 private let voipCallTraceStart = ProcessInfo.processInfo.systemUptime
 
+/// Export only recognized audio actions, never arbitrary SDK text (which may
+/// contain SIP credentials, addresses, file paths or push tokens).
+enum IOSToneDiagnostic {
+  static func event(from message: String) -> String? {
+    if let marker = message.range(of: "[ToneManager] ") {
+      let action = message[marker.upperBound...].split(whereSeparator: { $0.isWhitespace }).first
+      let allowed: Set<String> = [
+        "startNamedTone", "playTone", "playFile", "stopTone",
+        "startRingtone", "stopRingtone", "notifyIncomingCall",
+        "notifyOutgoingCallRinging", "notifyState", "cleanPauseTone",
+        "freeAudioResources", "prepareForNextState", "updateRingingSessions"
+      ]
+      if let action, allowed.contains(String(action)) {
+        return "sdk_tone_action=\(action)"
+      }
+      return "sdk_tone_action=other"
+    }
+    if message.contains("Could not apply playback gain: gain control wasn't activated") {
+      return "sdk_playback_gain_unavailable"
+    }
+    if message.contains("Could not apply gain on sent RTP packets: gain control wasn't activated") {
+      return "sdk_microphone_gain_unavailable"
+    }
+    return nil
+  }
+}
+
+/// Provide a bounded, attenuated waiting indication through the SDK's existing
+/// local audio path. CallKit does not reliably supply an audible waiting alert.
+/// Passing nil to Core.setTone would select its loud generated fallback.
+enum IOSCallKitTonePolicy {
+  static let repeatInterval: TimeInterval = 5
+
+  static func shouldRepeat(hasWaiting: Bool, hasConversation: Bool) -> Bool {
+    hasWaiting && hasConversation
+  }
+
+  static func waitingToneWave(level: Int = 30) -> Data {
+    let sampleRate: UInt32 = 8_000
+    let sampleCount: UInt32 = 8_000 // One second, mono signed 16-bit PCM.
+    let payloadLength = sampleCount * 2
+    var wave = Data()
+    func append16(_ value: UInt16) {
+      var littleEndian = value.littleEndian
+      Swift.withUnsafeBytes(of: &littleEndian) { wave.append(contentsOf: $0) }
+    }
+    func append32(_ value: UInt32) {
+      var littleEndian = value.littleEndian
+      Swift.withUnsafeBytes(of: &littleEndian) { wave.append(contentsOf: $0) }
+    }
+    wave.append(contentsOf: "RIFF".utf8)
+    append32(36 + payloadLength)
+    wave.append(contentsOf: "WAVEfmt ".utf8)
+    append32(16)
+    append16(1)
+    append16(1)
+    append32(sampleRate)
+    append32(sampleRate * 2)
+    append16(2)
+    append16(16)
+    wave.append(contentsOf: "data".utf8)
+    append32(payloadLength)
+    // Default 30% gives a 2.4% PCM peak. Even at 100%, cap the
+    // waveform at 8% full-scale; device volume and route still affect loudness.
+    let amplitude = 0.08 * Double(min(100, max(0, level))) / 100
+    // One unhurried 400 ms telephone-style beep, with 25 ms attack/release
+    // ramps. This is our own tone, not an Apple system sound or private API.
+    // The repeat coordinator leaves ample silence for the conversation.
+    for index in 0..<Int(sampleCount) {
+      let time = Double(index) / Double(sampleRate)
+      let value: Int16
+      if time < 0.4 {
+        let ramp = max(0, min(1, min(time / 0.025, (0.4 - time) / 0.025)))
+        let envelope = 0.5 - 0.5 * cos(.pi * ramp)
+        value = Int16(sin(2 * .pi * 440 * time) * amplitude * envelope * 32767)
+      } else {
+        value = 0
+      }
+      append16(UInt16(bitPattern: value))
+    }
+    return wave
+  }
+
+  static func prepareWaitingTone(in directory: URL, level: Int = 30) throws -> URL {
+    let manager = FileManager.default
+    try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+    let clamped = min(100, max(0, level))
+    let url = directory.appendingPathComponent("callkit-waiting-quiet-v5-\(clamped).wav")
+    let expected = waitingToneWave(level: clamped)
+    // Repair missing/corrupt assets before starting the core. Use durable app
+    // support storage rather than a temporary file that iOS may purge.
+    if (try? Data(contentsOf: url)) != expected {
+      try expected.write(to: url, options: .atomic)
+    }
+    // Keep the non-secret asset readable during locked-device PushKit wakes.
+    try manager.setAttributes(
+      [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+      ofItemAtPath: url.path
+    )
+    return url
+  }
+}
+
 private func nativeCallCorrelation(_ value: String?) -> String {
   guard let value,
         !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -2938,6 +3041,8 @@ private final class NativeLinphoneController: LinphoneController {
   private let presenceEvents: LinphoneEventStreamHandler
 
   private var core: Core?
+  private var waitingAlertTimer: Timer?
+  private var waitingPreviewPlayer: AVAudioPlayer?
   private var account: Account?
   private var isReplacingAccount = false
   private var explicitUnregisterRequested = false
@@ -2962,6 +3067,10 @@ private final class NativeLinphoneController: LinphoneController {
   private var lastCallEventFingerprintById: [String: String] = [:]
   private var terminalCallIds = Set<String>()
   private var sipLoggingEnabled = false
+  private var toneLogDelegate: LoggingServiceDelegateStub?
+  private var toneLogSession: UUID?
+  private var previousSdkLogMask: UInt?
+  private var diagnosticSdkLogMask: UInt?
   private let sipLogFileLock = NSLock()
   private let maxSipLogBytes = 1_500_000
 
@@ -3507,6 +3616,22 @@ private final class NativeLinphoneController: LinphoneController {
         ))
       case "getAudioVolumeLevels":
         result(audioVolumeLevels())
+      case "previewCallWaitingAlert":
+        guard !hasActiveCall() else {
+          result(FlutterError(code: "AUDIO_TEST_BUSY", message: "Finish all calls before previewing the alert.", details: nil))
+          return
+        }
+        let args = call.arguments as? [String: Any] ?? [:]
+        let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue ?? 30))
+        waitingPreviewPlayer?.stop()
+        let player = try AVAudioPlayer(data: IOSCallKitTonePolicy.waitingToneWave(level: level))
+        player.numberOfLoops = 0
+        waitingPreviewPlayer = player
+        guard player.play() else {
+          throw NSError(domain: "SoftphoneLinphone", code: 1404,
+            userInfo: [NSLocalizedDescriptionKey: "Unable to play the alert preview."])
+        }
+        result(nil)
       case "setAudioVolume":
         try setAudioVolume(call: call)
         result(nil)
@@ -3624,6 +3749,19 @@ private final class NativeLinphoneController: LinphoneController {
     newCore.ipv6Enabled = true
     // PushKit is managed by VoipPushRegistry; avoid a second registry in the SDK.
     newCore.pushNotificationEnabled = false
+    // Configure before start(), not after attaching CallKit: an incoming INVITE
+    // can otherwise enter the SDK tone manager during that startup window.
+    newCore.callkitEnabled = true
+    let audioDirectory = try FileManager.default.url(
+      for: .applicationSupportDirectory, in: .userDomainMask,
+      appropriateFor: nil, create: true
+    ).appendingPathComponent("call_audio", isDirectory: true)
+    // Fail initialization if the safety asset cannot be prepared; never silently
+    // fall back to the SDK's loud generated waiting tone. Provisioning is intact.
+    let waitingTone = try IOSCallKitTonePolicy.prepareWaitingTone(
+      in: audioDirectory, level: audioLevel("callWaiting")
+    )
+    newCore.setTone(toneId: .CallWaiting, audiofile: waitingTone.path)
     newCore.micEnabled = true
     newCore.micGainDb = gainDb(for: audioLevel("microphone"))
     newCore.playbackGainDb = gainDb(for: audioLevel("callAudio"))
@@ -3648,6 +3786,8 @@ private final class NativeLinphoneController: LinphoneController {
     let newDelegate = CoreDelegateStub(
         onCallStateChanged: { [weak self] _, call, state, message in
             guard let self else { return }
+            self.waitingPreviewPlayer?.stop()
+            self.waitingPreviewPlayer = nil
             self.updateAudioLevel(call: call, state: state)
             let id = self.callId(call)
             let objectId = ObjectIdentifier(call)
@@ -3658,6 +3798,7 @@ private final class NativeLinphoneController: LinphoneController {
             }
             staleIds.forEach { self.calls.removeValue(forKey: $0) }
             self.calls[id] = call
+            self.reconcileWaitingAlert()
             let featureKey = ObjectIdentifier(call)
             if self.pendingFeatureCodeDial {
               self.featureCodeCalls.insert(featureKey)
@@ -3754,13 +3895,16 @@ private final class NativeLinphoneController: LinphoneController {
     case "microphone": return 100
     case "callAudio": return 70
     case "ringtone": return 55
-    case "ringback": return 45
+    case "ringback": return 100
     case "callWaiting": return 30
     default: return 0
     }
   }
 
   private func audioLevel(_ kind: String) -> Int {
+    // Full, unattenuated SDK gain; iOS owns call, ringtone and ringback volume.
+    // Ignore older saved slider levels so removing the UI cannot strand users.
+    if ["microphone", "callAudio", "ringtone", "ringback"].contains(kind) { return 100 }
     let key = "VoipCloudAudioLevel.\(kind)"
     guard UserDefaults.standard.object(forKey: key) != nil else {
       return defaultAudioLevel(kind)
@@ -3792,8 +3936,13 @@ private final class NativeLinphoneController: LinphoneController {
       throw NSError(domain: "SoftphoneLinphone", code: 1403,
         userInfo: [NSLocalizedDescriptionKey: "Unknown audio volume control."])
     }
-    let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue
+    let level = ["microphone", "callAudio", "ringtone", "ringback"].contains(kind)
+      ? 100 : min(100, max(0, (args["level"] as? NSNumber)?.intValue
       ?? defaultAudioLevel(kind)))
+    if kind == "callWaiting", let currentCore = core {
+      let tone = try waitingAlertFile(level: level)
+      currentCore.setTone(toneId: .CallWaiting, audiofile: tone.path)
+    }
     UserDefaults.standard.set(level, forKey: "VoipCloudAudioLevel.\(kind)")
     if kind == "ringback", let currentCore = core {
       currentCore.ringback = try makeMobileRingbackTone(level: level).path
@@ -3868,22 +4017,86 @@ private final class NativeLinphoneController: LinphoneController {
     let level: Int
     switch state {
     case .PushIncomingReceived, .IncomingReceived, .IncomingEarlyMedia:
+      if sipLoggingEnabled {
+        emitSipLog(
+          level: "info", source: "ios-audio",
+          message: "incoming_audio_policy corr=\(nativeCallCorrelation(callId(call))) state=\(state) otherLiveCall=\(hasOtherCall) callKitEnabled=\(currentCore.callkitEnabled) sdkStopRingingRequested=\(hasOtherCall)"
+        )
+      }
       if hasOtherCall {
-        // CallKit owns the native in-call waiting indication. Stop Linphone's
-        // normal looping ringtone so the second call produces only the system
-        // call-waiting alert and never masks the active conversation.
+        // Clear ringtone resources as well. Waiting-tone safety is configured
+        // before core.start(): stopRinging alone does not stop in-call synthesis.
         currentCore.stopRinging()
         level = audioLevel("callAudio")
       } else {
         level = audioLevel("ringtone")
       }
-    case .OutgoingInit, .OutgoingProgress, .OutgoingRinging, .OutgoingEarlyMedia:
-      level = audioLevel("ringback")
+    case .OutgoingEarlyMedia:
+      // Core gain is shared: never attenuate an existing conversation for a
+      // second outgoing call. Locally generated ringback owns its WAV gain.
+      level = hasOtherCall ? 100 : audioLevel("ringback")
     default:
       level = audioLevel("callAudio")
     }
     currentCore.playbackGainDb = gainDb(for: level)
     currentCore.micGainDb = gainDb(for: audioLevel("microphone"))
+  }
+
+  private func waitingAlertFile(level: Int) throws -> URL {
+    let directory = try FileManager.default.url(
+      for: .applicationSupportDirectory, in: .userDomainMask,
+      appropriateFor: nil, create: true
+    ).appendingPathComponent("call_audio", isDirectory: true)
+    return try IOSCallKitTonePolicy.prepareWaitingTone(in: directory, level: level)
+  }
+
+  private var shouldRepeatWaitingAlert: Bool {
+    // Use the SDK's live list, not cached wrappers retained for history.
+    let currentCalls = core?.calls ?? []
+    let hasWaiting = currentCalls.contains {
+      $0.state == .IncomingReceived || $0.state == .IncomingEarlyMedia
+    }
+    let hasConversation = currentCalls.contains {
+      $0.state == .Connected || $0.state == .StreamsRunning
+    }
+    return IOSCallKitTonePolicy.shouldRepeat(
+      hasWaiting: hasWaiting, hasConversation: hasConversation
+    )
+  }
+
+  private func reconcileWaitingAlert() {
+    guard shouldRepeatWaitingAlert, core != nil else {
+      waitingAlertTimer?.invalidate()
+      waitingAlertTimer = nil
+      return
+    }
+    guard waitingAlertTimer == nil else { return }
+    // Run on the main loop: SDK methods are not thread-safe. Recheck current
+    // call states on every tick; never retain a completed call or redial it.
+    let timer = Timer(timeInterval: IOSCallKitTonePolicy.repeatInterval, repeats: true) { [weak self] timer in
+      guard let self else { timer.invalidate(); return }
+      guard self.shouldRepeatWaitingAlert, let currentCore = self.core else {
+        self.waitingAlertTimer?.invalidate()
+        self.waitingAlertTimer = nil
+        return
+      }
+      let level = self.audioLevel("callWaiting")
+      guard level > 0 else { return }
+      do {
+        let tone = try self.waitingAlertFile(level: level)
+        try currentCore.playLocal(audiofile: tone.path)
+        if self.sipLoggingEnabled {
+          self.emitSipLog(level: "info", source: "ios-audio", message: "waiting_alert_repeat level=\(level)")
+        }
+      } catch {
+        // Never fall back to the unattenuated synthesized waiting tone.
+        if self.sipLoggingEnabled {
+          self.emitSipLog(level: "warning", source: "ios-audio", message: "waiting_alert_repeat_failed")
+        }
+      }
+    }
+    waitingAlertTimer = timer
+    RunLoop.main.add(timer, forMode: .common)
   }
 
   private func configureAccount(args: [String: Any]) throws {
@@ -5307,6 +5520,7 @@ private final class NativeLinphoneController: LinphoneController {
 
   private func setSipLoggingEnabled(_ enabled: Bool) {
     sipLoggingEnabled = enabled
+    configureToneDiagnostics(enabled: enabled)
     if enabled {
       emitSipLog(
         level: "info",
@@ -5314,6 +5528,53 @@ private final class NativeLinphoneController: LinphoneController {
         message: "Native SIP logging enabled"
       )
     }
+  }
+
+  private func configureToneDiagnostics(enabled: Bool) {
+    let service = LoggingService.Instance
+    if !enabled {
+      // Invalidate callbacks already queued on the main thread before detaching.
+      toneLogSession = nil
+      if let listener = toneLogDelegate {
+        service.removeDelegate(delegate: listener)
+        toneLogDelegate = nil
+      }
+      if let previousSdkLogMask, service.logLevelMask == diagnosticSdkLogMask {
+        service.logLevelMask = previousSdkLogMask
+      }
+      previousSdkLogMask = nil
+      diagnosticSdkLogMask = nil
+      return
+    }
+    guard toneLogDelegate == nil else { return }
+    let session = UUID()
+    toneLogSession = session
+    let listener = LoggingServiceDelegateStub(
+      onLogMessageWritten: { [weak self] _, _, _, message in
+        guard let event = IOSToneDiagnostic.event(from: message) else { return }
+        let elapsed = ProcessInfo.processInfo.systemUptime - voipCallTraceStart
+        // SDK callbacks may originate on audio/signaling threads. Do not touch
+        // Flutter or app state there, and never log through the SDK recursively.
+        DispatchQueue.main.async { [weak self] in
+          guard let self, self.sipLoggingEnabled, self.toneLogSession == session else { return }
+          self.emitSipLog(
+            level: "info", source: "ios-audio",
+            message: String(format: "sdk_t=%.3f %@", elapsed, event)
+          )
+        }
+      }
+    )
+    toneLogDelegate = listener
+    previousSdkLogMask = service.logLevelMask
+    service.addDelegate(delegate: listener)
+    // ToneManager uses Message/Info, not Debug. Keep raw SDK text out of our
+    // export; only the allowlisted diagnostics above cross the bridge.
+    service.logLevel = .Message
+    diagnosticSdkLogMask = service.logLevelMask
+    emitSipLog(
+      level: "info", source: "ios-audio",
+      message: "SDK tone diagnostics enabled; waitingTonePolicy=quiet-sdk-soft-beep-v5"
+    )
   }
 
   private func appendSipLogLine(_ line: String) {
@@ -5387,11 +5648,15 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   private func dispose() {
+    waitingPreviewPlayer?.stop()
+    waitingPreviewPlayer = nil
     stopPresenceSubscriptions()
     if let delegate {
       core?.removeDelegate(delegate: delegate)
     }
     core?.stop()
+    waitingAlertTimer?.invalidate()
+    waitingAlertTimer = nil
     core = nil
     account = nil
     delegate = nil

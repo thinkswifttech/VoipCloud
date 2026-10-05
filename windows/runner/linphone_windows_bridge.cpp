@@ -31,6 +31,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -47,6 +48,7 @@ constexpr UINT kVoipCloudTrayIconId = 1;
 constexpr int kLinphoneReasonBusy = 6;
 constexpr int kLinphoneToneCallLost = 4;
 constexpr int kLinphoneToneCallEnd = 5;
+constexpr int kLinphoneToneCallWaiting = 2;
 std::atomic<uint64_t> g_tone_file_sequence{0};
 std::atomic<uint64_t> g_call_history_event_sequence{0};
 constexpr wchar_t kVoipCloudRegistryPath[] =
@@ -57,6 +59,7 @@ constexpr wchar_t kAudioInputRegistryValue[] = L"AudioInputEndpoint";
 constexpr wchar_t kMicrophoneVolumeRegistryValue[] = L"MicrophoneVolume";
 constexpr wchar_t kCallAudioVolumeRegistryValue[] = L"CallAudioVolume";
 constexpr wchar_t kRingtoneVolumeRegistryValue[] = L"RingtoneVolume";
+constexpr wchar_t kWaitingVolumeRegistryValue[] = L"CallWaitingVolume";
 constexpr wchar_t kRingbackVolumeRegistryValue[] = L"RingbackVolume";
 constexpr wchar_t kSipInstanceUuidRegistryValue[] = L"SipInstanceUuid";
 constexpr char kVoipCloudVersion[] =
@@ -378,6 +381,7 @@ struct LinphoneAccountParams;
 struct LinphoneAccount;
 struct LinphoneCallParams;
 struct LinphoneCall;
+struct LinphonePlayer;
 struct LinphoneCallLog;
 struct LinphoneEvent;
 struct LinphoneContent;
@@ -520,7 +524,8 @@ int LoadRegistryLevel(const wchar_t* name) {
   const int safe_default =
       key_name == kCallAudioVolumeRegistryValue ? 70 :
       key_name == kRingtoneVolumeRegistryValue ? 55 :
-      key_name == kRingbackVolumeRegistryValue ? 45 : 100;
+      key_name == kRingbackVolumeRegistryValue ? 45 :
+      key_name == kWaitingVolumeRegistryValue ? 30 : 100;
   DWORD value = static_cast<DWORD>(safe_default);
   DWORD size = sizeof(value);
   if (RegGetValueW(HKEY_CURRENT_USER, kVoipCloudRegistryPath, name,
@@ -647,11 +652,11 @@ std::wstring ScaledSound(const std::string& source, int level,
   return path;
 }
 
-std::wstring CreateCallEndTone(int call_audio_level) {
-  constexpr uint32_t kSampleRate = 16000;
-  constexpr uint32_t kDurationMs = 160;
-  constexpr uint32_t kSampleCount = kSampleRate * kDurationMs / 1000;
-  constexpr uint32_t kDataSize = kSampleCount * sizeof(int16_t);
+std::wstring CreateCallEndTone(int call_audio_level, bool waiting = false, bool ringback = false) {
+  const uint32_t kSampleRate = waiting ? 8000 : 16000;
+  const uint32_t kDurationMs = ringback ? 6000 : waiting ? 1000 : 160;
+  const uint32_t kSampleCount = kSampleRate * kDurationMs / 1000;
+  const uint32_t kDataSize = kSampleCount * sizeof(int16_t);
   constexpr size_t kHeaderSize = 44;
   std::vector<uint8_t> wave(kHeaderSize + kDataSize, 0);
   auto write_u16 = [&wave](size_t offset, uint16_t value) {
@@ -679,11 +684,32 @@ std::wstring CreateCallEndTone(int call_audio_level) {
 
   constexpr double kPi = 3.14159265358979323846;
   constexpr double kFrequencyHz = 425.0;
-  constexpr uint32_t kFadeSamples = kSampleRate * 20 / 1000;
+  const uint32_t kFadeSamples = kSampleRate * 20 / 1000;
   const double user_gain = std::clamp(call_audio_level, 0, 100) / 100.0;
   // Cap the indication around -21 dBFS even when call audio is at 100%.
   const double peak = 0.09 * user_gain;
   for (uint32_t i = 0; i < kSampleCount; ++i) {
+    if (ringback) {
+      const double time = i / static_cast<double>(kSampleRate);
+      if (time < 2.0) {
+        const double edge = std::clamp(std::min(time / 0.025, (2.0 - time) / 0.025), 0.0, 1.0);
+        const auto sample = static_cast<int16_t>((std::sin(2 * kPi * 440 * time) +
+            std::sin(2 * kPi * 480 * time)) * 0.08 * user_gain * edge * 32767);
+        write_u16(kHeaderSize + i * sizeof(int16_t), static_cast<uint16_t>(sample));
+      }
+      continue;
+    }
+    if (waiting) {
+      const double time = i / static_cast<double>(kSampleRate);
+      if (time < 0.4) {
+        const double ramp = std::clamp(std::min(time / 0.025, (0.4 - time) / 0.025), 0.0, 1.0);
+        const double envelope = 0.5 - 0.5 * std::cos(kPi * ramp);
+        const auto sample = static_cast<int16_t>(std::sin(2 * kPi * 440 * time) *
+            0.08 * user_gain * envelope * 32767);
+        write_u16(kHeaderSize + i * sizeof(int16_t), static_cast<uint16_t>(sample));
+      }
+      continue;
+    }
     const double fade_in = std::min(1.0, i / static_cast<double>(kFadeSamples));
     const double fade_out = std::min(
         1.0, (kSampleCount - 1 - i) / static_cast<double>(kFadeSamples));
@@ -1268,6 +1294,13 @@ class LinphoneApi {
     linphone_core_play_local =
         LoadSymbol<int (*)(LinphoneCore*, const char*)>(
             "linphone_core_play_local");
+    linphone_core_create_local_player = LoadSymbol<LinphonePlayer* (*)(LinphoneCore*, const char*, const char*, void*)>("linphone_core_create_local_player");
+    linphone_player_open = LoadSymbol<int (*)(LinphonePlayer*, const char*)>("linphone_player_open");
+    linphone_player_start = LoadSymbol<int (*)(LinphonePlayer*)>("linphone_player_start");
+    linphone_player_seek = LoadSymbol<int (*)(LinphonePlayer*, int)>("linphone_player_seek");
+    linphone_player_close = LoadSymbol<void (*)(LinphonePlayer*)>("linphone_player_close");
+    linphone_player_unref = LoadSymbol<void (*)(LinphonePlayer*)>("linphone_player_unref");
+    linphone_player_set_volume_gain = LoadSymbol<void (*)(LinphonePlayer*, float)>("linphone_player_set_volume_gain");
     linphone_audio_device_get_id =
         LoadSymbol<const char* (*)(const LinphoneAudioDevice*)>(
             "linphone_audio_device_get_id");
@@ -1515,6 +1548,13 @@ class LinphoneApi {
   void (*linphone_core_set_ring_during_incoming_early_media)(LinphoneCore*,
                                                              int) = nullptr;
   int (*linphone_core_play_local)(LinphoneCore*, const char*) = nullptr;
+  LinphonePlayer* (*linphone_core_create_local_player)(LinphoneCore*, const char*, const char*, void*) = nullptr;
+  int (*linphone_player_open)(LinphonePlayer*, const char*) = nullptr;
+  int (*linphone_player_start)(LinphonePlayer*) = nullptr;
+  int (*linphone_player_seek)(LinphonePlayer*, int) = nullptr;
+  void (*linphone_player_close)(LinphonePlayer*) = nullptr;
+  void (*linphone_player_unref)(LinphonePlayer*) = nullptr;
+  void (*linphone_player_set_volume_gain)(LinphonePlayer*, float) = nullptr;
   const char* (*linphone_audio_device_get_id)(const LinphoneAudioDevice*) =
       nullptr;
   const char* (*linphone_audio_device_get_device_name)(
@@ -1604,7 +1644,7 @@ class LinphoneWindowsBridge::Impl {
     if (stream == "registration" && registration_sink_) {
       registration_sink_->Success(EncodableValue(payload));
     } else if (stream == "calls") {
-      if (IsTerminalCallPayload(payload)) {
+      if (IsTerminalCallPayload(payload) && !BoolArg(payload, "featureCode")) {
         const auto persisted = PersistCallHistoryEvent(payload);
         if (persisted.has_value()) {
           if (call_sink_) {
@@ -1657,6 +1697,22 @@ class LinphoneWindowsBridge::Impl {
         TraceNative("Linphone iterate first call begin");
       }
       api_.linphone_core_iterate(core_);
+      ReconcileWaitingAlert();
+      ReconcileRingback();
+      // Feature-code calls are hidden, short-lived PBX control operations.
+      // Terminate outside their callbacks to avoid reentrant call teardown.
+      std::vector<LinphoneCall*> expired;
+      const auto now = CurrentEpochMilliseconds();
+      for (const auto& item : feature_code_calls_) {
+        if (item.second <= now) expired.push_back(item.first);
+      }
+      for (auto* feature_call : expired) {
+        if (feature_code_calls_.count(feature_call) != 0 &&
+            !IsTerminalCall(feature_call)) {
+          feature_code_calls_[feature_call] = now + 20000;
+          api_.linphone_call_terminate(feature_call);
+        }
+      }
       if (trace_this_iteration) {
         first_iterate_completed_ = true;
         TraceNative("Linphone iterate first call complete");
@@ -1700,6 +1756,8 @@ class LinphoneWindowsBridge::Impl {
       PurgeAccount(std::move(result));
     } else if (method == "makeCall") {
       MakeCall(StringArg(ArgsMap(call), "destination"), std::move(result));
+    } else if (method == "dialFeatureCode") {
+      MakeCall(StringArg(ArgsMap(call), "code"), std::move(result), true);
     } else if (method == "acceptCall") {
       AcceptCall(StringArg(ArgsMap(call), "callId"), std::move(result));
     } else if (method == "rejectCall") {
@@ -1742,6 +1800,8 @@ class LinphoneWindowsBridge::Impl {
                      IntArg(ArgsMap(call), "level"), std::move(result));
     } else if (method == "playAudioTestSound") {
       PlayAudioTestSound(std::move(result));
+    } else if (method == "previewCallWaitingAlert") {
+      PreviewWaitingAlert(IntArg(ArgsMap(call), "level"), std::move(result));
     } else if (method == "startAudioInputTest") {
       StartAudioInputTest(std::move(result));
     } else if (method == "getAudioInputLevel") {
@@ -1846,20 +1906,32 @@ class LinphoneWindowsBridge::Impl {
         }
       }
       if (api_.linphone_core_set_ringback != nullptr) {
-        const std::string ringback_path = resources_directory +
-            "\\share\\sounds\\linphone\\ringback.wav";
-        const DWORD attributes = GetFileAttributesA(ringback_path.c_str());
-        if (attributes != INVALID_FILE_ATTRIBUTES &&
-            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-          ringback_source_path_ = ringback_path;
-          api_.linphone_core_set_ringback(core_, ringback_path.c_str());
-          TraceNative("EnsureReady outgoing ringback configured");
-        } else {
-          TraceNative("EnsureReady packaged outgoing ringback unavailable");
+        const auto silent = CreateCallEndTone(0, false, true);
+        const auto audible = CreateCallEndTone(100, false, true);
+        if (silent.empty() || audible.empty() || !LocalPlayerAvailable()) {
+          if (!silent.empty()) DeleteFileW(silent.c_str());
+          if (!audible.empty()) DeleteFileW(audible.c_str());
+          api_.linphone_core_unref(core_);
+          core_ = nullptr;
+          result->Error("AUDIO_VOLUME", "Unable to prepare controlled outgoing ringback.");
+          return false;
         }
+        tone_files_.push_back(silent);
+        tone_files_.push_back(audible);
+        ringback_source_path_ = WideToUtf8(audible);
+        // Suppress the SDK's independent ringer; our local player owns gain.
+        const auto silent_path = WideToUtf8(silent);
+        api_.linphone_core_set_ringback(core_, silent_path.c_str());
       }
       if (api_.linphone_core_set_ring_during_incoming_early_media != nullptr) {
         api_.linphone_core_set_ring_during_incoming_early_media(core_, 1);
+      }
+      // Prepare the quiet named tone before loading any persisted registrations.
+      if (!ApplyWaitingToneVolume(LoadRegistryLevel(kWaitingVolumeRegistryValue))) {
+        api_.linphone_core_unref(core_);
+        core_ = nullptr;
+        result->Error("AUDIO_VOLUME", "Unable to prepare safe call-waiting audio.");
+        return false;
       }
       active_impl_ = this;
       if (api_.linphone_factory_create_core_cbs != nullptr &&
@@ -2185,7 +2257,8 @@ class LinphoneWindowsBridge::Impl {
   }
 
   void MakeCall(const std::string& destination,
-                std::unique_ptr<MethodResult> result) {
+                std::unique_ptr<MethodResult> result,
+                bool feature_code = false) {
     TraceNative("Outgoing call request received");
     std::lock_guard<std::mutex> lock(core_mutex_);
     if (!EnsureReady(result.get())) {
@@ -2193,6 +2266,11 @@ class LinphoneWindowsBridge::Impl {
     }
     if (destination.empty()) {
       result->Error("LINPHONE_ERROR", "Missing call destination.");
+      return;
+    }
+    if (feature_code && (FirstLiveCall() != nullptr ||
+                         !feature_code_calls_.empty())) {
+      result->Error("CALL_ACTIVE", "Feature code must wait until calls end.");
       return;
     }
     const auto uri = NormalizeDestination(destination, sip_domain_);
@@ -2211,6 +2289,12 @@ class LinphoneWindowsBridge::Impl {
       }
     }
     LinphoneCall* call = nullptr;
+    if (feature_code) {
+      feature_code_previous_muted_ = microphone_muted_;
+      ApplyMicrophoneMuted(true);
+      // Linphone may deliver callbacks synchronously during invite.
+      pending_feature_code_dial_ = true;
+    }
     if (params != nullptr &&
         api_.linphone_core_invite_address_with_params != nullptr) {
       call = api_.linphone_core_invite_address_with_params(core_, address,
@@ -2219,6 +2303,7 @@ class LinphoneWindowsBridge::Impl {
     if (call == nullptr && api_.linphone_core_invite_address != nullptr) {
       call = api_.linphone_core_invite_address(core_, address);
     }
+    pending_feature_code_dial_ = false;
     if (api_.linphone_call_params_unref != nullptr && params != nullptr) {
       api_.linphone_call_params_unref(params);
     }
@@ -2226,7 +2311,15 @@ class LinphoneWindowsBridge::Impl {
       api_.linphone_address_unref(address);
     }
     if (call == nullptr) {
+      if (feature_code) ApplyMicrophoneMuted(feature_code_previous_muted_);
       result->Error("LINPHONE_ERROR", "Unable to start call.");
+      return;
+    }
+    if (feature_code) {
+      TrackFeatureCodeCall(call);
+      EmitCall(call, 3);
+      TraceNative("PBX feature-code call started");
+      result->Success(EncodableValue(feature_code_ids_.at(call)));
       return;
     }
     active_call_ = call;
@@ -2816,6 +2909,8 @@ class LinphoneWindowsBridge::Impl {
     if (kind == "microphone" && api_.linphone_core_set_mic_gain_db != nullptr) {
       api_.linphone_core_set_mic_gain_db(core_, VolumePercentToGainDb(clamped));
     } else if (kind == "callAudio") {
+      call_audio_level_ = clamped;
+      applied_media_level_ = -1;
       if (api_.linphone_core_set_playback_gain_db != nullptr) {
         api_.linphone_core_set_playback_gain_db(
             core_, VolumePercentToGainDb(clamped));
@@ -2825,6 +2920,8 @@ class LinphoneWindowsBridge::Impl {
       ApplyRingtoneVolume(clamped);
     } else if (kind == "ringback") {
       ApplyRingbackVolume(clamped);
+    } else if (kind == "callWaiting") {
+      ApplyWaitingToneVolume(clamped);
     }
   }
 
@@ -2848,22 +2945,110 @@ class LinphoneWindowsBridge::Impl {
   }
 
   bool ApplyRingbackVolume(int level) {
-    if (core_ == nullptr || api_.linphone_core_set_ringback == nullptr ||
-        ringback_source_path_.empty()) return false;
-    if (level == 100) {
-      api_.linphone_core_set_ringback(core_, ringback_source_path_.c_str());
-      return true;
-    }
-    const std::wstring scaled = ScaledSound(ringback_source_path_, level,
-                                            L"ringback");
-    if (scaled.empty()) {
-      TraceNative("Unable to prepare volume-adjusted ringback");
-      return false;
-    }
-    const std::string path = WideToUtf8(scaled);
-    api_.linphone_core_set_ringback(core_, path.c_str());
-    tone_files_.push_back(scaled);
+    if (!core_ || !LocalPlayerAvailable() || ringback_source_path_.empty()) return false;
+    ringback_level_ = std::clamp(level, 0, 100);
+    if (ringback_player_)
+      api_.linphone_player_set_volume_gain(ringback_player_, ringback_level_ / 100.0f);
+    ReconcileRingback();
     return true;
+  }
+
+  bool LocalPlayerAvailable() const {
+    return api_.linphone_core_create_local_player && api_.linphone_player_open &&
+        api_.linphone_player_start && api_.linphone_player_seek &&
+        api_.linphone_player_close && api_.linphone_player_unref &&
+        api_.linphone_player_set_volume_gain;
+  }
+
+  void StopLocalPlayer(LinphonePlayer*& player) {
+    if (!player) return;
+    api_.linphone_player_close(player);
+    api_.linphone_player_unref(player);
+    player = nullptr;
+  }
+
+  LinphonePlayer* StartLocalPlayer(const std::string& path, int level) {
+    if (!LocalPlayerAvailable()) return nullptr;
+    const char* card = api_.linphone_core_get_playback_device
+        ? api_.linphone_core_get_playback_device(core_) : nullptr;
+    auto* player = api_.linphone_core_create_local_player(core_, card, nullptr, nullptr);
+    if (!player) return nullptr;
+    if (api_.linphone_player_open(player, path.c_str()) != 0) {
+      StopLocalPlayer(player);
+      return nullptr;
+    }
+    // Open creates the playback graph; apply gain before the first sample.
+    api_.linphone_player_set_volume_gain(player, std::clamp(level, 0, 100) / 100.0f);
+    if (api_.linphone_player_start(player) != 0) StopLocalPlayer(player);
+    return player;
+  }
+
+  void ReconcileRingback() {
+    bool local = false, early_media = false, conversation = false;
+    for (const auto& item : live_calls_) {
+      if (feature_code_calls_.count(item.second)) continue;
+      const int state = api_.linphone_call_get_state(item.second);
+      local = local || state == 5;
+      early_media = early_media || state == 6;
+      conversation = conversation || state == 7 || state == 8;
+    }
+    const auto now = GetTickCount64();
+    if (!live_calls_.empty() || now >= preview_ends_at_)
+      StopLocalPlayer(waiting_preview_player_);
+    // Network early media replaces local ringback; never play both.
+    if (!local || early_media || conversation) {
+      StopLocalPlayer(ringback_player_);
+      next_ringback_cycle_ = 0;
+    } else {
+      const char* raw_card = api_.linphone_core_get_playback_device
+          ? api_.linphone_core_get_playback_device(core_) : nullptr;
+      const std::string card = raw_card ? raw_card : "";
+      if (ringback_card_ != card) {
+        StopLocalPlayer(ringback_player_);
+        ringback_card_ = card;
+        next_ringback_cycle_ = 0;
+      }
+      if (!ringback_player_ && now >= next_ringback_cycle_) {
+        ringback_player_ = StartLocalPlayer(ringback_source_path_, ringback_level_);
+        next_ringback_cycle_ = now + 6000;
+        if (!ringback_player_) TraceNative("Controlled local ringback playback failed");
+      } else if (ringback_player_ && now >= next_ringback_cycle_) {
+        if (api_.linphone_player_seek(ringback_player_, 0) != 0 ||
+            api_.linphone_player_start(ringback_player_) != 0)
+          StopLocalPlayer(ringback_player_);
+        next_ringback_cycle_ = now + 6000;
+      }
+    }
+    // Software playback gain controls network early media; the speaker-volume
+    // API would change the Windows mixer. Do not attenuate another live call.
+    const int gain_level = early_media && !conversation ? ringback_level_ : call_audio_level_;
+    if (gain_level != applied_media_level_ && api_.linphone_core_set_playback_gain_db) {
+      api_.linphone_core_set_playback_gain_db(core_, VolumePercentToGainDb(gain_level));
+      applied_media_level_ = gain_level;
+    }
+  }
+
+  void PreviewWaitingAlert(int level, std::unique_ptr<MethodResult> result) {
+    std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!EnsureReady(result.get())) return;
+    if (!live_calls_.empty()) {
+      result->Error("AUDIO_TEST_BUSY", "Finish all calls before previewing the alert.");
+      return;
+    }
+    StopLocalPlayer(waiting_preview_player_);
+    const auto file = CreateCallEndTone(100, true);
+    if (file.empty()) {
+      result->Error("AUDIO_TEST_FAILED", "Unable to prepare the alert preview.");
+      return;
+    }
+    tone_files_.push_back(file);
+    waiting_preview_player_ = StartLocalPlayer(WideToUtf8(file), level);
+    preview_ends_at_ = GetTickCount64() + 1000;
+    if (!waiting_preview_player_) {
+      result->Error("AUDIO_TEST_FAILED", "Unable to play the alert preview.");
+      return;
+    }
+    result->Success();
   }
 
   void ApplyCallEndToneVolume(int call_audio_level) {
@@ -2879,6 +3064,43 @@ class LinphoneWindowsBridge::Impl {
     tone_files_.push_back(tone);
   }
 
+  bool ApplyWaitingToneVolume(int level) {
+    if (!core_ || !api_.linphone_core_set_tone) return false;
+    const auto file = CreateCallEndTone(level, true);
+    if (file.empty()) return false;
+    waiting_tone_path_ = WideToUtf8(file);
+    api_.linphone_core_set_tone(core_, kLinphoneToneCallWaiting, waiting_tone_path_.c_str());
+    tone_files_.push_back(file);
+    return true;
+  }
+
+  void ReconcileWaitingAlert() {
+    bool waiting = false;
+    bool conversation = false;
+    for (const auto& item : live_calls_) {
+      if (feature_code_calls_.count(item.second)) continue;
+      const int state = api_.linphone_call_get_state(item.second);
+      waiting = waiting || state == 1 || state == 17;
+      conversation = conversation || state == 7 || state == 8;
+    }
+    if (!waiting || !conversation) {
+      next_waiting_alert_ = 0;
+      return;
+    }
+    const auto now = GetTickCount64();
+    if (next_waiting_alert_ == 0) {
+      // SDK plays the configured initial tone. We own subsequent repetitions.
+      next_waiting_alert_ = now + 5000;
+    } else if (now >= next_waiting_alert_) {
+      next_waiting_alert_ = now + 5000;
+      if (!waiting_tone_path_.empty() && api_.linphone_core_play_local &&
+          LoadRegistryLevel(kWaitingVolumeRegistryValue) > 0) {
+        if (api_.linphone_core_play_local(core_, waiting_tone_path_.c_str()) != 0)
+          TraceNative("Call-waiting repeat playback failed");
+      }
+    }
+  }
+
   void RestoreAudioVolumeLevels() {
     ApplyAudioVolume("microphone",
                      LoadRegistryLevel(kMicrophoneVolumeRegistryValue));
@@ -2888,6 +3110,7 @@ class LinphoneWindowsBridge::Impl {
                      LoadRegistryLevel(kRingtoneVolumeRegistryValue));
     ApplyAudioVolume("ringback",
                      LoadRegistryLevel(kRingbackVolumeRegistryValue));
+    ApplyAudioVolume("callWaiting", LoadRegistryLevel(kWaitingVolumeRegistryValue));
   }
 
   void GetAudioVolumeLevels(std::unique_ptr<MethodResult> result) {
@@ -2902,6 +3125,7 @@ class LinphoneWindowsBridge::Impl {
          EncodableValue(LoadRegistryLevel(kRingtoneVolumeRegistryValue))},
         {EncodableValue("ringback"),
          EncodableValue(LoadRegistryLevel(kRingbackVolumeRegistryValue))},
+        {EncodableValue("callWaiting"), EncodableValue(LoadRegistryLevel(kWaitingVolumeRegistryValue))},
     }));
   }
 
@@ -2919,11 +3143,18 @@ class LinphoneWindowsBridge::Impl {
       registry_value = kRingtoneVolumeRegistryValue;
     } else if (kind == "ringback") {
       registry_value = kRingbackVolumeRegistryValue;
+    } else if (kind == "callWaiting") {
+      registry_value = kWaitingVolumeRegistryValue;
     } else {
       result->Error("AUDIO_VOLUME", "Unknown desktop audio volume control.");
       return;
     }
-    if (kind == "ringtone") {
+    if (kind == "callWaiting") {
+      if (!ApplyWaitingToneVolume(clamped)) {
+        result->Error("AUDIO_VOLUME", "Unable to prepare call-waiting audio.");
+        return;
+      }
+    } else if (kind == "ringtone") {
       if (!ApplyRingtoneVolume(clamped)) {
         result->Error("AUDIO_VOLUME", "Unable to adjust the ringtone.");
         return;
@@ -2937,6 +3168,7 @@ class LinphoneWindowsBridge::Impl {
       ApplyAudioVolume(kind, clamped);
     }
     if (!SaveRegistryLevel(registry_value, clamped)) {
+      ApplyAudioVolume(kind, LoadRegistryLevel(registry_value));
       result->Error("AUDIO_VOLUME", "Unable to save the audio volume.");
       return;
     }
@@ -3128,6 +3360,8 @@ class LinphoneWindowsBridge::Impl {
       return;
     }
     StopPresenceSubscriptionsLocked();
+    StopLocalPlayer(ringback_player_);
+    StopLocalPlayer(waiting_preview_player_);
     if (api_.linphone_core_clear_accounts != nullptr) {
       api_.linphone_core_clear_accounts(core_);
     }
@@ -3314,6 +3548,8 @@ class LinphoneWindowsBridge::Impl {
     std::lock_guard<std::mutex> lock(core_mutex_);
     StopAudioInputTestLocked();
     StopPresenceSubscriptionsLocked();
+    StopLocalPlayer(ringback_player_);
+    StopLocalPlayer(waiting_preview_player_);
     if (core_ != nullptr) {
       TraceNative("Dispose core stop begin");
       api_.linphone_core_stop(core_);
@@ -3330,6 +3566,15 @@ class LinphoneWindowsBridge::Impl {
     account_ = nullptr;
     active_call_ = nullptr;
     live_calls_.clear();
+    next_waiting_alert_ = 0;
+    waiting_tone_path_.clear();
+    ringback_source_path_.clear();
+    next_ringback_cycle_ = 0;
+    applied_media_level_ = -1;
+    feature_code_calls_.clear();
+    feature_code_ids_.clear();
+    feature_code_connected_.clear();
+    pending_feature_code_dial_ = false;
     microphone_muted_ = false;
     if (active_impl_ == this) {
       active_impl_ = nullptr;
@@ -3418,6 +3663,10 @@ class LinphoneWindowsBridge::Impl {
                             const char* message) {
     if (active_impl_ != nullptr) {
       active_impl_->EmitCall(call, state, message);
+      // A state change may replace the media graph even at the same gain.
+      active_impl_->applied_media_level_ = -1;
+      if (state != 13 && state != 14 && state != 19)
+        active_impl_->StopLocalPlayer(active_impl_->waiting_preview_player_);
     }
   }
 
@@ -3536,6 +3785,16 @@ class LinphoneWindowsBridge::Impl {
     if (call == nullptr) {
       return {{EncodableValue("status"),
                EncodableValue(std::string("none"))}};
+    }
+    // Snapshot requests must hide control calls just like live callbacks.
+    if (pending_feature_code_dial_ || feature_code_calls_.count(call) != 0) {
+      return EncodableMap{
+          {EncodableValue("id"), EncodableValue(
+              feature_code_ids_.count(call) != 0
+                  ? feature_code_ids_.at(call) : PointerId(call))},
+          {EncodableValue("direction"), EncodableValue(std::string("outgoing"))},
+          {EncodableValue("status"), EncodableValue(std::string(state == 19 ? "ended" : "dialing"))},
+          {EncodableValue("featureCode"), EncodableValue(true)}};
     }
     const bool terminal = state == 13 || state == 14 || state == 19;
     const std::string call_id = PointerId(call);
@@ -3686,10 +3945,43 @@ class LinphoneWindowsBridge::Impl {
                       EncodableValue(audio_endpoints)}};
   }
 
+  void TrackFeatureCodeCall(LinphoneCall* call) {
+    if (feature_code_calls_.count(call) != 0) return;
+    feature_code_calls_.emplace(call, CurrentEpochMilliseconds() + 20000);
+    // Allocator addresses can be reused for the next toggle. Give each
+    // operation a unique ID so Dart's older safety timer cannot clear it.
+    feature_code_ids_.emplace(call, PointerId(call) + "-feature-" +
+                             std::to_string(++feature_code_sequence_));
+  }
+
   void EmitCall(LinphoneCall* call,
                 int state,
                 const char* state_message = nullptr) {
     if (call == nullptr) {
+      return;
+    }
+    if (pending_feature_code_dial_) {
+      TrackFeatureCodeCall(call);
+    }
+    const auto feature = feature_code_calls_.find(call);
+    if (feature != feature_code_calls_.end()) {
+      const bool terminal = state == 13 || state == 14 || state == 19;
+      if ((state == 7 || state == 8) &&
+          feature_code_connected_.insert(call).second) {
+        feature->second = CurrentEpochMilliseconds() + 1500;
+      }
+      // Only Released completes the operation: End/Error callbacks are
+      // followed by Released and must not start a second toggle early.
+      owner_->EnqueueEvent("calls", BuildCallPayload(call, state));
+      if (terminal) {
+        ApplyMicrophoneMuted(feature_code_previous_muted_);
+        // End/Error is followed by Released; keep that callback hidden too.
+        if (state == 19) {
+          feature_code_calls_.erase(call);
+          feature_code_ids_.erase(call);
+          feature_code_connected_.erase(call);
+        }
+      }
       return;
     }
     owner_->EnqueueEvent("calls",
@@ -3703,6 +3995,12 @@ class LinphoneWindowsBridge::Impl {
   LinphoneAccount* account_ = nullptr;
   LinphoneCall* active_call_ = nullptr;
   std::unordered_map<std::string, LinphoneCall*> live_calls_;
+  std::unordered_map<LinphoneCall*, int64_t> feature_code_calls_;
+  std::unordered_map<LinphoneCall*, std::string> feature_code_ids_;
+  uint64_t feature_code_sequence_ = 0;
+  std::unordered_set<LinphoneCall*> feature_code_connected_;
+  bool pending_feature_code_dial_ = false;
+  bool feature_code_previous_muted_ = false;
   std::unordered_map<std::string, int64_t> call_started_at_ms_;
   LinphoneCall* notified_incoming_call_ = nullptr;
   LinphoneCall* dnd_declined_incoming_call_ = nullptr;
@@ -3712,7 +4010,17 @@ class LinphoneWindowsBridge::Impl {
   std::string sip_domain_;
   std::string sip_instance_id_;
   std::string ringtone_source_path_;
+  std::string waiting_tone_path_;
+  ULONGLONG next_waiting_alert_ = 0;
   std::string ringback_source_path_;
+  LinphonePlayer* ringback_player_ = nullptr;
+  LinphonePlayer* waiting_preview_player_ = nullptr;
+  std::string ringback_card_;
+  int ringback_level_ = 45;
+  int call_audio_level_ = 70;
+  int applied_media_level_ = -1;
+  ULONGLONG next_ringback_cycle_ = 0;
+  ULONGLONG preview_ends_at_ = 0;
   std::vector<std::wstring> tone_files_;
   std::mutex core_mutex_;
   ComPtr<IAudioClient> audio_test_client_;
