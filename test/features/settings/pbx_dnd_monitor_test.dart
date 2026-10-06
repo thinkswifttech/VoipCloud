@@ -203,6 +203,25 @@ void main() {
     expect(h.monitor.state.message, contains('not confirmed'));
     h.notify(0, true);
     expect(h.monitor.state.enabled, isTrue);
+    expect(h.monitor.state.message, 'Do not disturb is on for all devices');
+  });
+  testWidgets('unchanged refresh retains unconfirmed change warning', (
+    tester,
+  ) async {
+    final h = await setup(tester);
+    h.notify(0, false);
+    await h.monitor.setEnabled(true);
+    await tester.pump(const Duration(seconds: 15));
+    await tester.pump();
+    h.notify(0, false);
+    expect(h.monitor.state.enabled, isFalse);
+    expect(h.monitor.state.pending, isFalse);
+    expect(h.monitor.state.message, contains('Could not confirm your change'));
+    h.notify(1, false);
+    expect(h.monitor.state.message, contains('Could not confirm your change'));
+    h.notify(2, true);
+    expect(h.monitor.state.message, 'Do not disturb is on for all devices');
+    expect(h.toggles, 1);
   });
   testWidgets('busy call refuses toggle without queuing', (tester) async {
     final h = await setup(tester);
@@ -233,7 +252,7 @@ void main() {
     final h = await setup(tester);
     await tester.pump(const Duration(seconds: 15));
     expect(h.monitor.state.enabled, isNull);
-    expect(h.monitor.state.message, contains('did not respond'));
+    expect(h.monitor.state.message, contains('Unable to check do not disturb'));
   });
   testWidgets('logout clears state and stops retries', (tester) async {
     final h = await setup(tester);

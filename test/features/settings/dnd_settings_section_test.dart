@@ -8,7 +8,10 @@ void main() {
   for (final status in [
     const PbxDndState(),
     const PbxDndState(enabled: false, pending: true, message: 'Updating…'),
-    const PbxDndState(enabled: true, message: 'Confirmed by PBX'),
+    const PbxDndState(
+      enabled: true,
+      message: 'Do not disturb is on for all devices',
+    ),
   ]) {
     testWidgets(
       'all-device state is explicit and responsive: ${status.message}',
@@ -35,7 +38,10 @@ void main() {
             ),
           ),
         );
-        expect(find.text(status.message), findsOneWidget);
+        expect(
+          find.text('Applies to: all devices\n${status.message}'),
+          findsOneWidget,
+        );
         expect(
           tester
                   .widget<SwitchListTile>(find.byType(SwitchListTile))

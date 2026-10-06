@@ -3866,12 +3866,22 @@ class LinphoneWindowsBridge::Impl {
     }
     // Snapshot requests must hide control calls just like live callbacks.
     if (pending_feature_code_dial_ || feature_code_calls_.count(call) != 0) {
+      const LinphoneErrorInfo* error_info =
+          api_.linphone_call_get_error_info != nullptr
+              ? api_.linphone_call_get_error_info(call) : nullptr;
+      const int protocol_code = error_info != nullptr &&
+          api_.linphone_error_info_get_protocol_code != nullptr
+              ? api_.linphone_error_info_get_protocol_code(error_info) : 0;
       return EncodableMap{
           {EncodableValue("id"), EncodableValue(
               feature_code_ids_.count(call) != 0
                   ? feature_code_ids_.at(call) : PointerId(call))},
           {EncodableValue("direction"), EncodableValue(std::string("outgoing"))},
           {EncodableValue("status"), EncodableValue(std::string(state == 19 ? "ended" : "dialing"))},
+          {EncodableValue("nativeState"), EncodableValue(state)},
+          {EncodableValue("nativeStatus"), EncodableValue(CallStatus(state))},
+          {EncodableValue("protocolCode"), EncodableValue(protocol_code)},
+          {EncodableValue("stateMessage"), EncodableValue(CallTerminationMessage(call, state_message))},
           {EncodableValue("featureCode"), EncodableValue(true)}};
     }
     const bool terminal = state == 13 || state == 14 || state == 19;
@@ -4046,11 +4056,14 @@ class LinphoneWindowsBridge::Impl {
       const bool terminal = state == 13 || state == 14 || state == 19;
       if ((state == 7 || state == 8) &&
           feature_code_connected_.insert(call).second) {
-        feature->second = CurrentEpochMilliseconds() + 1500;
+        // A SIP answer does not confirm that the dialplan has applied DND.
+        // Let the PBX finish its control call instead of cutting it off 1.5s
+        // after answer. TrackFeatureCodeCall's 20s deadline still bounds it.
+        TraceNative("PBX feature-code call answered; waiting for completion");
       }
       // Only Released completes the operation: End/Error callbacks are
       // followed by Released and must not start a second toggle early.
-      owner_->EnqueueEvent("calls", BuildCallPayload(call, state));
+      owner_->EnqueueEvent("calls", BuildCallPayload(call, state, state_message));
       if (terminal) {
         ApplyMicrophoneMuted(feature_code_previous_muted_);
         // End/Error is followed by Released; keep that callback hidden too.

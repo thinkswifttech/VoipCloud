@@ -6,7 +6,7 @@ class PbxDndState {
   const PbxDndState({
     this.enabled,
     this.pending = false,
-    this.message = 'State unavailable',
+    this.message = 'Do not disturb status unavailable',
   });
   final bool? enabled;
   final bool pending;
@@ -72,6 +72,7 @@ class PbxDndMonitor extends ChangeNotifier {
     required this.stop,
     required this.toggle,
     required this.canToggle,
+    this.diagnostic,
     this.confirmationTimeout = const Duration(seconds: 15),
     this.initialTimeout = const Duration(seconds: 15),
     this.renewAfter = const Duration(minutes: 4),
@@ -79,12 +80,13 @@ class PbxDndMonitor extends ChangeNotifier {
   }) {
     _events = events.listen(
       _onEvent,
-      onError: (_) => _failed('DND connection unavailable'),
+      onError: (_) => _failed('Unable to check do not disturb. Reconnecting…'),
     );
   }
   final Future<void> Function(String extension, String subscriptionId) start;
   final Future<void> Function() stop, toggle;
   final bool Function() canToggle;
+  final void Function(String message)? diagnostic;
   final Duration confirmationTimeout, initialTimeout, renewAfter, retryBase;
   late final StreamSubscription<Map<String, dynamic>> _events;
   Future<void> _operations = Future.value();
@@ -93,6 +95,7 @@ class PbxDndMonitor extends ChangeNotifier {
   bool _registered = false, _disposed = false;
   int _generation = 0, _version = -1, _failures = 0;
   bool? _desired;
+  bool? _unconfirmedDesired;
   PbxDndState state = const PbxDndState();
 
   void _publish(PbxDndState next) {
@@ -121,6 +124,7 @@ class PbxDndMonitor extends ChangeNotifier {
     _domain = domain;
     _registered = registered;
     _failures = 0;
+    _unconfirmedDesired = null;
     refresh();
   }
 
@@ -142,8 +146,8 @@ class PbxDndMonitor extends ChangeNotifier {
         message:
             message ??
             (_registered
-                ? 'Checking PBX DND…'
-                : 'State unavailable — not registered'),
+                ? 'Checking do not disturb…'
+                : 'Connect to calling to check do not disturb'),
       ),
     );
     final extension = _extension;
@@ -157,11 +161,15 @@ class PbxDndMonitor extends ChangeNotifier {
           return;
         }
         _initial = Timer(initialTimeout, () {
-          if (generation == _generation) _failed('PBX DND did not respond');
+          if (generation == _generation) {
+            _failed('Unable to check do not disturb. Reconnecting…');
+          }
         });
         await start(extension, id).timeout(const Duration(seconds: 5));
       } catch (_) {
-        if (generation == _generation) _failed('DND subscription unavailable');
+        if (generation == _generation) {
+          _failed('Unable to check do not disturb. Reconnecting…');
+        }
       }
     });
   }
@@ -194,7 +202,7 @@ class PbxDndMonitor extends ChangeNotifier {
     }
     if (event['kind'] == 'subscription') {
       if (event['state'] == 'error' || event['state'] == 'terminated') {
-        _failed('PBX DND subscription lost');
+        _failed('Do not disturb connection lost. Reconnecting…');
       }
       return;
     }
@@ -209,10 +217,13 @@ class PbxDndMonitor extends ChangeNotifier {
     );
     if (update == null || update.version <= _version) return;
     if (!update.full) {
-      _failed('PBX DND needs a fresh full state');
+      _failed('Refreshing do not disturb status…');
       return;
     }
     _version = update.version;
+    diagnostic?.call(
+      'DND state received enabled=${update.enabled} version=${update.version} pending=${_desired != null}',
+    );
     _failures = 0;
     _initial?.cancel();
     _renew ??= Timer(renewAfter, () {
@@ -226,11 +237,16 @@ class PbxDndMonitor extends ChangeNotifier {
       _desired = null;
       _confirmation?.cancel();
     }
+    if (_unconfirmedDesired == update.enabled) _unconfirmedDesired = null;
     _publish(
       PbxDndState(
         enabled: update.enabled,
         pending: _desired != null,
-        message: _desired != null ? 'Updating…' : 'Confirmed by PBX',
+        message: _desired != null
+            ? 'Updating do not disturb…'
+            : _unconfirmedDesired != null
+            ? 'Could not confirm your change. Do not disturb is still ${update.enabled ? "on" : "off"}.'
+            : 'Do not disturb is ${update.enabled ? "on" : "off"} for all devices',
       ),
     );
   }
@@ -241,21 +257,32 @@ class PbxDndMonitor extends ChangeNotifier {
       _publish(
         PbxDndState(
           enabled: state.enabled,
-          message: 'End the current call before changing all-devices DND',
+          message:
+              'End the current call before changing do not disturb on all devices',
         ),
       );
       return;
     }
     if (enabled == state.enabled) return;
     final generation = _generation;
+    _unconfirmedDesired = null;
     _desired = enabled;
+    diagnostic?.call('DND change requested enabled=$enabled');
     _publish(
-      PbxDndState(enabled: state.enabled, pending: true, message: 'Updating…'),
+      PbxDndState(
+        enabled: state.enabled,
+        pending: true,
+        message: 'Updating do not disturb…',
+      ),
     );
     _confirmation = Timer(confirmationTimeout, () {
       if (_disposed || generation != _generation || _desired == null) return;
+      _unconfirmedDesired = _desired;
+      diagnostic?.call(
+        'DND change confirmation timed out; checking state without redial',
+      );
       _desired = null;
-      refresh(message: 'Change not confirmed — checking PBX state…');
+      refresh(message: 'Change not confirmed. Checking do not disturb…');
       // Never retry *76: it might already have reached the PBX.
     });
     try {
@@ -267,7 +294,7 @@ class PbxDndMonitor extends ChangeNotifier {
       _publish(
         PbxDndState(
           enabled: state.enabled,
-          message: 'Unable to change PBX DND',
+          message: 'Unable to change do not disturb. Please try again.',
         ),
       );
     }

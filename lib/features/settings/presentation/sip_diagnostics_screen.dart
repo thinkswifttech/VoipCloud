@@ -13,6 +13,7 @@ import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_config.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import 'pbx_dnd_providers.dart';
+import 'dnd_diagnostics_card.dart';
 
 class SipDiagnosticsScreen extends ConsumerWidget {
   const SipDiagnosticsScreen({super.key});
@@ -25,6 +26,7 @@ class SipDiagnosticsScreen extends ConsumerWidget {
     final device = session?.device;
     final registration = ref.watch(sipRegistrationStateProvider);
     final appVersion = ref.watch(appVersionInfoProvider);
+    final dndState = ref.watch(pbxDndStateProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -43,6 +45,7 @@ class SipDiagnosticsScreen extends ConsumerWidget {
       ),
       body: PageContent(
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             AppCard(
               title: 'Registration',
@@ -108,24 +111,10 @@ class SipDiagnosticsScreen extends ConsumerWidget {
               ),
             ),
             const SizedBox(height: 16),
-            AppCard(
-              title: 'All-devices DND',
-              subtitle: ref.watch(pbxDndStateProvider).message,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(switch (ref.watch(pbxDndStateProvider).enabled) {
-                    true => 'PBX DND is enabled',
-                    false => 'PBX DND is disabled',
-                    null => 'PBX state is unavailable',
-                  }),
-                  const SizedBox(height: 12),
-                  OutlinedButton(
-                    onPressed: () => ref.read(pbxDndMonitorProvider).refresh(),
-                    child: const Text('Refresh DND state'),
-                  ),
-                ],
-              ),
+            DndDiagnosticsCard(
+              state: dndState,
+              registered: registration.asData?.value.isRegistered ?? false,
+              onRefresh: () => ref.read(pbxDndMonitorProvider).refresh(),
             ),
             const SizedBox(height: 16),
             AppCard(

@@ -1330,6 +1330,13 @@ class LinphoneSipService implements SipService {
     );
     final isFeatureCode = _isFeatureCodeCallEvent(event, call);
     if (isFeatureCode) {
+      _sipLog(
+        'info',
+        'PBX control call state=${event['nativeState'] ?? nativeStatus} '
+            'status=${event['nativeStatus'] ?? nativeStatus} '
+            'sipCode=${event['protocolCode'] ?? "unavailable"} '
+            'reason=${stateMessage ?? "none"}',
+      );
       _featureCodeCallIds.add(call.id);
       // Clear any leaked in-call UI if an earlier event slipped through.
       if (_activeCall?.id == call.id) {

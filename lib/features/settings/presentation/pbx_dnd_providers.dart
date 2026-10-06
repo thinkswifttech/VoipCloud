@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
 import '../../session/presentation/session_controller.dart';
+import '../../sip/presentation/sip_log_providers.dart';
 import '../application/pbx_dnd_monitor.dart';
 
 final pbxDndMonitorProvider = Provider<PbxDndMonitor>((ref) {
@@ -12,6 +13,7 @@ final pbxDndMonitorProvider = Provider<PbxDndMonitor>((ref) {
     toggle: () =>
         ref.read(sipServiceProvider).syncPbxDndToggle(requireImmediate: true),
     canToggle: () => ref.read(sipServiceProvider).liveCalls.isEmpty,
+    diagnostic: (message) => ref.read(sipLogStoreProvider).info(message),
   );
   ref.onDispose(monitor.dispose);
   return monitor;

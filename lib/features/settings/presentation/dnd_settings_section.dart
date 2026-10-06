@@ -69,7 +69,7 @@ class DndSettingsSection extends StatelessWidget {
             title: const Text('Enable do not disturb'),
             subtitle: Text(
               scope == DndScope.allDevices && pbxState != null
-                  ? pbxState!.message
+                  ? 'Applies to: all devices\n${pbxState!.message}'
                   : 'Applies to: ${scope.label.toLowerCase()}',
             ),
             value: enabled,
