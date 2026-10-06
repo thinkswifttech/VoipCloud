@@ -2,8 +2,51 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/features/settings/presentation/dnd_settings_section.dart';
 import 'package:phone_app/features/settings/presentation/settings_controller.dart';
+import 'package:phone_app/features/settings/application/pbx_dnd_monitor.dart';
 
 void main() {
+  for (final status in [
+    const PbxDndState(),
+    const PbxDndState(enabled: false, pending: true, message: 'Updating…'),
+    const PbxDndState(enabled: true, message: 'Confirmed by PBX'),
+  ]) {
+    testWidgets(
+      'all-device state is explicit and responsive: ${status.message}',
+      (tester) async {
+        tester.view.physicalSize = const Size(320, 480);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: MediaQuery(
+                data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+                child: SingleChildScrollView(
+                  child: DndSettingsSection(
+                    enabled: status.enabled == true,
+                    scope: DndScope.allDevices,
+                    pbxState: status,
+                    onEnabledChanged: (_) {},
+                    onScopeChanged: (_) {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        expect(find.text(status.message), findsOneWidget);
+        expect(
+          tester
+                  .widget<SwitchListTile>(find.byType(SwitchListTile))
+                  .onChanged !=
+              null,
+          status.canChange,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
   for (final width in [320.0, 800.0]) {
     testWidgets('DND order and interactions at width $width', (tester) async {
       DndScope scope = DndScope.thisDevice;

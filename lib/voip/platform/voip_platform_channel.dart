@@ -28,6 +28,9 @@ class VoipPlatformChannel {
   final EventChannel _sipLogEvents;
   final EventChannel _presenceEvents;
 
+  // Directory and diagnostics must share one native event-channel listener.
+  static final _presenceStreams = Expando<Stream<Map<String, dynamic>>>();
+
   Stream<Map<String, dynamic>> registrationEvents() {
     return _registrationEvents.receiveBroadcastStream().map(_asMap);
   }
@@ -45,12 +48,46 @@ class VoipPlatformChannel {
   }
 
   Stream<Map<String, dynamic>> presenceEvents() {
-    return _presenceEvents.receiveBroadcastStream().map(_asMap);
+    return _presenceStreams[this] ??= _presenceEvents
+        .receiveBroadcastStream()
+        .map(_asMap);
   }
+
+  Future<void> startDndDiagnostic(String extension) {
+    if (!RegExp(r'^[0-9]{2,8}$').hasMatch(extension)) {
+      throw ArgumentError('A numeric extension is required.');
+    }
+    return _channel.invokeMethod<void>('startPresenceSubscriptions', {
+      'extensions': ['*76$extension'],
+      'diagnostic': true,
+    });
+  }
+
+  Future<void> stopDndDiagnostic() => _channel.invokeMethod<void>(
+    'stopPresenceSubscriptions',
+    {'diagnostic': true},
+  );
 
   Future<void> startPresenceSubscriptions(Iterable<String> extensions) {
     return _channel.invokeMethod<void>('startPresenceSubscriptions', {
       'extensions': extensions.toSet().toList(growable: false),
+    });
+  }
+
+  Future<void> startPbxDndSubscription(
+    String extension,
+    String subscriptionId,
+  ) {
+    if (!RegExp(r'^[0-9]{2,8}$').hasMatch(extension) ||
+        subscriptionId.isEmpty) {
+      throw ArgumentError(
+        'A numeric extension and subscription epoch are required.',
+      );
+    }
+    return _channel.invokeMethod<void>('startPresenceSubscriptions', {
+      'extensions': ['*76$extension'],
+      'diagnostic': true,
+      'subscriptionId': subscriptionId,
     });
   }
 

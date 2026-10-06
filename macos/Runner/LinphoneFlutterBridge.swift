@@ -472,7 +472,7 @@ private final class NativeLinphoneController: LinphoneController {
   private var featureCodeTerminateScheduled = Set<ObjectIdentifier>()
   private var featureCodePreviousMicEnabled: Bool?
   private var pendingFeatureCodeDial = false
-  private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String)] = [:]
+  private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String, String)] = [:]
   private var selectedAudioEndpointId: String?
   private var selectedAudioInputEndpointId: String?
   private var audioInputTestEngine: AVAudioEngine?
@@ -672,11 +672,14 @@ private final class NativeLinphoneController: LinphoneController {
       case "startPresenceSubscriptions":
         let args = call.arguments as? [String: Any] ?? [:]
         try startPresenceSubscriptions(
-          extensions: args["extensions"] as? [String] ?? []
+          extensions: args["extensions"] as? [String] ?? [],
+          diagnostic: args["diagnostic"] as? Bool ?? false,
+          subscriptionId: args["subscriptionId"] as? String ?? ""
         )
         result(nil)
       case "stopPresenceSubscriptions":
-        stopPresenceSubscriptions()
+        let args = call.arguments as? [String: Any] ?? [:]
+        stopPresenceSubscriptions(diagnostic: args["diagnostic"] as? Bool ?? false)
         result(nil)
       case "setSipLoggingEnabled":
         result(nil)
@@ -1306,7 +1309,7 @@ private final class NativeLinphoneController: LinphoneController {
     emitMessage(message: message, direction: "outgoing", fallbackStatus: "sent")
   }
 
-  private func startPresenceSubscriptions(extensions: [String]) throws {
+  private func startPresenceSubscriptions(extensions: [String], diagnostic: Bool = false, subscriptionId: String = "") throws {
     guard let currentCore = core else {
       throw NSError(
         domain: "SoftphoneLinphone",
@@ -1314,23 +1317,23 @@ private final class NativeLinphoneController: LinphoneController {
         userInfo: [NSLocalizedDescriptionKey: "Linphone core is not initialized."]
       )
     }
-    stopPresenceSubscriptions()
+    stopPresenceSubscriptions(diagnostic: diagnostic)
     let uniqueExtensions = Array(Set(extensions.map {
       $0.trimmingCharacters(in: .whitespacesAndNewlines)
     }))
-      .filter { $0.range(of: "^[0-9]{2,8}$", options: .regularExpression) != nil }
+      .filter { $0.range(of: diagnostic ? "^\\*76[0-9]{2,8}$" : "^[0-9]{2,8}$", options: .regularExpression) != nil }
       .sorted()
-      .prefix(250)
+      .prefix(diagnostic ? 1 : 250)
 
     for extensionNumber in uniqueExtensions {
       for (eventPackage, accept) in [
         ("dialog", "application/dialog-info+xml"),
         ("presence", "application/pidf+xml")
-      ] {
+      ].filter({ subscriptionId.isEmpty || $0.0 == "dialog" }) {
       let event = try currentCore.createSubscribe(
         resource: normalizeDestination(extensionNumber),
         event: eventPackage,
-        expires: 300
+        expires: diagnostic && subscriptionId.isEmpty ? 120 : 300
       )
       event.addCustomHeader(
         name: "Accept",
@@ -1339,7 +1342,8 @@ private final class NativeLinphoneController: LinphoneController {
       presenceSubscriptions[ObjectIdentifier(event)] = (
         event,
         extensionNumber,
-        eventPackage
+        eventPackage,
+        subscriptionId
       )
       do {
         try event.sendSubscribe(body: nil)
@@ -1350,6 +1354,7 @@ private final class NativeLinphoneController: LinphoneController {
           "kind": "subscription",
           "extension": extensionNumber,
           "event": eventPackage,
+          "subscriptionId": subscriptionId,
           "state": "error"
         ])
       }
@@ -1357,9 +1362,11 @@ private final class NativeLinphoneController: LinphoneController {
     }
   }
 
-  private func stopPresenceSubscriptions() {
-    let subscriptions = presenceSubscriptions.values.map { $0.0 }
-    presenceSubscriptions.removeAll()
+  private func stopPresenceSubscriptions(diagnostic: Bool? = nil) {
+    let keys = presenceSubscriptions.filter {
+      diagnostic == nil || $0.value.1.hasPrefix("*76") == diagnostic!
+    }.map { $0.key }
+    let subscriptions = keys.compactMap { presenceSubscriptions.removeValue(forKey: $0)?.0 }
     subscriptions.forEach { $0.terminate() }
   }
 
@@ -1368,7 +1375,7 @@ private final class NativeLinphoneController: LinphoneController {
     notifiedEvent: String,
     body: Content?
   ) {
-    guard let (_, extensionNumber, eventPackage) =
+    guard let (_, extensionNumber, eventPackage, subscriptionId) =
             presenceSubscriptions[ObjectIdentifier(event)],
           notifiedEvent.caseInsensitiveCompare(eventPackage) == .orderedSame
     else { return }
@@ -1376,13 +1383,14 @@ private final class NativeLinphoneController: LinphoneController {
       "kind": "notify",
       "extension": extensionNumber,
       "event": notifiedEvent,
+      "subscriptionId": subscriptionId,
       "contentType": "\(body?.type ?? "")/\(body?.subtype ?? "")",
       "body": body?.utf8Text ?? ""
     ])
   }
 
   private func emitSubscriptionState(event: Event, state: SubscriptionState) {
-    guard let (_, extensionNumber, eventPackage) =
+    guard let (_, extensionNumber, eventPackage, subscriptionId) =
       presenceSubscriptions[ObjectIdentifier(event)] else {
       return
     }
@@ -1401,6 +1409,7 @@ private final class NativeLinphoneController: LinphoneController {
       "kind": "subscription",
       "extension": extensionNumber,
       "event": eventPackage,
+      "subscriptionId": subscriptionId,
       "state": stateName
     ])
   }

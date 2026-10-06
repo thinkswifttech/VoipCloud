@@ -5,6 +5,61 @@ import 'package:phone_app/voip/platform/voip_platform_channel.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('passes the exact output endpoint and confirmed route', () async {
+    const channel = MethodChannel('voipcloud/test_select_output');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'setAudioRoute');
+      expect(call.arguments, {'route': 'bluetooth', 'endpointId': 'headset-2'});
+      return 'bluetooth';
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    expect(
+      await const VoipPlatformChannel(
+        channel: channel,
+      ).setAudioRoute('bluetooth', endpointId: 'headset-2'),
+      'bluetooth',
+    );
+  });
+
+  test('keeps microphone selection separate from output selection', () async {
+    const channel = MethodChannel('voipcloud/test_select_input');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'setAudioInputDevice');
+      expect(call.arguments, {'endpointId': 'windows:input:usb-mic'});
+      return 'windows:input:usb-mic';
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    expect(
+      await const VoipPlatformChannel(
+        channel: channel,
+      ).setAudioInputDevice('windows:input:usb-mic'),
+      'windows:input:usb-mic',
+    );
+  });
+
+  test('propagates failed activation instead of claiming success', () async {
+    const channel = MethodChannel('voipcloud/test_route_failure');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (_) async {
+      throw PlatformException(
+        code: 'AUDIO_ROUTE',
+        message: 'Endpoint unavailable',
+      );
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await expectLater(
+      const VoipPlatformChannel(
+        channel: channel,
+      ).setAudioRoute('bluetooth', endpointId: 'disconnected'),
+      throwsA(isA<PlatformException>()),
+    );
+  });
+
   test(
     'decodes Windows audio endpoints from StandardMethodCodec maps',
     () async {

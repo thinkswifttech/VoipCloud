@@ -17,6 +17,7 @@ import '../domain/voip_call.dart';
 import '../../session/presentation/session_controller.dart';
 import 'caller_identity.dart';
 import 'caller_avatar.dart';
+import 'call_waiting_presentation.dart';
 
 class IncomingCallScreen extends ConsumerStatefulWidget {
   const IncomingCallScreen({required this.callId, super.key});
@@ -59,6 +60,7 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
     final currentCall = _firstCallWhere(liveCalls, (item) {
       return item.id != widget.callId &&
           (item.status == CallStatus.active ||
+              item.status == CallStatus.held ||
               item.status == CallStatus.connecting ||
               item.status == CallStatus.dialing);
     });
@@ -79,90 +81,128 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
             constraints: const BoxConstraints(maxWidth: 760),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 38),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  const SizedBox(height: 18),
-                  Text(
-                    isCallWaiting ? 'Call waiting' : 'Incoming call',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  const Spacer(flex: 2),
-                  CallerAvatar(identity: identity, radius: 62),
-                  const SizedBox(height: 28),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    child: Text(
-                      caller,
-                      textAlign: TextAlign.center,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.headlineMedium?.copyWith(
-                        fontFamily: AppTheme.bodyFontFamily,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0,
-                      ),
-                    ),
-                  ),
-                  if (identity.isResolvedName &&
-                      identity.number.isNotEmpty &&
-                      identity.number != caller) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      identity.number,
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTheme.numberStyle(
-                        theme.textTheme.titleMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 14),
-                  Text(
-                    useDesktopControls
-                        ? 'Answer with Enter or decline with Esc'
-                        : 'Swipe right to answer or left to decline',
-                    textAlign: TextAlign.center,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  const Spacer(flex: 3),
-                  ConstrainedBox(
+              child: LayoutBuilder(
+                builder: (context, constraints) => SingleChildScrollView(
+                  child: ConstrainedBox(
                     constraints: BoxConstraints(
-                      maxWidth: useDesktopControls ? 520 : 420,
+                      minHeight: constraints.maxHeight,
                     ),
-                    child: isCallWaiting
-                        ? _CallWaitingActions(
-                            enabled: !_isCompletingAction,
-                            onHoldAndAnswer: () => unawaited(_answer(context)),
-                            onEndAndAnswer: () =>
-                                unawaited(_endAndAnswer(context)),
-                            onDecline: () => unawaited(_reject(context)),
-                          )
-                        : useDesktopControls
-                        ? _DesktopIncomingCallActions(
-                            enabled: !_isCompletingAction,
-                            onAnswer: () => unawaited(_answer(context)),
-                            onDecline: () => unawaited(_reject(context)),
-                          )
-                        : _IncomingCallSlider(
-                            enabled: !_isCompletingAction,
-                            answerColor: IncomingCallScreen._answerColor,
-                            declineColor: IncomingCallScreen._rejectColor,
-                            onAnswer: () => unawaited(_answer(context)),
-                            onDecline: () => unawaited(_reject(context)),
+                    child: IntrinsicHeight(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          if (isCallWaiting)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: _isCompletingAction
+                                    ? null
+                                    : _returnToActiveCall,
+                                icon: const Icon(Icons.arrow_back),
+                                label: const Text('Back to active call'),
+                              ),
+                            )
+                          else
+                            const SizedBox(height: 18),
+                          Text(
+                            isCallWaiting ? 'Call waiting' : 'Incoming call',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.titleLarge?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                              letterSpacing: 0,
+                            ),
                           ),
+                          const Spacer(flex: 2),
+                          CallerAvatar(identity: identity, radius: 62),
+                          const SizedBox(height: 28),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 420),
+                            child: Text(
+                              caller,
+                              textAlign: TextAlign.center,
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.headlineMedium?.copyWith(
+                                fontFamily: AppTheme.bodyFontFamily,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0,
+                              ),
+                            ),
+                          ),
+                          if (identity.isResolvedName &&
+                              identity.number.isNotEmpty &&
+                              identity.number != caller) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              identity.number,
+                              textAlign: TextAlign.center,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: AppTheme.numberStyle(
+                                theme.textTheme.titleMedium?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 14),
+                          Text(
+                            isCallWaiting
+                                ? 'Choose how to handle the incoming call.'
+                                : useDesktopControls
+                                ? 'Answer with Enter or decline with Esc'
+                                : 'Swipe right to answer or left to decline',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                          const Spacer(flex: 3),
+                          ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: useDesktopControls ? 520 : 420,
+                            ),
+                            child: isCallWaiting
+                                ? _CallWaitingActions(
+                                    enabled: !_isCompletingAction,
+                                    onHoldAndAnswer: () =>
+                                        unawaited(_answer(context)),
+                                    onEndAndAnswer: () =>
+                                        unawaited(_endAndAnswer(context)),
+                                    onDecline: () =>
+                                        unawaited(_reject(context)),
+                                  )
+                                : useDesktopControls
+                                ? _DesktopIncomingCallActions(
+                                    enabled: !_isCompletingAction,
+                                    onAnswer: () => unawaited(_answer(context)),
+                                    onDecline: () =>
+                                        unawaited(_reject(context)),
+                                  )
+                                : SizedBox(
+                                    // Bound the slider before intrinsic layout:
+                                    // its width-dependent LayoutBuilder cannot
+                                    // itself provide intrinsic dimensions.
+                                    height: _IncomingCallSliderState._height,
+                                    child: _IncomingCallSlider(
+                                      enabled: !_isCompletingAction,
+                                      answerColor:
+                                          IncomingCallScreen._answerColor,
+                                      declineColor:
+                                          IncomingCallScreen._rejectColor,
+                                      onAnswer: () =>
+                                          unawaited(_answer(context)),
+                                      onDecline: () =>
+                                          unawaited(_reject(context)),
+                                    ),
+                                  ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                ],
+                ),
               ),
             ),
           ),
@@ -170,8 +210,34 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
       ),
     );
 
-    if (!useDesktopControls) return screen;
-    return Focus(autofocus: true, child: screen);
+    final navigable = PopScope(
+      canPop: !isCallWaiting,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && isCallWaiting && !_isCompletingAction) {
+          _returnToActiveCall();
+        }
+      },
+      child: screen,
+    );
+    if (!useDesktopControls) return navigable;
+    return Focus(autofocus: true, child: navigable);
+  }
+
+  void _returnToActiveCall() {
+    if (_isCompletingAction) return;
+    final calls = ref.read(liveCallsProvider).value;
+    final waiting = calls
+        ?.where((call) => call.id == widget.callId)
+        .firstOrNull;
+    if (waiting == null ||
+        waiting.status != CallStatus.ringing ||
+        selectDisplayedCall(waiting, calls) == null) {
+      return;
+    }
+    ref
+        .read(callWaitingPresentationProvider.notifier)
+        .returnToCall(widget.callId);
+    context.go(RoutePaths.dialer);
   }
 
   bool _handleDesktopKeyEvent(KeyEvent event) {

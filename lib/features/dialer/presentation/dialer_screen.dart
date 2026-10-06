@@ -16,6 +16,7 @@ import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
 import '../../auth/presentation/auth_providers.dart';
 import '../../calls/presentation/call_session_providers.dart';
+import '../../calls/presentation/call_waiting_presentation.dart';
 import '../../calls/presentation/in_call_panel.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../settings/presentation/settings_controller.dart';
@@ -82,7 +83,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
     if (event is! KeyDownEvent && event is! KeyRepeatEvent) return false;
     if (ModalRoute.of(context)?.isCurrent != true) return false;
     if (_destinationFocus.hasFocus) return false;
-    if (isInCallUiCall(ref.read(activeCallProvider).value)) return false;
+    if (ref.read(displayedInCallProvider) != null) return false;
 
     final keyboard = HardwareKeyboard.instance;
     if (keyboard.isControlPressed ||
@@ -119,7 +120,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
     });
     _syncDestinationController(ref.read(dialerControllerProvider));
 
-    final liveCall = ref.watch(activeCallProvider).value;
+    final liveCall = ref.watch(displayedInCallProvider);
     if (isInCallUiCall(liveCall)) {
       return PageContent(
         maxWidth: 460,
@@ -790,7 +791,6 @@ class _AccountDetailSheet extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final settings = ref.watch(settingsControllerProvider);
-    final dndEnabled = settings.dndEnabled;
     final dndScope = settings.dndScope;
     final registration =
         ref.watch(sipRegistrationStateProvider).value ??
@@ -882,7 +882,8 @@ class _AccountDetailSheet extends ConsumerWidget {
           ],
           const SizedBox(height: 22),
           DndSettingsSection(
-            enabled: dndEnabled,
+            enabled: settings.selectedDndEnabled,
+            pbxState: settings.pbxDnd,
             scope: dndScope,
             onEnabledChanged: (enabled) => ref
                 .read(settingsControllerProvider.notifier)

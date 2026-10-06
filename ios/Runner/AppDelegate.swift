@@ -12,33 +12,6 @@ import UserNotifications
 
 private let voipCallTraceStart = ProcessInfo.processInfo.systemUptime
 
-/// Export only recognized audio actions, never arbitrary SDK text (which may
-/// contain SIP credentials, addresses, file paths or push tokens).
-enum IOSToneDiagnostic {
-  static func event(from message: String) -> String? {
-    if let marker = message.range(of: "[ToneManager] ") {
-      let action = message[marker.upperBound...].split(whereSeparator: { $0.isWhitespace }).first
-      let allowed: Set<String> = [
-        "startNamedTone", "playTone", "playFile", "stopTone",
-        "startRingtone", "stopRingtone", "notifyIncomingCall",
-        "notifyOutgoingCallRinging", "notifyState", "cleanPauseTone",
-        "freeAudioResources", "prepareForNextState", "updateRingingSessions"
-      ]
-      if let action, allowed.contains(String(action)) {
-        return "sdk_tone_action=\(action)"
-      }
-      return "sdk_tone_action=other"
-    }
-    if message.contains("Could not apply playback gain: gain control wasn't activated") {
-      return "sdk_playback_gain_unavailable"
-    }
-    if message.contains("Could not apply gain on sent RTP packets: gain control wasn't activated") {
-      return "sdk_microphone_gain_unavailable"
-    }
-    return nil
-  }
-}
-
 /// Provide a bounded, attenuated waiting indication through the SDK's existing
 /// local audio path. CallKit does not reliably supply an audible waiting alert.
 /// Passing nil to Core.setTone would select its loud generated fallback.
@@ -3048,7 +3021,7 @@ private final class NativeLinphoneController: LinphoneController {
   private var explicitUnregisterRequested = false
   private var delegate: CoreDelegateStub?
   private var calls: [String: Call] = [:]
-  private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String)] = [:]
+  private var presenceSubscriptions: [ObjectIdentifier: (Event, String, String, String)] = [:]
   private var featureCodeCalls = Set<ObjectIdentifier>()
   private var featureCodeTerminateScheduled = Set<ObjectIdentifier>()
   private var featureCodePreviousMicEnabled: Bool?
@@ -3067,10 +3040,8 @@ private final class NativeLinphoneController: LinphoneController {
   private var lastCallEventFingerprintById: [String: String] = [:]
   private var terminalCallIds = Set<String>()
   private var sipLoggingEnabled = false
-  private var toneLogDelegate: LoggingServiceDelegateStub?
-  private var toneLogSession: UUID?
-  private var previousSdkLogMask: UInt?
-  private var diagnosticSdkLogMask: UInt?
+  private var registrationRecoveryWorkItem: DispatchWorkItem?
+  private var lastStalledRegistrationRefresh: TimeInterval?
   private let sipLogFileLock = NSLock()
   private let maxSipLogBytes = 1_500_000
 
@@ -3149,13 +3120,49 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   func handleEnterForeground() {
-    guard isAppInBackground else { return }
+    let wasInBackground = isAppInBackground
     isAppInBackground = false
     SoftphoneCallKitController.shared.setSuppressCallKitUi(true)
     NSLog("Softphone/Linphone app entering foreground")
     endBackgroundTaskIfNeeded()
-    core?.enterForeground()
+    if wasInBackground { core?.enterForeground() }
+    // Native launch and Flutter's first resumed event need not include a
+    // background transition. Always replay actual account state, rather than
+    // leaving Flutter with the push-only background reachability snapshot.
+    restoreSavedAccountIfNeeded()
+    if let currentAccount = account ?? core?.defaultAccount {
+      emitRegistration(state: currentAccount.state, message: "SIP account state synchronized")
+    }
     syncCurrentCall(reason: "enter-foreground")
+  }
+
+  private func cancelRegistrationRecovery() {
+    registrationRecoveryWorkItem?.cancel()
+    registrationRecoveryWorkItem = nil
+  }
+
+  private func recoverStalledRegistration(_ currentAccount: Account) {
+    guard registrationRecoveryWorkItem == nil else { return }
+    // Let a real REGISTER transaction finish; coalesce startup/resume/dial
+    // requests instead of interrupting it every two seconds.
+    let work = DispatchWorkItem { [weak self, weak currentAccount] in
+      guard let self else { return }
+      self.registrationRecoveryWorkItem = nil
+      guard let currentAccount,
+            let activeAccount = self.account ?? self.core?.defaultAccount,
+            ObjectIdentifier(activeAccount) == ObjectIdentifier(currentAccount),
+            activeAccount.params?.registerEnabled == true,
+            activeAccount.state == .Progress,
+            !self.explicitUnregisterRequested,
+            !self.hasActiveCall() else { return }
+      let now = ProcessInfo.processInfo.systemUptime
+      if let last = self.lastStalledRegistrationRefresh, now - last < 30 { return }
+      self.lastStalledRegistrationRefresh = now
+      activeAccount.refreshRegister()
+      NSLog("Softphone/Linphone recovered stalled SIP registration")
+    }
+    registrationRecoveryWorkItem = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
   }
 
   private func refreshRegistration(reason: String) {
@@ -3275,18 +3282,7 @@ private final class NativeLinphoneController: LinphoneController {
           // keep joining the same Progress state forever. Give the transaction
           // a short chance to finish, then force one refresh only if this is
           // still the active, enabled account and it is still in Progress.
-          DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self,
-                  let activeAccount = self.account ?? self.core?.defaultAccount,
-                  ObjectIdentifier(activeAccount) == ObjectIdentifier(currentAccount),
-                  activeAccount.params?.registerEnabled == true,
-                  activeAccount.state == .Progress,
-                  !self.hasActiveCall() else {
-              return
-            }
-            activeAccount.refreshRegister()
-            NSLog("Softphone/Linphone recovered stalled initial SIP registration")
-          }
+          recoverStalledRegistration(currentAccount)
           result(nil)
           return
         }
@@ -3295,6 +3291,9 @@ private final class NativeLinphoneController: LinphoneController {
         }
         if let currentAccount = account {
           currentAccount.refreshRegister()
+          if currentAccount.state == .Ok {
+            emitRegistration(state: .Ok, message: "Registration already active")
+          }
           NSLog(
             "Softphone/Linphone explicit registration refresh state=%@",
             String(describing: currentAccount.state)
@@ -3322,6 +3321,7 @@ private final class NativeLinphoneController: LinphoneController {
         SipCredentialStore.setDndEnabled(arguments?["enabled"] as? Bool ?? false)
         result(nil)
       case "unregister":
+        cancelRegistrationRecovery()
         stopPresenceSubscriptions()
         explicitUnregisterRequested = true
         account = account ?? core?.defaultAccount
@@ -3661,11 +3661,14 @@ private final class NativeLinphoneController: LinphoneController {
       case "startPresenceSubscriptions":
         let args = call.arguments as? [String: Any] ?? [:]
         try startPresenceSubscriptions(
-          extensions: args["extensions"] as? [String] ?? []
+          extensions: args["extensions"] as? [String] ?? [],
+          diagnostic: args["diagnostic"] as? Bool ?? false,
+          subscriptionId: args["subscriptionId"] as? String ?? ""
         )
         result(nil)
       case "stopPresenceSubscriptions":
-        stopPresenceSubscriptions()
+        let args = call.arguments as? [String: Any] ?? [:]
+        stopPresenceSubscriptions(diagnostic: args["diagnostic"] as? Bool ?? false)
         result(nil)
       case "setSipLoggingEnabled":
         setSipLoggingEnabled(boolArgument(call, "enabled"))
@@ -3861,6 +3864,7 @@ private final class NativeLinphoneController: LinphoneController {
               NSLog("Softphone/Linphone ignored registration callback from stale account")
               return
             }
+            if state != .Progress { self.cancelRegistrationRecovery() }
             if self.explicitUnregisterRequested && state == .Cleared {
               self.explicitUnregisterRequested = false
               NSLog("Softphone/Linphone explicit unregister completed")
@@ -4233,6 +4237,8 @@ private final class NativeLinphoneController: LinphoneController {
 
     isReplacingAccount = true
     defer { isReplacingAccount = false }
+    cancelRegistrationRecovery()
+    lastStalledRegistrationRefresh = nil
 
     account = nil
     currentCore.clearAccounts()
@@ -4549,6 +4555,8 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   private func purgeAccount() {
+    cancelRegistrationRecovery()
+    lastStalledRegistrationRefresh = nil
     stopPresenceSubscriptions()
     explicitUnregisterRequested = false
     core?.clearAccounts()
@@ -5248,7 +5256,7 @@ private final class NativeLinphoneController: LinphoneController {
     return try Factory.Instance.createAddress(addr: uri)
   }
 
-  private func startPresenceSubscriptions(extensions: [String]) throws {
+  private func startPresenceSubscriptions(extensions: [String], diagnostic: Bool = false, subscriptionId: String = "") throws {
     guard let currentCore = core else {
       throw NSError(
         domain: "SoftphoneLinphone",
@@ -5256,23 +5264,23 @@ private final class NativeLinphoneController: LinphoneController {
         userInfo: [NSLocalizedDescriptionKey: "Linphone core is not initialized."]
       )
     }
-    stopPresenceSubscriptions()
+    stopPresenceSubscriptions(diagnostic: diagnostic)
     let uniqueExtensions = Array(Set(extensions.map {
       $0.trimmingCharacters(in: .whitespacesAndNewlines)
     }))
-      .filter { $0.range(of: "^[0-9]{2,8}$", options: .regularExpression) != nil }
+      .filter { $0.range(of: diagnostic ? "^\\*76[0-9]{2,8}$" : "^[0-9]{2,8}$", options: .regularExpression) != nil }
       .sorted()
-      .prefix(250)
+      .prefix(diagnostic ? 1 : 250)
 
     for extensionNumber in uniqueExtensions {
       for (eventPackage, accept) in [
         ("dialog", "application/dialog-info+xml"),
         ("presence", "application/pidf+xml")
-      ] {
+      ].filter({ subscriptionId.isEmpty || $0.0 == "dialog" }) {
       let event = try currentCore.createSubscribe(
         resource: normalizeDestination(extensionNumber),
         event: eventPackage,
-        expires: 300
+        expires: diagnostic && subscriptionId.isEmpty ? 120 : 300
       )
       event.addCustomHeader(
         name: "Accept",
@@ -5281,7 +5289,8 @@ private final class NativeLinphoneController: LinphoneController {
       presenceSubscriptions[ObjectIdentifier(event)] = (
         event,
         extensionNumber,
-        eventPackage
+        eventPackage,
+        subscriptionId
       )
       do {
         try event.sendSubscribe(body: nil)
@@ -5292,6 +5301,7 @@ private final class NativeLinphoneController: LinphoneController {
           "kind": "subscription",
           "extension": extensionNumber,
           "event": eventPackage,
+          "subscriptionId": subscriptionId,
           "state": "error"
         ])
       }
@@ -5303,9 +5313,11 @@ private final class NativeLinphoneController: LinphoneController {
     )
   }
 
-  private func stopPresenceSubscriptions() {
-    let subscriptions = presenceSubscriptions.values.map { $0.0 }
-    presenceSubscriptions.removeAll()
+  private func stopPresenceSubscriptions(diagnostic: Bool? = nil) {
+    let keys = presenceSubscriptions.filter {
+      diagnostic == nil || $0.value.1.hasPrefix("*76") == diagnostic!
+    }.map { $0.key }
+    let subscriptions = keys.compactMap { presenceSubscriptions.removeValue(forKey: $0)?.0 }
     subscriptions.forEach { try? $0.terminate() }
   }
 
@@ -5314,7 +5326,7 @@ private final class NativeLinphoneController: LinphoneController {
     notifiedEvent: String,
     body: Content?
   ) {
-    guard let (_, extensionNumber, eventPackage) =
+    guard let (_, extensionNumber, eventPackage, subscriptionId) =
             presenceSubscriptions[ObjectIdentifier(event)],
           notifiedEvent.caseInsensitiveCompare(eventPackage) == .orderedSame
     else { return }
@@ -5322,13 +5334,14 @@ private final class NativeLinphoneController: LinphoneController {
       "kind": "notify",
       "extension": extensionNumber,
       "event": notifiedEvent,
+      "subscriptionId": subscriptionId,
       "contentType": "\(body?.type ?? "")/\(body?.subtype ?? "")",
       "body": body?.utf8Text ?? ""
     ])
   }
 
   private func emitSubscriptionState(event: Event, state: SubscriptionState) {
-    guard let (_, extensionNumber, eventPackage) =
+    guard let (_, extensionNumber, eventPackage, subscriptionId) =
       presenceSubscriptions[ObjectIdentifier(event)] else {
       return
     }
@@ -5347,6 +5360,7 @@ private final class NativeLinphoneController: LinphoneController {
       "kind": "subscription",
       "extension": extensionNumber,
       "event": eventPackage,
+      "subscriptionId": subscriptionId,
       "state": stateName
     ])
   }
@@ -5520,7 +5534,9 @@ private final class NativeLinphoneController: LinphoneController {
 
   private func setSipLoggingEnabled(_ enabled: Bool) {
     sipLoggingEnabled = enabled
-    configureToneDiagnostics(enabled: enabled)
+    // App-owned call/registration diagnostics remain exportable. Do not attach
+    // the optional SDK-wide Swift logging callback: it runs on media threads
+    // and was present in the build-36 native crash stack.
     if enabled {
       emitSipLog(
         level: "info",
@@ -5528,53 +5544,6 @@ private final class NativeLinphoneController: LinphoneController {
         message: "Native SIP logging enabled"
       )
     }
-  }
-
-  private func configureToneDiagnostics(enabled: Bool) {
-    let service = LoggingService.Instance
-    if !enabled {
-      // Invalidate callbacks already queued on the main thread before detaching.
-      toneLogSession = nil
-      if let listener = toneLogDelegate {
-        service.removeDelegate(delegate: listener)
-        toneLogDelegate = nil
-      }
-      if let previousSdkLogMask, service.logLevelMask == diagnosticSdkLogMask {
-        service.logLevelMask = previousSdkLogMask
-      }
-      previousSdkLogMask = nil
-      diagnosticSdkLogMask = nil
-      return
-    }
-    guard toneLogDelegate == nil else { return }
-    let session = UUID()
-    toneLogSession = session
-    let listener = LoggingServiceDelegateStub(
-      onLogMessageWritten: { [weak self] _, _, _, message in
-        guard let event = IOSToneDiagnostic.event(from: message) else { return }
-        let elapsed = ProcessInfo.processInfo.systemUptime - voipCallTraceStart
-        // SDK callbacks may originate on audio/signaling threads. Do not touch
-        // Flutter or app state there, and never log through the SDK recursively.
-        DispatchQueue.main.async { [weak self] in
-          guard let self, self.sipLoggingEnabled, self.toneLogSession == session else { return }
-          self.emitSipLog(
-            level: "info", source: "ios-audio",
-            message: String(format: "sdk_t=%.3f %@", elapsed, event)
-          )
-        }
-      }
-    )
-    toneLogDelegate = listener
-    previousSdkLogMask = service.logLevelMask
-    service.addDelegate(delegate: listener)
-    // ToneManager uses Message/Info, not Debug. Keep raw SDK text out of our
-    // export; only the allowlisted diagnostics above cross the bridge.
-    service.logLevel = .Message
-    diagnosticSdkLogMask = service.logLevelMask
-    emitSipLog(
-      level: "info", source: "ios-audio",
-      message: "SDK tone diagnostics enabled; waitingTonePolicy=quiet-sdk-soft-beep-v5"
-    )
   }
 
   private func appendSipLogLine(_ line: String) {
@@ -5648,6 +5617,7 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   private func dispose() {
+    cancelRegistrationRecovery()
     waitingPreviewPlayer?.stop()
     waitingPreviewPlayer = nil
     stopPresenceSubscriptions()

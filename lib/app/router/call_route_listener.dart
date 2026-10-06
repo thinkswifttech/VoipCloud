@@ -10,6 +10,7 @@ import '../../features/calls/domain/call_direction.dart';
 import '../../features/calls/domain/call_status.dart';
 import '../../features/calls/domain/voip_call.dart';
 import '../../features/calls/presentation/call_session_providers.dart';
+import '../../features/calls/presentation/call_waiting_presentation.dart';
 import '../../features/call_history/presentation/call_history_providers.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/settings/presentation/settings_controller.dart';
@@ -29,14 +30,29 @@ class CallRouteListener extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final currentCall = ref.watch(activeCallProvider);
+    ref.watch(activeCallProvider);
+    // The original call can end while the primary ringing call is unchanged.
+    ref.watch(liveCallsProvider);
+    ref.watch(callWaitingPresentationProvider);
+    ref.listen(liveCallsProvider, (_, next) {
+      next.whenData(
+        (calls) =>
+            ref.read(callWaitingPresentationProvider.notifier).reconcile(calls),
+      );
+    });
 
     ref.listen<AsyncValue<VoipCall?>>(activeCallProvider, (_, next) {
       _routeForCall(context, ref, next, invalidateHistory: true);
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _routeForCall(context, ref, currentCall);
+      if (!context.mounted) return;
+      final calls = ref.read(liveCallsProvider).value;
+      if (calls != null) {
+        ref.read(callWaitingPresentationProvider.notifier).reconcile(calls);
+      }
+      // Never reopen a cancelled call from a snapshot captured before this frame.
+      _routeForCall(context, ref, ref.read(activeCallProvider));
     });
 
     return child;
@@ -123,6 +139,17 @@ class CallRouteListener extends ConsumerWidget {
             return;
           }
           final target = RoutePaths.incomingCallPath(call.id);
+          final calls = ref.read(liveCallsProvider).value;
+          final displayed = selectDisplayedCall(call, calls);
+          if (displayed != null &&
+              ref.read(callWaitingPresentationProvider).contains(call.id)) {
+            // User deliberately returned to the established call. Repeated
+            // native ringing/quality events must not reopen the waiting page.
+            if (path.startsWith('/calls/incoming/')) {
+              router.go(RoutePaths.dialer);
+            }
+            return;
+          }
           AppLogger.info(
             'Call route decision => incoming ringing id=${call.id}, current=$path, target=$target',
           );

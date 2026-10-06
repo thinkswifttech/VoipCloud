@@ -33,6 +33,7 @@ class LinphoneSipService implements SipService {
     SipLogStore? sipLogStore,
     this.postDialPause = const Duration(seconds: 2),
     this.postDialToneGap = const Duration(milliseconds: 120),
+    this.outgoingRegistrationTimeout = const Duration(seconds: 12),
   }) : _callHistoryRepository = callHistoryRepository,
        _onCallHistoryChanged = onCallHistoryChanged,
        _platformChannel = platformChannel ?? const VoipPlatformChannel(),
@@ -55,6 +56,7 @@ class LinphoneSipService implements SipService {
   final String _turnServer;
   final Duration postDialPause;
   final Duration postDialToneGap;
+  final Duration outgoingRegistrationTimeout;
   final StreamController<SipRegistrationState> _registrationController =
       StreamController<SipRegistrationState>.broadcast();
   final StreamController<VoipCall?> _callController =
@@ -85,6 +87,9 @@ class LinphoneSipService implements SipService {
   bool _featureCodeDialInFlight = false;
   bool _initialized = false;
   Future<void>? _registrationOperation;
+  Future<void>? _outgoingRegistrationRecovery;
+  Future<void>? _outgoingCallOperation;
+  String? _pendingOutgoingDestination;
   Future<void> _audioRouteSerial = Future<void>.value();
   Timer? _windowsCallReconciliationTimer;
   bool _windowsSyncInFlight = false;
@@ -341,13 +346,50 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> makeCall(String destination) async {
+  Future<void> makeCall(String destination) {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return _makeCall(destination);
+    }
+    final pending = _outgoingCallOperation;
+    if (pending != null) {
+      if (_pendingOutgoingDestination == destination.trim()) return pending;
+      throw const VoipException(
+        message: 'Another outgoing call request is pending',
+        userMessage: 'A call is already being prepared. Please wait.',
+      );
+    }
+    final operation = _makeCall(destination);
+    _outgoingCallOperation = operation;
+    _pendingOutgoingDestination = destination.trim();
+    return operation.whenComplete(() {
+      if (identical(_outgoingCallOperation, operation)) {
+        _outgoingCallOperation = null;
+        _pendingOutgoingDestination = null;
+      }
+    });
+  }
+
+  Future<void> _makeCall(String destination) async {
     final trimmed = destination.trim();
     final postDial = PostDialSequence.parse(trimmed);
     if (postDial.destination.isEmpty) {
       throw const VoipException(
         message: 'Missing destination',
         userMessage: 'Enter a number or SIP address.',
+      );
+    }
+    if (!_registrationState.isRegistered &&
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      await _ensureOutgoingRegistrationReady();
+    }
+    if (_disposed ||
+        (!kIsWeb &&
+            defaultTargetPlatform == TargetPlatform.iOS &&
+            _config?.hasCredentials != true)) {
+      throw const VoipException(
+        message: 'SIP session unavailable before dialing',
+        userMessage: 'Sign in before placing a call.',
       );
     }
     if (!_registrationState.isRegistered) {
@@ -412,6 +454,76 @@ class LinphoneSipService implements SipService {
     }
   }
 
+  Future<void> _ensureOutgoingRegistrationReady() {
+    final pending = _outgoingRegistrationRecovery;
+    if (pending != null) return pending;
+    final recovery = _recoverOutgoingRegistration();
+    _outgoingRegistrationRecovery = recovery;
+    return recovery.whenComplete(() {
+      if (identical(_outgoingRegistrationRecovery, recovery)) {
+        _outgoingRegistrationRecovery = null;
+      }
+    });
+  }
+
+  Future<void> _recoverOutgoingRegistration() async {
+    final config = _config;
+    if (_disposed || config == null || !config.hasCredentials) {
+      throw const VoipException(
+        message: 'No provisioned SIP account',
+        userMessage: 'Sign in before placing a call.',
+      );
+    }
+    // Never repair an account by mutating registration during a conversation,
+    // held call, conference or incoming call awaiting an answer.
+    if (await hasActiveCall()) return;
+    if (_disposed || !identical(_config, config)) {
+      throw const VoipException(
+        message: 'SIP session changed during registration recovery',
+        userMessage: 'Your sign-in changed. Please try again.',
+      );
+    }
+    if (_registrationState.isRegistered) return;
+    final confirmation = Completer<bool>();
+    final subscription = _registrationController.stream.listen(
+      (state) {
+        if (confirmation.isCompleted) return;
+        if (state.isRegistered) confirmation.complete(true);
+        if (state.status == SipRegistrationStatus.failed) {
+          confirmation.complete(false);
+        }
+      },
+      onDone: () {
+        if (!confirmation.isCompleted) confirmation.complete(false);
+      },
+    );
+    try {
+      // Subscribe before requesting REGISTER so a synchronous native success
+      // cannot be lost. Completing the method is not registration success.
+      final ready = await register()
+          .then((_) => confirmation.future)
+          .timeout(outgoingRegistrationTimeout);
+      if (!ready ||
+          _disposed ||
+          !identical(_config, config) ||
+          !_registrationState.isRegistered) {
+        throw const VoipException(
+          message: 'SIP registration recovery did not establish readiness',
+          userMessage:
+              'Calling could not reconnect. Check your connection and try again.',
+        );
+      }
+    } on TimeoutException {
+      throw const VoipException(
+        message: 'SIP registration recovery timed out',
+        userMessage:
+            'Calling is still reconnecting. Check your connection and try again.',
+      );
+    } finally {
+      await subscription.cancel();
+    }
+  }
+
   @override
   Future<void> continuePostDial(String callId) async {
     final plan = _postDialPlans[callId];
@@ -438,7 +550,25 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> syncPbxDndToggle() async {
+  Future<void> syncPbxDndToggle({bool requireImmediate = false}) async {
+    if (requireImmediate) {
+      final config = _config;
+      final busy = await hasActiveCall();
+      if (!_registrationState.isRegistered ||
+          config == null ||
+          busy ||
+          liveCalls.isNotEmpty ||
+          _config != config ||
+          _featureCodeDialInFlight ||
+          _disposed) {
+        throw const VoipException(
+          message: 'PBX DND cannot be changed now',
+          userMessage: 'Register and end active calls before changing DND.',
+        );
+      }
+      await _dialPbxDndToggle(propagateFailure: true);
+      return;
+    }
     if (!_registrationState.isRegistered) {
       _pendingPbxDndToggle = !_pendingPbxDndToggle;
       _sipLog('warn', 'PBX DND toggle queued until SIP is registered');
@@ -460,7 +590,7 @@ class LinphoneSipService implements SipService {
     await _dialPbxDndToggle();
   }
 
-  Future<void> _dialPbxDndToggle() async {
+  Future<void> _dialPbxDndToggle({bool propagateFailure = false}) async {
     if (_featureCodeDialInFlight) {
       _pendingPbxDndToggle = !_pendingPbxDndToggle;
       return;
@@ -484,6 +614,12 @@ class LinphoneSipService implements SipService {
         });
       } else {
         _featureCodeDialInFlight = false;
+        if (propagateFailure) {
+          throw const VoipException(
+            message: 'PBX DND dial was not created',
+            userMessage: 'Unable to change PBX DND.',
+          );
+        }
       }
       _sipLog(
         'info',
@@ -498,6 +634,7 @@ class LinphoneSipService implements SipService {
       AppLogger.warning(
         'PBX DND toggle dial failed: ${_nativeErrorMessage(error)}',
       );
+      if (propagateFailure) rethrow;
     }
   }
 

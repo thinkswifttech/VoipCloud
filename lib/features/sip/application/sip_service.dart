@@ -57,7 +57,7 @@ abstract class SipService {
   Future<void> makeCall(String destination);
 
   /// Silently dial the PBX-wide DND feature toggle. No in-call UI or history.
-  Future<void> syncPbxDndToggle();
+  Future<void> syncPbxDndToggle({bool requireImmediate = false});
 
   Future<void> endCall(String callId);
 

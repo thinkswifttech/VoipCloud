@@ -689,6 +689,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     private val detachedCallEvents = java.util.ArrayDeque<Map<String, Any?>>()
     private var hostActivity: MainActivity? = null
     private val telecomListener: (AndroidCallCoordinator.Snapshot?) -> Unit = { snapshot ->
+        synchronizeTelecomAudioRoute()
         if (snapshot != null) emitCoordinatorSnapshot(snapshot)
     }
 
@@ -722,7 +723,8 @@ private class LinphoneBridge private constructor(private val context: android.co
     private val locallyDeclinedCallIds = mutableSetOf<String>()
     private data class PresenceSubscription(
         val extension: String,
-        val eventPackage: String
+        val eventPackage: String,
+        val subscriptionId: String = ""
     )
 
     private val presenceSubscriptions =
@@ -738,6 +740,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     private var linphoneLogListener: LoggingServiceListener? = null
     private var audioRouteCallId: String? = null
     private var requestedAudioRoute = "earpiece"
+    private var synchronizingTelecomAudio = false
     private var callWaitingAlertCall: Call? = null
     private var callWaitingTone: MediaPlayer? = null
     private var waitingPreviewPlayer: MediaPlayer? = null
@@ -802,12 +805,11 @@ private class LinphoneBridge private constructor(private val context: android.co
         }
 
         override fun onAudioDevicesListUpdated(core: Core) {
-            if (!AndroidCallCoordinator.isManagingCall()) {
-                reconcileAudioDevices("devices-updated")
-            }
+            reconcileAudioDevices("devices-updated")
         }
 
         override fun onAudioDeviceChanged(core: Core, audioDevice: AudioDevice) {
+            synchronizeTelecomAudioRoute()
             // Keep requested route authoritative, but refresh UI if hardware flapped.
             findCurrentCall()?.let { emitCall(it, it.state) }
         }
@@ -839,6 +841,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                     "kind" to "notify",
                     "extension" to subscription.extension,
                     "event" to notifiedEvent,
+                    "subscriptionId" to subscription.subscriptionId,
                     "contentType" to "${body?.type.orEmpty()}/${body?.subtype.orEmpty()}",
                     "body" to body?.utf8Text.orEmpty()
                 )
@@ -856,6 +859,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                     "kind" to "subscription",
                     "extension" to subscription.extension,
                     "event" to subscription.eventPackage,
+                    "subscriptionId" to subscription.subscriptionId,
                     "state" to subscriptionState(state)
                 )
             )
@@ -983,7 +987,18 @@ private class LinphoneBridge private constructor(private val context: android.co
                     val endpointId = call.argument<String>("endpointId")
                     if (AndroidCallCoordinator.isManagingCall()) {
                         val callback: (Result<String>) -> Unit = { outcome ->
-                            outcome.fold(
+                            outcome.mapCatching { applied ->
+                                synchronizeTelecomAudioRoute()
+                                val currentCore = core
+                                val output = currentCore?.let {
+                                    findOutputDevice(availableAudioDevices(it), applied)
+                                }
+                                val actual = findCurrentCall()?.outputAudioDevice ?: currentCore?.defaultOutputAudioDevice
+                                check(output != null && actual?.id == output.id) {
+                                    "The calling SDK could not activate that audio route."
+                                }
+                                applied
+                            }.fold(
                                 onSuccess = result::success,
                                 onFailure = { error -> result.error("AUDIO_ROUTE", error.message, null) }
                             )
@@ -1149,11 +1164,12 @@ private class LinphoneBridge private constructor(private val context: android.co
                 }
                 "startPresenceSubscriptions" -> {
                     val extensions = call.argument<List<*>>("extensions") ?: emptyList<Any?>()
-                    startPresenceSubscriptions(extensions)
+                    startPresenceSubscriptions(extensions, call.argument<Boolean>("diagnostic") ?: false,
+                        call.argument<String>("subscriptionId") ?: "")
                     result.success(null)
                 }
                 "stopPresenceSubscriptions" -> {
-                    stopPresenceSubscriptions()
+                    stopPresenceSubscriptions(call.argument<Boolean>("diagnostic") ?: false)
                     result.success(null)
                 }
                 "setSipLoggingEnabled" -> {
@@ -1862,6 +1878,7 @@ private class LinphoneBridge private constructor(private val context: android.co
 
     private fun makeCall(destination: String) {
         val currentCore = requireNotNull(core)
+        synchronizeTelecomAudioRoute()
         val address = normalizeDestination(destination)
         val params = currentCore.createCallParams(null)
         params?.isVideoEnabled = false
@@ -2033,9 +2050,7 @@ private class LinphoneBridge private constructor(private val context: android.co
         val currentCore = core ?: return
         val currentCall = findCurrentCall()
         if (AndroidCallCoordinator.isManagingCall()) {
-            // Core-Telecom is the only route authority for a managed call.
-            // Linphone follows Android's communication route; assigning one of
-            // its enumerated devices here races Bluetooth/automotive endpoints.
+            synchronizeTelecomAudioRoute()
             currentCall?.let { emitCall(it, it.state) }
             Log.i(
                 "VoIPCloud/Linphone",
@@ -2086,6 +2101,9 @@ private class LinphoneBridge private constructor(private val context: android.co
         val normalized = normalizeAudioRoute(route)
         val currentCore = core ?: return requestedAudioRoute
         val currentCall = findCurrentCall()
+        check(findOutputDevice(availableAudioDevices(currentCore), normalized) != null) {
+            "The selected audio route is unavailable."
+        }
         // Persist the user/app selection immediately. Observed output can lag behind
         // Bluetooth SCO teardown and previously snapped the route back to Bluetooth.
         requestedAudioRoute = normalized
@@ -2107,7 +2125,59 @@ private class LinphoneBridge private constructor(private val context: android.co
             "VoIPCloud/Linphone",
             "Audio route requested=$normalized applied=$applied"
         )
-        return normalized
+        return applied
+    }
+
+    private fun synchronizeTelecomAudioRoute() {
+        val managed = AndroidCallCoordinator.isManagingCall()
+        // Telecom owns SCO/communication-device selection. Sound-card changes
+        // must not change AudioManager's route behind its back.
+        if (org.linphone.mediastream.MediastreamerAndroidContext.isAudioRouteChangesDisabled() != managed) {
+            org.linphone.mediastream.MediastreamerAndroidContext.disableAudioRouteChanges(managed)
+        }
+        if (!managed) return
+        val snapshot = AndroidCallCoordinator.audioSnapshot() ?: return
+        val endpoint = snapshot.endpoints.firstOrNull {
+            it.id == snapshot.currentEndpointId
+        } ?: return
+        val currentCore = core ?: return
+        val devices = availableAudioDevices(currentCore)
+        val output = findOutputDevice(devices, endpoint.route) ?: run {
+            Log.w("VoIPCloud/Audio", "Confirmed Telecom route has no SDK output route=${endpoint.route}")
+            return
+        }
+        val input = findInputDevice(devices, endpoint.route, output)
+        if (synchronizingTelecomAudio) return
+        synchronizingTelecomAudio = true
+        try {
+            var changed = false
+            if (currentCore.defaultOutputAudioDevice?.id != output.id) {
+                currentCore.defaultOutputAudioDevice = output
+                changed = true
+            }
+            if (input != null && currentCore.defaultInputAudioDevice?.id != input.id) {
+                currentCore.defaultInputAudioDevice = input
+                changed = true
+            }
+            // Include held/concurrent legs so resuming or swapping cannot revive
+            // an old speaker card. Do not alter mute, hold, or system volume.
+            currentCore.calls.orEmpty().forEach { call ->
+                if (call.state !in listOf(Call.State.End, Call.State.Released, Call.State.Error)) {
+                    if (call.outputAudioDevice?.id != output.id) {
+                        call.outputAudioDevice = output
+                        changed = true
+                    }
+                    if (input != null && call.inputAudioDevice?.id != input.id) {
+                        call.inputAudioDevice = input
+                        changed = true
+                    }
+                }
+            }
+            requestedAudioRoute = endpoint.route
+            if (changed) Log.i("VoIPCloud/Audio", "SDK synchronized with Telecom route=${endpoint.route} input=${input != null}")
+        } finally {
+            synchronizingTelecomAudio = false
+        }
     }
 
     private fun applyAudioRoute(core: Core, call: Call?, route: String): String {
@@ -2149,10 +2219,10 @@ private class LinphoneBridge private constructor(private val context: android.co
             return
         }
         if (AndroidCallCoordinator.isManagingCall()) {
-            // Endpoint changes are requested through CallControlScope. Do not
-            // overwrite the resulting AudioManager route from Linphone.
+            synchronizeTelecomAudioRoute()
             return
         }
+        org.linphone.mediastream.MediastreamerAndroidContext.disableAudioRouteChanges(false)
         if (audioRouteCallId != id) {
             audioRouteCallId = id
             requestedAudioRoute = preferredDefaultAudioRoute()
@@ -2202,10 +2272,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun normalizeAudioRoute(route: String): String {
-        return when (route) {
-            "speaker", "bluetooth" -> route
-            else -> "earpiece"
-        }
+        return AudioRoutePolicy.normalize(route)
     }
 
     private fun isBluetoothType(type: AudioDevice.Type?): Boolean {
@@ -2236,12 +2303,11 @@ private class LinphoneBridge private constructor(private val context: android.co
 
     private fun findOutputDevice(devices: List<AudioDevice>, route: String): AudioDevice? {
         val playable = devices.filter(::canPlay)
-        return when (normalizeAudioRoute(route)) {
-            "speaker" -> playable.firstOrNull { it.type == AudioDevice.Type.Speaker }
-            "bluetooth" -> playable.firstOrNull { isBluetoothType(it.type) }
-            else -> playable.firstOrNull { it.type == AudioDevice.Type.Earpiece }
-                ?: playable.firstOrNull { isHandsetOutputType(it.type) }
+        // Prefer the bidirectional SCO card over an A2DP music-only card.
+        if (route == "bluetooth") {
+            playable.firstOrNull { it.type == AudioDevice.Type.Bluetooth }?.let { return it }
         }
+        return playable.firstOrNull { AudioRoutePolicy.matchesOutput(route, it.type.name) }
     }
 
     private fun findInputDevice(
@@ -2251,11 +2317,14 @@ private class LinphoneBridge private constructor(private val context: android.co
     ): AudioDevice? {
         val recordable = devices.filter(::canRecord)
         return when (normalizeAudioRoute(route)) {
-            "bluetooth" -> {
+            "bluetooth", "wired", "streaming" -> {
                 if (canRecord(output)) {
                     output
                 } else {
-                    recordable.firstOrNull { isBluetoothType(it.type) }
+                    recordable.firstOrNull { it.type == output.type }
+                        ?: if (normalizeAudioRoute(route) != "bluetooth") {
+                            recordable.firstOrNull { it.type == AudioDevice.Type.Microphone }
+                        } else null
                 }
             }
             else -> recordable.firstOrNull { it.type == AudioDevice.Type.Microphone }
@@ -2319,7 +2388,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun audioRouteForCall(call: Call): String {
-        AndroidCallCoordinator.snapshot()?.takeIf {
+        AndroidCallCoordinator.audioSnapshot()?.takeIf {
             it.telecomManaged && !it.isTerminal
         }?.let { snapshot ->
             return snapshot.endpoints.firstOrNull {
@@ -2492,28 +2561,29 @@ private class LinphoneBridge private constructor(private val context: android.co
         return requireNotNull(Factory.instance().createAddress(uri))
     }
 
-    private fun startPresenceSubscriptions(rawExtensions: List<*>) {
+    private fun startPresenceSubscriptions(rawExtensions: List<*>, diagnostic: Boolean = false, subscriptionId: String = "") {
         val currentCore = requireNotNull(core) { "Linphone core is not initialized" }
-        stopPresenceSubscriptions()
+        stopPresenceSubscriptions(diagnostic)
         rawExtensions
             .mapNotNull { (it as? String)?.trim() }
-            .filter { it.matches(Regex("^[0-9]{2,8}$")) }
+            .filter { it.matches(Regex(if (diagnostic) "^\\*76[0-9]{2,8}$" else "^[0-9]{2,8}$")) }
             .distinct()
-            .take(250)
+            .take(if (diagnostic) 1 else 250)
             .forEach { extension ->
               listOf(
                 "dialog" to "application/dialog-info+xml",
                 "presence" to "application/pidf+xml"
-              ).forEach { (eventPackage, accept) ->
+              ).filter { subscriptionId.isEmpty() || it.first == "dialog" }.forEach { (eventPackage, accept) ->
                 val event = currentCore.createSubscribe(
                     normalizeDestination(extension),
                     eventPackage,
-                    300
+                    if (diagnostic && subscriptionId.isEmpty()) 120 else 300
                 )
                 event.addCustomHeader("Accept", accept)
                 presenceSubscriptions[event] = PresenceSubscription(
                     extension,
-                    eventPackage
+                    eventPackage,
+                    subscriptionId
                 )
                 if (event.sendSubscribe(null) != 0) {
                     presenceSubscriptions.remove(event)
@@ -2523,6 +2593,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                             "kind" to "subscription",
                             "extension" to extension,
                             "event" to eventPackage,
+                            "subscriptionId" to subscriptionId,
                             "state" to "error"
                         )
                     )
@@ -2535,15 +2606,18 @@ private class LinphoneBridge private constructor(private val context: android.co
         )
     }
 
-    private fun stopPresenceSubscriptions() {
-        presenceSubscriptions.keys.toList().forEach { event ->
+    private fun stopPresenceSubscriptions(diagnostic: Boolean? = null) {
+        val events = presenceSubscriptions.filter {
+            diagnostic == null || it.value.extension.startsWith("*76") == diagnostic
+        }.keys.toList()
+        events.forEach { event ->
+            presenceSubscriptions.remove(event)
             try {
                 event.terminate()
             } catch (error: Throwable) {
                 Log.w("VoIPCloud/Linphone", "Failed to terminate BLF subscription", error)
             }
         }
-        presenceSubscriptions.clear()
     }
 
     private fun subscriptionState(state: SubscriptionState?): String = when (state) {
@@ -2972,6 +3046,7 @@ private class LinphoneBridge private constructor(private val context: android.co
         stopPresenceSubscriptions()
         core?.removeListener(listener)
         core?.stop()
+        org.linphone.mediastream.MediastreamerAndroidContext.disableAudioRouteChanges(false)
         core = null
         ringtoneSourcePath = null
         account = null

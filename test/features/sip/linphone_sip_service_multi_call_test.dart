@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -28,6 +29,7 @@ void main() {
         callHistoryRepository: history,
         postDialPause: Duration.zero,
         postDialToneGap: Duration.zero,
+        outgoingRegistrationTimeout: const Duration(milliseconds: 80),
       );
       await service.initialize(_config);
       platform.emitRegistration({'status': 'registered'});
@@ -38,6 +40,170 @@ void main() {
       await service.dispose();
       await platform.close();
     });
+
+    void useIos() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    }
+
+    test(
+      'iOS recovers failed registration before creating an outgoing call',
+      () async {
+        useIos();
+        platform.emitRegistration({'status': 'failed'});
+        await _flushEvents();
+        platform.onRegister = () async =>
+            platform.emitRegistration({'status': 'registered'});
+        await service.makeCall('211');
+        expect(platform.registrationRequests, 1);
+        expect(platform.actions, ['call:211']);
+        expect(history.items, isEmpty);
+      },
+    );
+
+    test(
+      'iOS waits for actual REGISTER confirmation, not method completion',
+      () async {
+        useIos();
+        platform.emitRegistration({'status': 'registering'});
+        await _flushEvents();
+        final dialing = service.makeCall('211');
+        await _flushEvents();
+        expect(platform.registrationRequests, 1);
+        expect(platform.actions, isEmpty);
+        expect(service.liveCalls, isEmpty);
+        platform.emitRegistration({'status': 'registered'});
+        await dialing;
+        expect(platform.actions, ['call:211']);
+      },
+    );
+
+    test(
+      'iOS dial joins a registration request already started by resume',
+      () async {
+        useIos();
+        platform.emitRegistration({'status': 'failed'});
+        await _flushEvents();
+        final nativeRequest = Completer<void>();
+        platform.onRegister = () => nativeRequest.future;
+        final resuming = service.register();
+        final dialing = service.makeCall('211');
+        await _flushEvents();
+        expect(platform.registrationRequests, 1);
+        expect(platform.actions, isEmpty);
+        platform.emitRegistration({'status': 'registered'});
+        nativeRequest.complete();
+        await Future.wait([resuming, dialing]);
+        expect(platform.actions, ['call:211']);
+      },
+    );
+
+    test('iOS repeated taps during recovery create only one call', () async {
+      useIos();
+      platform.emitRegistration({'status': 'failed'});
+      await _flushEvents();
+      final first = service.makeCall('211');
+      final repeated = service.makeCall('211');
+      await _flushEvents();
+      expect(platform.registrationRequests, 1);
+      expect(platform.actions, isEmpty);
+      platform.emitRegistration({'status': 'registered'});
+      await Future.wait([first, repeated]);
+      expect(platform.actions, ['call:211']);
+    });
+
+    test('iOS cannot queue a different destination during recovery', () async {
+      useIos();
+      platform.emitRegistration({'status': 'failed'});
+      await _flushEvents();
+      final first = service.makeCall('211');
+      expect(() => service.makeCall('212'), throwsA(isA<Exception>()));
+      await _flushEvents();
+      platform.emitRegistration({'status': 'registered'});
+      await first;
+      expect(platform.actions, ['call:211']);
+    });
+
+    test('iOS registration rejection creates no call or history', () async {
+      useIos();
+      platform.emitRegistration({'status': 'failed'});
+      await _flushEvents();
+      platform.onRegister = () async =>
+          platform.emitRegistration({'status': 'failed'});
+      await expectLater(service.makeCall('211'), throwsA(isA<Exception>()));
+      expect(platform.actions, isEmpty);
+      expect(service.liveCalls, isEmpty);
+      expect(history.items, isEmpty);
+    });
+
+    test('iOS registration timeout is bounded and can be retried', () async {
+      useIos();
+      platform.emitRegistration({'status': 'failed'});
+      await _flushEvents();
+      await expectLater(service.makeCall('211'), throwsA(isA<Exception>()));
+      expect(platform.actions, isEmpty);
+      expect(history.items, isEmpty);
+      platform.onRegister = () async =>
+          platform.emitRegistration({'status': 'registered'});
+      await service.makeCall('211');
+      expect(platform.registrationRequests, 2);
+      expect(platform.actions, ['call:211']);
+    });
+
+    test(
+      'iOS recovery never refreshes an account during a live or held call',
+      () async {
+        useIos();
+        for (final state in ['active', 'held']) {
+          platform.emitCall(_event('existing', state));
+          platform.emitRegistration({'status': 'failed'});
+          await _flushEvents();
+          await expectLater(service.makeCall('211'), throwsA(isA<Exception>()));
+        }
+        expect(platform.registrationRequests, 0);
+        expect(platform.actions, isEmpty);
+      },
+    );
+
+    test(
+      'iOS pending dial cannot run after logout even with late success',
+      () async {
+        useIos();
+        platform.emitRegistration({'status': 'failed'});
+        await _flushEvents();
+        final dialing = service.makeCall('211');
+        final rejected = expectLater(dialing, throwsA(isA<Exception>()));
+        await _flushEvents();
+        await service.purgeAccount();
+        platform.emitRegistration({'status': 'registered'});
+        await rejected;
+        expect(platform.actions, isEmpty);
+        expect(history.items, isEmpty);
+      },
+    );
+
+    test('iOS registration method errors do not create a call', () async {
+      useIos();
+      platform.emitRegistration({'status': 'failed'});
+      await _flushEvents();
+      platform.onRegister = () async =>
+          throw StateError('native registration unavailable');
+      await expectLater(service.makeCall('211'), throwsStateError);
+      expect(platform.actions, isEmpty);
+    });
+
+    test(
+      'desktop registration failure retains existing dialing behavior',
+      () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        platform.emitRegistration({'status': 'failed'});
+        await _flushEvents();
+        await expectLater(service.makeCall('211'), throwsA(isA<Exception>()));
+        expect(platform.registrationRequests, 0);
+        expect(platform.actions, isEmpty);
+      },
+    );
 
     test('DND dials *76 twice and never enters call UI or history', () async {
       for (var index = 0; index < 2; index++) {
@@ -61,6 +227,37 @@ void main() {
       }
       expect(platform.actions, ['feature:*76', 'feature:*76']);
       expect(history.items, isEmpty);
+    });
+
+    test('immediate DND refuses active calls without queuing', () async {
+      platform.emitCall(_event('conversation', 'active'));
+      await _flushEvents();
+      await expectLater(
+        service.syncPbxDndToggle(requireImmediate: true),
+        throwsA(isA<Exception>()),
+      );
+      platform.emitCall(_event('conversation', 'ended'));
+      await _flushEvents();
+      expect(platform.actions, isEmpty);
+    });
+
+    test('immediate DND refuses held calls and offline registration', () async {
+      platform.emitCall(_event('conversation', 'held'));
+      await _flushEvents();
+      await expectLater(
+        service.syncPbxDndToggle(requireImmediate: true),
+        throwsA(isA<Exception>()),
+      );
+      platform.emitCall(_event('conversation', 'ended'));
+      platform.emitRegistration({'status': 'unregistered'});
+      await _flushEvents();
+      await expectLater(
+        service.syncPbxDndToggle(requireImmediate: true),
+        throwsA(isA<Exception>()),
+      );
+      platform.emitRegistration({'status': 'registered'});
+      await _flushEvents();
+      expect(platform.actions, isEmpty);
     });
 
     test('DND feature dial waits for the current call to end', () async {
@@ -669,6 +866,8 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   final List<String> actions = [];
   final List<String> acknowledgedHistoryEvents = [];
   final Map<String, Map<String, dynamic>> _calls = {};
+  Future<void> Function()? onRegister;
+  int registrationRequests = 0;
 
   @override
   Stream<Map<String, dynamic>> registrationEvents() =>
@@ -687,7 +886,10 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   Future<void> configureAccount(Map<String, Object?> account) async {}
 
   @override
-  Future<void> register() async {}
+  Future<void> register() async {
+    registrationRequests++;
+    await onRegister?.call();
+  }
 
   @override
   Future<void> acknowledgeCallHistoryEvent(String eventId) async {

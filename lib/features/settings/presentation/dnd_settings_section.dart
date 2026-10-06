@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../shared/icons/app_icons.dart';
 import 'settings_controller.dart';
+import '../application/pbx_dnd_monitor.dart';
 
 class DndSettingsSection extends StatelessWidget {
   const DndSettingsSection({
@@ -9,6 +10,7 @@ class DndSettingsSection extends StatelessWidget {
     required this.scope,
     required this.onEnabledChanged,
     required this.onScopeChanged,
+    this.pbxState,
     super.key,
   });
 
@@ -16,6 +18,7 @@ class DndSettingsSection extends StatelessWidget {
   final DndScope scope;
   final ValueChanged<bool> onEnabledChanged;
   final ValueChanged<DndScope> onScopeChanged;
+  final PbxDndState? pbxState;
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +67,11 @@ class DndSettingsSection extends StatelessWidget {
           ),
           child: SwitchListTile.adaptive(
             title: const Text('Enable do not disturb'),
-            subtitle: Text('Applies to: ${scope.label.toLowerCase()}'),
+            subtitle: Text(
+              scope == DndScope.allDevices && pbxState != null
+                  ? pbxState!.message
+                  : 'Applies to: ${scope.label.toLowerCase()}',
+            ),
             value: enabled,
             activeThumbColor: Colors.white,
             activeTrackColor: theme.colorScheme.primary,
@@ -72,7 +79,12 @@ class DndSettingsSection extends StatelessWidget {
             inactiveTrackColor: theme.brightness == Brightness.dark
                 ? const Color(0xFF5C616A)
                 : const Color(0xFFB8BCC4),
-            onChanged: onEnabledChanged,
+            onChanged:
+                scope == DndScope.allDevices &&
+                    pbxState != null &&
+                    !pbxState!.canChange
+                ? null
+                : onEnabledChanged,
           ),
         ),
         const SizedBox(height: 10),

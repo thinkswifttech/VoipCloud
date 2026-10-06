@@ -3,6 +3,7 @@ class StorageKeys {
 
   static const appThemeMode = 'app.theme_mode';
   static const appDndEnabled = 'app.dnd_enabled';
+  static const appLocalDndEnabled = 'app.local_dnd_enabled';
   static const appDndScope = 'app.dnd_scope';
   static const appVoipDebugLogsEnabled = 'app.voip_debug_logs_enabled';
 

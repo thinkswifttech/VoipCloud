@@ -10,6 +10,7 @@ import '../../features/calls/domain/call_status.dart';
 import '../../features/calls/domain/voip_call.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/settings/presentation/settings_controller.dart';
+import '../../features/settings/presentation/pbx_dnd_providers.dart';
 import '../../features/sip/application/registration_refresh_coordinator.dart';
 import '../../features/sip/domain/sip_registration_state.dart';
 import '../../features/sip/presentation/sip_log_providers.dart';
@@ -84,6 +85,7 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
       case AppLifecycleState.resumed:
         _backgroundTransitionSent = false;
         await _platformChannel.enterForeground();
+        ref.read(pbxDndMonitorProvider).refresh();
         if (ref.read(settingsControllerProvider).voipDebugLogsEnabled) {
           unawaited(ref.read(sipLogStoreProvider).refreshFromNativeFile());
         }
@@ -119,12 +121,14 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
       _hadNetwork = null;
     }
     if (!mounted) return;
+    _configurePbxDnd();
     _connectivitySubscription = connectivity.onConnectivityChanged.listen((
       results,
     ) {
       final hasNetwork = _hasNetwork(results);
       final restored = _hadNetwork == false && hasNetwork;
       _hadNetwork = hasNetwork;
+      _configurePbxDnd();
       if (!restored ||
           WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
@@ -169,5 +173,41 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
   }
 
   @override
-  Widget build(BuildContext context) => widget.child;
+  Widget build(BuildContext context) {
+    ref.watch(sessionControllerProvider);
+    ref.watch(sipRegistrationStateProvider);
+    // Configure after the frame to avoid changing other provider state while
+    // widgets are building; reread current values to discard stale frames.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _configurePbxDnd();
+    });
+    return widget.child;
+  }
+
+  void _configurePbxDnd() {
+    if (!mounted) return;
+    final current = ref.read(sipServiceProvider).currentConfig;
+    ref
+        .read(pbxDndMonitorProvider)
+        .configure(
+          identity: current?.sipIdentity,
+          extension: current?.extension,
+          domain: current?.domain,
+          registered:
+              _hadNetwork != false &&
+              ref
+                      .read(sessionControllerProvider)
+                      .asData
+                      ?.value
+                      ?.canRegisterSip ==
+                  true &&
+              (ref
+                      .read(sipRegistrationStateProvider)
+                      .asData
+                      ?.value
+                      .isRegistered ??
+                  false),
+        );
+  }
 }

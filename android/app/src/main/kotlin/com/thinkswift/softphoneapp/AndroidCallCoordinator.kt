@@ -140,6 +140,15 @@ internal object AndroidCallCoordinator {
 
     fun snapshot(): Snapshot? = preferredSession()?.snapshot
 
+    // An incoming waiting call is preferred for answer/reject actions, but it
+    // must not replace the established conversation's audio endpoint.
+    private fun audioSession(): Session? {
+        val sessions = managedSessions().filter { it.snapshot.telecomManaged }
+        return sessions.minByOrNull { AudioRoutePolicy.sessionPriority(it.snapshot.state.name) }
+    }
+
+    fun audioSnapshot(): Snapshot? = audioSession()?.snapshot
+
     private fun managedSessions(): List<Session> =
         listOfNotNull(session, secondarySession).filter { !it.snapshot.isTerminal }
 
@@ -757,7 +766,7 @@ internal object AndroidCallCoordinator {
     fun requestEndpoint(endpointId: String, onResult: (Result<String>) -> Unit) {
         scope.launch {
             endpointChangeMutex.withLock {
-                val target = preferredSession()
+                val target = audioSession()
                 val endpoint = target?.rawEndpoints?.firstOrNull {
                     it.identifier.toString() == endpointId
                 }
@@ -769,7 +778,22 @@ internal object AndroidCallCoordinator {
                     return@withLock
                 }
                 when (val result = control.requestEndpointChange(endpoint)) {
-                    is CallControlResult.Success -> onResult(Result.success(routeFor(endpoint)))
+                    is CallControlResult.Success -> {
+                        // Success accepts the request; the endpoint flow confirms
+                        // activation. Do not announce a route that is still pending.
+                        val confirmed = withTimeoutOrNull(3_000L) {
+                            while (owns(target) && !target.snapshot.isTerminal &&
+                                target.snapshot.currentEndpointId != endpointId) {
+                                delay(25L)
+                            }
+                            owns(target) && !target.snapshot.isTerminal &&
+                                target.snapshot.currentEndpointId == endpointId
+                        } == true
+                        if (confirmed) onResult(Result.success(routeFor(endpoint)))
+                        else onResult(Result.failure(IllegalStateException(
+                            "Audio endpoint activation was not confirmed."
+                        )))
+                    }
                     is CallControlResult.Error -> onResult(
                         Result.failure(IllegalStateException(
                             "Telecom endpoint change failed: ${result.errorCode}"
@@ -785,7 +809,7 @@ internal object AndroidCallCoordinator {
             "speaker", "bluetooth", "wired", "streaming" -> route
             else -> "earpiece"
         }
-        val endpoint = preferredSession()?.snapshot?.endpoints?.firstOrNull { it.route == normalized }
+        val endpoint = audioSnapshot()?.endpoints?.firstOrNull { it.route == normalized }
         if (endpoint == null) {
             onResult(Result.failure(IllegalArgumentException("Audio route is unavailable.")))
         } else {
@@ -794,7 +818,7 @@ internal object AndroidCallCoordinator {
     }
 
     fun endpoints(): List<Map<String, Any?>> {
-        val current = snapshot() ?: return emptyList()
+        val current = audioSnapshot() ?: return emptyList()
         return current.endpoints.map { it.toMap(current.currentEndpointId) }
     }
 

@@ -23,6 +23,8 @@ import 'audio_route_picker.dart';
 import 'call_duration.dart';
 import 'call_quality_sheet.dart';
 import 'call_session_providers.dart';
+import 'call_waiting_banner.dart';
+import 'call_waiting_presentation.dart';
 import 'caller_avatar.dart';
 import 'caller_identity.dart';
 
@@ -78,7 +80,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     });
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
-      final active = ref.read(activeCallProvider).value;
+      final active = ref.read(displayedInCallProvider);
       if (active != null && _canReadQuality(active.status)) {
         setState(() {});
       }
@@ -108,7 +110,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   }
 
   Future<void> _refreshQuality() async {
-    final active = ref.read(activeCallProvider).value;
+    final active = ref.read(displayedInCallProvider);
     final call = isInCallUiCall(active) ? active! : widget.call;
     // Linphone's RTP/RTCP statistics are not valid before media streams exist.
     // Some iOS SDK builds access an uninitialised native stats object when
@@ -136,7 +138,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
   Widget build(BuildContext context) {
     // Prefer the live session call so keypad ↔ controls share the same
     // mute / audio-route state without relying on a stale widget snapshot.
-    final live = ref.watch(activeCallProvider).value;
+    final live = ref.watch(displayedInCallProvider);
     // Linphone may promote a temporary object ID to the SIP Call-ID after this
     // widget was created, so the live provider snapshot is always the
     // authoritative control target, including during multi-call workflows.
@@ -193,17 +195,15 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       }
     }
 
-    ref.listen(activeCallProvider, (_, next) {
-      next.whenData((liveCall) {
-        if (!widget.enableProximity ||
-            liveCall == null ||
-            !isInCallUiCall(liveCall) ||
-            _showKeypad) {
-          _setProximity(false);
-          return;
-        }
-        _setProximity(liveCall.audioRoute == AudioOutputRoute.earpiece);
-      });
+    ref.listen(displayedInCallProvider, (_, liveCall) {
+      if (!widget.enableProximity ||
+          liveCall == null ||
+          !isInCallUiCall(liveCall) ||
+          _showKeypad) {
+        _setProximity(false);
+        return;
+      }
+      _setProximity(liveCall.audioRoute == AudioOutputRoute.earpiece);
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -269,6 +269,14 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     final qualityLabel = quality?.qualityLabel ?? 'Checking…';
     final bars = _qualityBars(qualityScore);
     final durationLabel = _durationLabel(call);
+    final waiting = selectWaitingCall(calls, excludingId: call.id);
+    final waitingIdentity = waiting == null
+        ? null
+        : resolveCallerIdentity(
+            call: waiting,
+            contacts: ref.watch(contactsProvider).value ?? const [],
+            directory: ref.watch(directoryProvider).value ?? const [],
+          );
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -426,6 +434,27 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                       ),
                       child: Column(
                         children: [
+                          if (waiting != null) ...[
+                            CallWaitingBanner(
+                              callerName: waitingIdentity!.label,
+                              onView: () {
+                                final current = selectWaitingCall(
+                                  ref.read(liveCallsProvider).value ?? const [],
+                                  excludingId: call.id,
+                                );
+                                if (current == null) return;
+                                ref
+                                    .read(
+                                      callWaitingPresentationProvider.notifier,
+                                    )
+                                    .showWaiting(current.id);
+                                context.go(
+                                  RoutePaths.incomingCallPath(current.id),
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 12),
+                          ],
                           _CallQualityHeader(
                             bars: bars,
                             color: qualityColor,

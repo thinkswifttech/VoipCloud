@@ -68,42 +68,6 @@ class RunnerTests: XCTestCase {
     XCTAssertThrowsError(try IOSCallKitTonePolicy.prepareWaitingTone(in: file))
   }
 
-  func testToneDiagnosticsCaptureStartAndStopWithoutSDKPayload() {
-    XCTAssertEqual(
-      IOSToneDiagnostic.event(from: "[210] [ToneManager] startNamedTone"),
-      "sdk_tone_action=startNamedTone"
-    )
-    XCTAssertEqual(
-      IOSToneDiagnostic.event(from: "[ToneManager] playFile /private/secret.wav sip:user@example.com"),
-      "sdk_tone_action=playFile"
-    )
-    XCTAssertEqual(IOSToneDiagnostic.event(from: "[ToneManager] stopTone"), "sdk_tone_action=stopTone")
-  }
-
-  func testToneDiagnosticsDiscardUnrelatedAndAppleLogs() {
-    XCTAssertNil(IOSToneDiagnostic.event(from: "Authorization: Digest password=secret"))
-    XCTAssertNil(IOSToneDiagnostic.event(from: "<TLToneManager>: currentToneIdentifierForAlertType"))
-    XCTAssertNil(IOSToneDiagnostic.event(from: "INVITE sip:210@example.com"))
-  }
-
-  func testUnknownToneActionCannotLeakPayload() {
-    XCTAssertEqual(
-      IOSToneDiagnostic.event(from: "[ToneManager] secret-token secret-address"),
-      "sdk_tone_action=other"
-    )
-  }
-
-  func testGainFailuresAreIncludedWithoutCallerIdentity() {
-    XCTAssertEqual(
-      IOSToneDiagnostic.event(from: "[210] Could not apply playback gain: gain control wasn't activated."),
-      "sdk_playback_gain_unavailable"
-    )
-    XCTAssertEqual(
-      IOSToneDiagnostic.event(from: "Could not apply gain on sent RTP packets: gain control wasn't activated."),
-      "sdk_microphone_gain_unavailable"
-    )
-  }
-
   func testExternalCallDestinationFromOpaqueURL() throws {
     let url = try XCTUnwrap(URL(string: "tel:%2B14165550100"))
 

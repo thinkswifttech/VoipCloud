@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/features/settings/presentation/settings_controller.dart';
+import 'package:phone_app/features/settings/application/pbx_dnd_monitor.dart';
 
 void main() {
   test('migrates legacy enabled DND to all devices', () {
@@ -17,11 +18,11 @@ void main() {
     const off = SettingsState();
     const deviceOnly = SettingsState(dndEnabled: true);
 
-    expect(shouldTogglePbxDnd(off, deviceOnly), isFalse);
-    expect(shouldTogglePbxDnd(deviceOnly, off), isFalse);
+    expect(off.pbxDnd.enabled, isNull);
+    expect(deviceOnly.pbxDnd.enabled, isNull);
   });
 
-  test('entering or leaving enabled all-device scope toggles PBX once', () {
+  test('local DND and PBX DND remain independent of selected scope', () {
     const off = SettingsState(dndScope: DndScope.allDevices);
     const allDevices = SettingsState(
       dndEnabled: true,
@@ -32,16 +33,27 @@ void main() {
       dndScope: DndScope.thisDevice,
     );
 
-    expect(shouldTogglePbxDnd(off, allDevices), isTrue);
-    expect(shouldTogglePbxDnd(allDevices, off), isTrue);
-    expect(shouldTogglePbxDnd(thisDevice, allDevices), isTrue);
-    expect(shouldTogglePbxDnd(allDevices, thisDevice), isTrue);
+    expect(off.pbxDnd.canChange, isFalse);
+    expect(allDevices.selectedDndEnabled, isFalse);
+    expect(thisDevice.selectedDndEnabled, isTrue);
+    final confirmed = allDevices.copyWith(
+      pbxDnd: const PbxDndState(enabled: true),
+    );
+    expect(confirmed.selectedDndEnabled, isTrue);
+    expect(
+      confirmed.copyWith(dndScope: DndScope.thisDevice).localDndEnabled,
+      isTrue,
+    );
   });
 
   test('changing scope while DND is off does not toggle PBX', () {
     const deviceOff = SettingsState();
     const allOff = SettingsState(dndScope: DndScope.allDevices);
 
-    expect(shouldTogglePbxDnd(deviceOff, allOff), isFalse);
+    expect(
+      deviceOff.copyWith(dndScope: DndScope.allDevices).pbxDnd.enabled,
+      isNull,
+    );
+    expect(allOff.localDndEnabled, isFalse);
   });
 }

@@ -213,8 +213,60 @@ is implemented by the Android, iOS, macOS, and Windows bridges.
 
 ### `stopPresenceSubscriptions`
 
-Terminates every active BLF subscription. This is called when the Directory
-screen closes and before SIP unregistration or native-core disposal.
+Terminates the ordinary BLF set when invoked from Flutter. Native account
+cleanup and core disposal terminate both ordinary and diagnostic sets.
+
+Both subscription methods accept an optional `diagnostic` boolean (default
+false). With true, start accepts one numeric DND hint, e.g.
+`{"extensions":["*76210"],"diagnostic":true}`, and replaces only the diagnostic
+set. Stop with `{"diagnostic":true}` terminates only that set. Diagnostic
+subscriptions request 120-second leases using the existing account and routing.
+The Diagnostics screen limits the test to two minutes and stops on departure,
+registration loss or account change. No INVITE, DND toggle, settings mutation or
+automatic interpretation of notifications occurs. Both event packages are
+tested because the deployed PBX's NOTIFY format must be observed first.
+
+Presence event consumers share one native event-channel stream. Subscription
+states are SDK states, not raw SIP response codes; notify events contain the
+event package, content type and body. Copyable diagnostic output is bounded and
+sanitized. Treat it as private support data.
+
+### Persistent PBX DND observer
+
+Flutter uses `startPbxDndSubscription(extension, subscriptionId)` to request
+`{"extensions":["*76210"],"diagnostic":true,"subscriptionId":"unique-epoch"}`.
+With a non-empty epoch, native bridges create only a `dialog` subscription with
+a 300-second lease and echo `subscriptionId` in every subscription/NOTIFY
+event. Ordinary BLF start/stop never replaces this separate DND set.
+The application-wide monitor renews at four minutes, retries failed observation
+with bounded exponential backoff, and refreshes on registration/resume/network
+recovery. Leaving Directory, Quick Dial or Settings does not stop observation.
+
+Only namespace-valid full dialog-info for the signed-in account's own hint is
+accepted. `confirmed` means on and `terminated` means off. Versions must increase
+within an epoch. Old epochs, older versions, wrong targets and malformed XML
+cannot mutate state. Partial documents trigger a new full-state subscription.
+Account changes/logout and lost registration/connectivity invalidate state.
+Diagnostics now displays live PBX state and provides a read-only refresh button;
+the temporary manual probe is not exposed alongside the persistent observer.
+
+All-devices switch changes dial `*76` once only after initial state is known,
+with no active/held/waiting calls or feature-code call. The confirmed switch
+does not change optimistically. A 15-second confirmation timeout triggers a
+read-only state refresh, never another toggle. Simultaneous toggles from two
+devices remain inherently non-atomic; all devices converge on PBX notifications.
+Idempotent set-on/set-off operations would require separately verified PBX codes.
+
+Local DND is stored independently as `app.local_dnd_enabled`. Legacy enabled
+all-devices preferences do not become local DND. Tab selection only changes
+the displayed scope, never PBX state. Remote notifications never persist local
+DND, issue a feature code, change provisioning or replay toggles on reconnect.
+Mobile suspension may defer observation; foreground resume fetches fresh state.
+
+Release verification still requires on/off tests from each physical platform,
+resume/locked-state catch-up, offline/reconnect, concurrent toggles, logout and
+account replacement. A macOS host is required to compile iOS/macOS; Windows
+build/test success is not evidence of completed Apple-device verification.
 
 ## Events
 

@@ -5,20 +5,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/storage_providers.dart';
-import '../../session/presentation/session_controller.dart';
 import '../../sip/presentation/sip_log_providers.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
+import '../application/pbx_dnd_monitor.dart';
+import 'pbx_dnd_providers.dart';
 
 class SettingsState {
   const SettingsState({
     this.voipDebugLogsEnabled = false,
-    this.dndEnabled = false,
+    bool dndEnabled = false,
     this.dndScope = DndScope.thisDevice,
     this.themeMode = AppThemeMode.system,
-  });
+    this.pbxDnd = const PbxDndState(),
+  }) : localDndEnabled = dndEnabled;
 
   final bool voipDebugLogsEnabled;
-  final bool dndEnabled;
+  final bool localDndEnabled;
+  final PbxDndState pbxDnd;
+  bool get dndEnabled => localDndEnabled || pbxDnd.enabled == true;
+  bool get selectedDndEnabled => dndScope == DndScope.thisDevice
+      ? localDndEnabled
+      : pbxDnd.enabled == true;
   final DndScope dndScope;
   final AppThemeMode themeMode;
 
@@ -35,12 +42,14 @@ class SettingsState {
     bool? dndEnabled,
     DndScope? dndScope,
     AppThemeMode? themeMode,
+    PbxDndState? pbxDnd,
   }) {
     return SettingsState(
       voipDebugLogsEnabled: voipDebugLogsEnabled ?? this.voipDebugLogsEnabled,
-      dndEnabled: dndEnabled ?? this.dndEnabled,
+      dndEnabled: dndEnabled ?? localDndEnabled,
       dndScope: dndScope ?? this.dndScope,
       themeMode: themeMode ?? this.themeMode,
+      pbxDnd: pbxDnd ?? this.pbxDnd,
     );
   }
 }
@@ -65,12 +74,6 @@ extension DndScopeDetails on DndScope {
   }
 }
 
-bool isPbxDndEnabled(SettingsState value) =>
-    value.dndEnabled && value.dndScope == DndScope.allDevices;
-
-bool shouldTogglePbxDnd(SettingsState previous, SettingsState next) =>
-    isPbxDndEnabled(previous) != isPbxDndEnabled(next);
-
 enum AppThemeMode { system, light, dark }
 
 extension AppThemeModeCodec on AppThemeMode {
@@ -87,10 +90,25 @@ final settingsControllerProvider =
     NotifierProvider<SettingsController, SettingsState>(SettingsController.new);
 
 class SettingsController extends Notifier<SettingsState> {
+  bool _localDndEdited = false;
+  bool _scopeEdited = false;
+  Future<void> _dndWrites = Future.value();
+
+  void _persistDnd(String key, String value) {
+    _dndWrites = _dndWrites.then((_) async {
+      try {
+        await ref.read(secureStorageProvider).write(key, value);
+      } catch (_) {}
+    });
+  }
+
   @override
   SettingsState build() {
+    ref.listen(pbxDndStateProvider, (_, next) {
+      state = state.copyWith(pbxDnd: next);
+    });
     unawaited(_restore());
-    return const SettingsState();
+    return SettingsState(pbxDnd: ref.read(pbxDndStateProvider));
   }
 
   void setVoipDebugLogsEnabled({required bool enabled}) {
@@ -107,14 +125,13 @@ class SettingsController extends Notifier<SettingsState> {
   }
 
   void setDndEnabled({required bool enabled}) {
-    final previous = state;
+    if (state.dndScope == DndScope.allDevices) {
+      unawaited(ref.read(pbxDndMonitorProvider).setEnabled(enabled));
+      return;
+    }
+    _localDndEdited = true;
     state = state.copyWith(dndEnabled: enabled);
-    unawaited(
-      ref
-          .read(secureStorageProvider)
-          .write(StorageKeys.appDndEnabled, enabled ? 'true' : 'false'),
-    );
-    _syncPbxDndIfChanged(previous);
+    _persistDnd(StorageKeys.appLocalDndEnabled, enabled ? 'true' : 'false');
     unawaited(_syncNativeDnd(enabled));
   }
 
@@ -122,14 +139,9 @@ class SettingsController extends Notifier<SettingsState> {
     if (scope == state.dndScope) {
       return;
     }
-    final previous = state;
+    _scopeEdited = true;
     state = state.copyWith(dndScope: scope);
-    unawaited(
-      ref
-          .read(secureStorageProvider)
-          .write(StorageKeys.appDndScope, scope.name),
-    );
-    _syncPbxDndIfChanged(previous);
+    _persistDnd(StorageKeys.appDndScope, scope.name);
   }
 
   void setThemeMode(AppThemeMode themeMode) {
@@ -151,29 +163,25 @@ class SettingsController extends Notifier<SettingsState> {
         await storage.read(StorageKeys.appDndScope),
         legacyDndEnabled: dndEnabled,
       );
+      final localStored = await storage.read(StorageKeys.appLocalDndEnabled);
+      final localEnabled = localStored == null
+          ? dndEnabled && dndScope == DndScope.thisDevice
+          : localStored == 'true';
       final voipLogs = await storage.read(StorageKeys.appVoipDebugLogsEnabled);
       final enabledLogs = voipLogs == 'true';
       state = state.copyWith(
         themeMode: AppThemeModeCodec.parse(theme),
-        dndEnabled: dndEnabled,
-        dndScope: dndScope,
+        dndEnabled: _localDndEdited ? state.localDndEnabled : localEnabled,
+        dndScope: _scopeEdited ? state.dndScope : dndScope,
         voipDebugLogsEnabled: enabledLogs,
       );
       if (enabledLogs) {
         await ref.read(sipLogStoreProvider).setEnabled(true);
       }
-      await _syncNativeDnd(dndEnabled);
+      await _syncNativeDnd(state.localDndEnabled);
     } catch (_) {
       // Keep defaults when secure storage is unavailable.
     }
-  }
-
-  void _syncPbxDndIfChanged(SettingsState previous) {
-    if (!shouldTogglePbxDnd(previous, state)) {
-      return;
-    }
-    // FreePBX *76 toggles extension-wide DND (same code for on and off).
-    unawaited(ref.read(sipServiceProvider).syncPbxDndToggle());
   }
 
   Future<void> _syncNativeDnd(bool enabled) async {

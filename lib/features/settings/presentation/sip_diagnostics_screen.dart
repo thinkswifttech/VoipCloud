@@ -12,6 +12,7 @@ import '../../session/domain/device_status.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_config.dart';
 import '../../sip/domain/sip_registration_state.dart';
+import 'pbx_dnd_providers.dart';
 
 class SipDiagnosticsScreen extends ConsumerWidget {
   const SipDiagnosticsScreen({super.key});
@@ -108,6 +109,26 @@ class SipDiagnosticsScreen extends ConsumerWidget {
             ),
             const SizedBox(height: 16),
             AppCard(
+              title: 'All-devices DND',
+              subtitle: ref.watch(pbxDndStateProvider).message,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(switch (ref.watch(pbxDndStateProvider).enabled) {
+                    true => 'PBX DND is enabled',
+                    false => 'PBX DND is disabled',
+                    null => 'PBX state is unavailable',
+                  }),
+                  const SizedBox(height: 12),
+                  OutlinedButton(
+                    onPressed: () => ref.read(pbxDndMonitorProvider).refresh(),
+                    child: const Text('Refresh DND state'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            AppCard(
               title: 'Calling setup',
               subtitle: 'Account details used for calls',
               child: sip == null
@@ -158,9 +179,8 @@ class SipDiagnosticsScreen extends ConsumerWidget {
                   ],
                 ),
                 loading: () => const Text('Loading application details...'),
-                error: (_, _) => const Text(
-                  'Application build details are unavailable.',
-                ),
+                error: (_, _) =>
+                    const Text('Application build details are unavailable.'),
               ),
             ),
             if (sip != null) ...[
