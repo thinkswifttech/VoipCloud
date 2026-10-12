@@ -846,6 +846,13 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                 title: const Text('Copy message'),
                 onTap: () => Navigator.pop(context, _MessageAction.copy),
               ),
+            if (message.text.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.text_fields_rounded),
+                title: const Text('Select text'),
+                subtitle: const Text('Copy just a part, like a code or key'),
+                onTap: () => Navigator.pop(context, _MessageAction.selectText),
+              ),
             ListTile(
               leading: Icon(
                 AppIcons.trash,
@@ -871,12 +878,53 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       await _deleteMessage(message);
       return;
     }
+    if (action == _MessageAction.selectText) {
+      await _showSelectableText(message);
+      return;
+    }
     if (action != _MessageAction.copy) return;
     await Clipboard.setData(ClipboardData(text: message.text));
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('Message copied')));
+  }
+
+  Future<void> _showSelectableText(CarrierMessage message) {
+    return showAppModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Touch and hold a word, then drag to select',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      message.text,
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   bool _canReplyTo(CarrierMessage message) {
@@ -1930,6 +1978,9 @@ class _MessageAttachmentViewState
           label: 'Open ${_fileName(widget.attachment)}',
           child: InkWell(
             onTap: () => _openViewer(content),
+            onLongPress: AppFiles.supportsImageCopy && _isImage
+                ? () => _copyImage(content)
+                : null,
             borderRadius: BorderRadius.circular(10),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(10),
@@ -1974,6 +2025,9 @@ class _MessageAttachmentViewState
           attachment: widget.attachment,
           content: content,
           onSave: () => _save(content),
+          onCopy: AppFiles.supportsImageCopy && _isImage
+              ? () => _copyImage(content)
+              : null,
         ),
       ),
     );
@@ -1995,6 +2049,28 @@ class _MessageAttachmentViewState
       );
     } finally {
       if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _copyImage(MessageAttachmentContent content) async {
+    try {
+      final copied = await AppFiles().copyImage(
+        bytes: content.bytes,
+        mimeType: content.contentType,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            copied ? 'Image copied' : 'Copying images is not supported here.',
+          ),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('The image could not be copied.')),
+      );
     }
   }
 
@@ -2034,11 +2110,13 @@ class _AttachmentViewerScreen extends StatelessWidget {
     required this.attachment,
     required this.content,
     required this.onSave,
+    this.onCopy,
   });
 
   final MessageAttachment attachment;
   final MessageAttachmentContent content;
   final Future<void> Function() onSave;
+  final Future<void> Function()? onCopy;
 
   @override
   Widget build(BuildContext context) {
@@ -2054,6 +2132,12 @@ class _AttachmentViewerScreen extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
         ),
         actions: [
+          if (onCopy case final copy?)
+            IconButton(
+              tooltip: 'Copy image',
+              onPressed: copy,
+              icon: const Icon(AppIcons.copy),
+            ),
           IconButton(
             tooltip: 'Save attachment',
             onPressed: onSave,
@@ -2350,4 +2434,4 @@ enum _ThreadAction { addContact, block, unblock }
 
 enum _ContactCardAction { create, addExisting, copy }
 
-enum _MessageAction { reply, copy, delete }
+enum _MessageAction { reply, copy, selectText, delete }

@@ -12,6 +12,19 @@ const bool blfFeedEnabled = bool.fromEnvironment(
 /// Optional origin of the BLF service; defaults to the directory origin.
 const String blfFeedBaseUrl = String.fromEnvironment('BLF_FEED_BASE_URL');
 
+/// Origin of the outgoing-link shortener (for example `https://go.example`).
+/// Empty means links are sent exactly as typed. Store builds set this only
+/// once the service and its domain are live.
+const String linkShortenerBaseUrl = String.fromEnvironment(
+  'LINK_SHORTENER_BASE_URL',
+);
+
+/// Links longer than this many characters are shortened before sending.
+const int linkShortenerMinLength = int.fromEnvironment(
+  'LINK_SHORTENER_MIN_LENGTH',
+  defaultValue: 50,
+);
+
 class AppConfig {
   const AppConfig({
     required this.environment,

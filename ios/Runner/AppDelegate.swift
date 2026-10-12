@@ -726,6 +726,37 @@ final class DownloadsFileBridge: NSObject, UIDocumentPickerDelegate {
         return
       }
       switch call.method {
+      case "copyImage":
+        let args = call.arguments as? [String: Any] ?? [:]
+        guard let bytes = args["bytes"] as? FlutterStandardTypedData,
+              !bytes.data.isEmpty,
+              UIImage(data: bytes.data) != nil
+        else {
+          result(
+            FlutterError(
+              code: "INVALID_ARGS",
+              message: "An image is required.",
+              details: nil
+            )
+          )
+          return
+        }
+        let mimeType = (args["mimeType"] as? String)?.lowercased() ?? ""
+        var type = "public.png"
+        var data = bytes.data
+        switch mimeType {
+        case "image/png": break
+        case "image/gif": type = "com.compuserve.gif"
+        case "image/jpeg", "image/jpg": type = "public.jpeg"
+        default:
+          // Formats other apps may not read (such as WebP) are re-encoded.
+          data = UIImage(data: bytes.data)?.pngData() ?? bytes.data
+        }
+        UIPasteboard.general.setItems(
+          [[type: data]],
+          options: [.localOnly: false]
+        )
+        result(true)
       case "saveToDownloads":
         do {
           let args = call.arguments as? [String: Any] ?? [:]

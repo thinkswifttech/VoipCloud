@@ -65,6 +65,9 @@ class UnconfiguredMessagingRepository implements MessagingRepository {
   }) => Future.error(const MessagingIntegrationUnavailable());
 
   @override
+  Future<String> shortenLinks(String text) async => text;
+
+  @override
   Future<CarrierMessage> sendMessage({
     required CarrierMessagingConfig config,
     required String destination,

@@ -73,6 +73,8 @@ bool FlutterWindow::OnCreate() {
   InitializeWindowChannel();
   linphone_bridge_ = std::make_unique<LinphoneWindowsBridge>(
       flutter_controller_->engine()->messenger(), GetHandle());
+  clipboard_image_bridge_ = std::make_unique<ClipboardImageBridge>(
+      flutter_controller_->engine()->messenger(), GetHandle());
   taskbar_pin_bridge_ = std::make_unique<TaskbarPinBridge>(
       flutter_controller_->engine()->messenger());
   windows_update_bridge_ = std::make_unique<WindowsUpdateBridge>(
@@ -100,6 +102,7 @@ void FlutterWindow::OnDestroy() {
   SaveWindowBounds();
   RemoveTrayIcon();
   window_channel_ = nullptr;
+  clipboard_image_bridge_ = nullptr;
   taskbar_pin_bridge_ = nullptr;
   windows_update_bridge_ = nullptr;
   windows_email_bridge_ = nullptr;

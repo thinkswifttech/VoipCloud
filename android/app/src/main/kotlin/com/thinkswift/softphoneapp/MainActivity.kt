@@ -366,6 +366,25 @@ class MainActivity : FlutterActivity() {
                         )
                     }
                 }
+                "copyImage" -> {
+                    try {
+                        val bytes = call.argument<ByteArray>("bytes")
+                        val mimeType = call.argument<String>("mimeType")?.trim()
+                            ?.ifEmpty { null } ?: "image/png"
+                        if (bytes == null || bytes.isEmpty() || !mimeType.startsWith("image/")) {
+                            result.error("INVALID_ARGS", "An image is required.", null)
+                            return@setMethodCallHandler
+                        }
+                        copyImageToClipboard(bytes, mimeType)
+                        result.success(true)
+                    } catch (error: Exception) {
+                        result.error(
+                            "COPY_FAILED",
+                            error.message ?: "Could not copy the image.",
+                            null
+                        )
+                    }
+                }
                 "pickCsv" -> {
                     if (pendingCsvPickResult != null) {
                         result.error(
@@ -585,6 +604,30 @@ class MainActivity : FlutterActivity() {
             character.isDigit() || character in "+*#().- "
         }
     }
+    private fun copyImageToClipboard(bytes: ByteArray, mimeType: String) {
+        val directory = java.io.File(cacheDir, "clipboard_images")
+        if (!directory.exists()) directory.mkdirs()
+        // One copied image at a time: older files are never needed again.
+        directory.listFiles()?.forEach { it.delete() }
+        val extension = when (mimeType.lowercase()) {
+            "image/png" -> "png"
+            "image/gif" -> "gif"
+            "image/webp" -> "webp"
+            else -> "jpg"
+        }
+        val file = java.io.File(directory, "image-${System.currentTimeMillis()}.$extension")
+        file.writeBytes(bytes)
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            this,
+            "$packageName.clipboardprovider",
+            file
+        )
+        val clip = android.content.ClipData.newUri(contentResolver, "Image", uri)
+        val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+            as android.content.ClipboardManager
+        clipboard.setPrimaryClip(clip)
+    }
+
 
     private fun saveBytesToDownloads(
         fileName: String,

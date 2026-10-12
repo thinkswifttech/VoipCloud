@@ -52,7 +52,12 @@ class CallRouteListener extends ConsumerWidget {
         ref.read(callWaitingPresentationProvider.notifier).reconcile(calls);
       }
       // Never reopen a cancelled call from a snapshot captured before this frame.
-      _routeForCall(context, ref, ref.read(activeCallProvider));
+      _routeForCall(
+        context,
+        ref,
+        ref.read(activeCallProvider),
+        presentEndedPage: false,
+      );
     });
 
     return child;
@@ -63,6 +68,7 @@ class CallRouteListener extends ConsumerWidget {
     WidgetRef ref,
     AsyncValue<VoipCall?> value, {
     bool invalidateHistory = false,
+    bool presentEndedPage = true,
   }) {
     value.when(
       loading: () {},
@@ -96,6 +102,25 @@ class CallRouteListener extends ConsumerWidget {
 
         if (_isFinished(call.status)) {
           ref.read(callTransferModeProvider.notifier).clear();
+          if (!presentEndedPage) {
+            // Re-evaluating a snapshot after a rebuild (such as the app
+            // returning to the foreground): that call finished earlier and its
+            // page was already shown or deliberately skipped.
+            return;
+          }
+          if (_appIsInBackground()) {
+            // A call that ended while the app was away (answered on another
+            // device, picked up by a queue colleague) must not queue a
+            // call-ended page: Flutter builds it on the next frame, so the
+            // user would see it flash when they next open the app.
+            AppLogger.info(
+              'Call route decision => call finished in background id=${call.id}, skip call-ended page',
+            );
+            if (path.startsWith('/calls/')) {
+              router.go(RoutePaths.dialer);
+            }
+            return;
+          }
           final target = RoutePaths.callEndedPath(
             status: call.answeredElsewhere
                 ? 'Answered elsewhere'
@@ -187,6 +212,15 @@ class CallRouteListener extends ConsumerWidget {
         stackTrace: stackTrace,
       );
     }
+  }
+
+  /// `inactive` is not background: CallKit banners and the lock screen resign
+  /// the app without moving it away.
+  bool _appIsInBackground() {
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    return lifecycle == AppLifecycleState.paused ||
+        lifecycle == AppLifecycleState.hidden ||
+        lifecycle == AppLifecycleState.detached;
   }
 
   bool _isFinished(CallStatus status) {

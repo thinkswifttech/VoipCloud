@@ -10,6 +10,7 @@
 
 #include "win32_window.h"
 #include "linphone_windows_bridge.h"
+#include "clipboard_image_bridge.h"
 #include "taskbar_pin_bridge.h"
 #include "windows_update_bridge.h"
 #include "windows_email_bridge.h"
@@ -45,6 +46,7 @@ class FlutterWindow : public Win32Window {
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<LinphoneWindowsBridge> linphone_bridge_;
+  std::unique_ptr<ClipboardImageBridge> clipboard_image_bridge_;
   std::unique_ptr<TaskbarPinBridge> taskbar_pin_bridge_;
   std::unique_ptr<WindowsUpdateBridge> windows_update_bridge_;
   std::unique_ptr<WindowsEmailBridge> windows_email_bridge_;

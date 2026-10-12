@@ -8,6 +8,7 @@ import '../domain/carrier_message.dart';
 import '../domain/carrier_messaging_config.dart';
 import '../domain/messaging_repository.dart';
 import '../domain/sms_segment_info.dart';
+import 'link_shortener.dart';
 import 'messaging_api_client.dart';
 import 'messaging_attachment_cache.dart';
 import 'messaging_connectivity.dart';
@@ -28,13 +29,15 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     MessagingOutboxStore? outbox,
     MessagingAttachmentCache? attachmentCache,
     MessagingConnectivity? connectivity,
+    LinkShortener? linkShortener,
   }) : _api = api,
        _sessions = sessions,
        _store = store,
        _loadPushRegistration = loadPushRegistration,
        _outbox = outbox,
        _attachmentCache = attachmentCache,
-       _connectivity = connectivity {
+       _connectivity = connectivity,
+       _linkShortener = linkShortener ?? const NoopLinkShortener() {
     _realtime = PusherRealtimeClient(api);
     if (outbox != null && connectivity != null) {
       _connectivitySubscription = connectivity.changes.listen((online) {
@@ -50,6 +53,7 @@ class DataPlaneMessagingRepository implements MessagingRepository {
   final MessagingOutboxStore? _outbox;
   final MessagingAttachmentCache? _attachmentCache;
   final MessagingConnectivity? _connectivity;
+  final LinkShortener _linkShortener;
   late PusherRealtimeClient _realtime;
   final Map<String, String> _conversationByRemote = {};
   final Map<String, String> _remoteByConversation = {};
@@ -325,6 +329,9 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     _activeConfig = config;
     return _inboxInvalidations.stream;
   }
+
+  @override
+  Future<String> shortenLinks(String text) => _linkShortener.shorten(text);
 
   @override
   Future<CarrierMessage> sendMessage({

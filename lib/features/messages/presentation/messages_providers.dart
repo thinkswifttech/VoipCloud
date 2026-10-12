@@ -445,10 +445,15 @@ class MessagesController extends Notifier<MessagesState> {
   }) async {
     final config = state.config;
     final normalizedDestination = destinationForRaw(destination);
-    final trimmed = smartEncodeSmsText(expandSmsEmojiShortcodes(text.trim()));
     if (!state.canSend || config == null) {
       throw const MessagingIntegrationUnavailable();
     }
+    // Long links are the usual reason a text fails in parts. Shortening happens
+    // once, before the length check, so a retry reuses the short form.
+    final shortened = await ref
+        .read(messagingRepositoryProvider)
+        .shortenLinks(text.trim());
+    final trimmed = smartEncodeSmsText(expandSmsEmojiShortcodes(shortened));
     if (state.isBlocked(normalizedDestination)) {
       throw const MessagingOutboundUnavailable();
     }

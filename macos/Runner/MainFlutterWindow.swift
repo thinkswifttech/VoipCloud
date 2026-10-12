@@ -3,6 +3,7 @@ import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
   private var linphoneBridge: LinphoneFlutterBridge?
+  private var filesChannel: FlutterMethodChannel?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -23,6 +24,34 @@ class MainFlutterWindow: NSWindow {
     linphoneBridge = LinphoneFlutterBridge(
       binaryMessenger: flutterViewController.engine.binaryMessenger
     )
+
+    // Copy an image so it can be pasted into another app.
+    let files = FlutterMethodChannel(
+      name: "voipcloud/files",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    files.setMethodCallHandler { call, result in
+      guard call.method == "copyImage" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let arguments = call.arguments as? [String: Any] ?? [:]
+      guard let bytes = arguments["bytes"] as? FlutterStandardTypedData,
+            !bytes.data.isEmpty,
+            let image = NSImage(data: bytes.data)
+      else {
+        result(FlutterError(
+          code: "INVALID_ARGS",
+          message: "An image is required.",
+          details: nil
+        ))
+        return
+      }
+      let pasteboard = NSPasteboard.general
+      pasteboard.clearContents()
+      result(pasteboard.writeObjects([image]))
+    }
+    filesChannel = files
 
     super.awakeFromNib()
   }

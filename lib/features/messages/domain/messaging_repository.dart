@@ -52,6 +52,10 @@ abstract interface class MessagingRepository {
     required MessageAttachment attachment,
   });
 
+  /// Shortens long links in an outgoing text. Returns [text] unchanged when
+  /// the link service is not configured or cannot be reached.
+  Future<String> shortenLinks(String text);
+
   Future<CarrierMessage> sendMessage({
     required CarrierMessagingConfig config,
     required String destination,

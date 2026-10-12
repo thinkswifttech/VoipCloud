@@ -14,6 +14,27 @@ class AppFiles {
 
   final MethodChannel _channel;
 
+  /// Whether this platform can put an image on the system clipboard.
+  static bool get supportsImageCopy =>
+      Platform.isAndroid ||
+      Platform.isIOS ||
+      Platform.isMacOS ||
+      Platform.isWindows;
+
+  /// Puts an image on the system clipboard so it can be pasted into another
+  /// app (email, notes, chat). Returns false when the platform cannot do it.
+  Future<bool> copyImage({
+    required Uint8List bytes,
+    String mimeType = 'image/png',
+  }) async {
+    if (!supportsImageCopy || bytes.isEmpty) return false;
+    final result = await _channel.invokeMethod<dynamic>(
+      'copyImage',
+      <String, dynamic>{'bytes': bytes, 'mimeType': mimeType},
+    );
+    return result == true;
+  }
+
   /// Saves [bytes] as [fileName] into Downloads (Android) or Files (iOS).
   Future<String> saveBytes({
     required String fileName,

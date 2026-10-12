@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../../core/config/config_providers.dart';
 import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/storage_providers.dart';
@@ -9,6 +10,7 @@ import '../../session/data/secure_session_storage.dart';
 import '../domain/messaging_repository.dart';
 import '../domain/messaging_session.dart';
 import 'data_plane_messaging_repository.dart';
+import 'link_shortener.dart';
 import 'messaging_api_client.dart';
 import 'messaging_attachment_cache.dart';
 import 'messaging_connectivity.dart';
@@ -84,7 +86,28 @@ final messagingRepositoryProvider = Provider<MessagingRepository>((ref) {
     outbox: MessagingOutboxStore(secureStorage: storage),
     attachmentCache: MessagingAttachmentCache(secureStorage: storage),
     connectivity: PlatformMessagingConnectivity(),
+    linkShortener: _linkShortenerFor(sessions),
   );
   ref.onDispose(() => repository.dispose());
   return repository;
 });
+
+/// Only active when a link-service origin was configured at build time.
+LinkShortener _linkShortenerFor(MessagingSessionManager sessions) {
+  final origin = Uri.tryParse(linkShortenerBaseUrl.trim());
+  if (origin == null || origin.scheme != 'https' || origin.host.isEmpty) {
+    return const NoopLinkShortener();
+  }
+  return ApiLinkShortener(
+    baseUrl: origin.origin,
+    minLength: linkShortenerMinLength,
+    dio: Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        headers: const {Headers.acceptHeader: Headers.jsonContentType},
+      ),
+    ),
+    accessToken: ({bool forceRefresh = false}) async =>
+        (await sessions.ensure(forceRefresh: forceRefresh)).accessToken,
+  );
+}
