@@ -39,6 +39,23 @@ DirectoryPresence? quickDialPresence(
   return directStates[target] ?? DirectoryPresence.unknown;
 }
 
+DirectoryPresenceFreshness quickDialPresenceFreshness(
+  QuickDialEntry entry,
+  Iterable<DirectoryEntry> directory, {
+  Map<String, DirectoryPresenceFreshness> directFreshness = const {},
+}) {
+  if (!entry.showBlf) return DirectoryPresenceFreshness.unavailable;
+  final number = _normalized(entry.number);
+  for (final candidate in directory) {
+    if (candidate.isCompany &&
+        candidate.numbers.any((value) => _normalized(value) == number)) {
+      return candidate.presenceFreshness;
+    }
+  }
+  final target = quickDialBlfTarget(entry);
+  return directFreshness[target] ?? DirectoryPresenceFreshness.unavailable;
+}
+
 String _normalized(String value) {
   final text = value.trim();
   if (!RegExp(r'^\+?[0-9\s()-]+$').hasMatch(text)) return '';

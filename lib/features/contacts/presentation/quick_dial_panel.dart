@@ -18,7 +18,6 @@ import '../data/device_contacts_repository.dart';
 import '../domain/contact.dart';
 import '../domain/quick_dial_csv.dart';
 import '../domain/quick_dial_entry.dart';
-import '../domain/quick_dial_presence.dart';
 import 'contacts_providers.dart';
 import 'quick_dial_providers.dart';
 
@@ -28,12 +27,6 @@ class QuickDialPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final quickDial = ref.watch(quickDialProvider);
-    final directStates =
-        ref.watch(quickDialLivePresenceProvider).asData?.value ??
-        const <String, DirectoryPresence>{};
-    final directory =
-        ref.watch(liveDirectoryProvider).asData?.value ??
-        const <DirectoryEntry>[];
 
     return quickDial.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -109,16 +102,25 @@ class QuickDialPanel extends ConsumerWidget {
                   separatorBuilder: (_, _) => const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final entry = entries[index];
-                    return _QuickDialTile(
-                      entry: entry,
-                      presence: quickDialPresence(
-                        entry,
-                        directory,
-                        directStates: directStates,
-                      ),
-                      onCall: () => _callEntry(context, ref, entry),
-                      onEdit: () => _showEditSheet(context, ref, entry),
-                      onRemove: () => _confirmRemove(context, ref, entry),
+                    return Consumer(
+                      builder: (context, ref, _) {
+                        final value = ref
+                            .watch(quickDialEntryPresenceProvider(entry))
+                            .asData
+                            ?.value;
+                        return _QuickDialTile(
+                          entry: entry,
+                          presence: entry.showBlf
+                              ? value?.presence ?? DirectoryPresence.unknown
+                              : null,
+                          presenceStale:
+                              value?.freshness ==
+                              DirectoryPresenceFreshness.stale,
+                          onCall: () => _callEntry(context, ref, entry),
+                          onEdit: () => _showEditSheet(context, ref, entry),
+                          onRemove: () => _confirmRemove(context, ref, entry),
+                        );
+                      },
                     );
                   },
                 ),
@@ -354,6 +356,7 @@ class _QuickDialTile extends StatelessWidget {
   const _QuickDialTile({
     required this.entry,
     required this.presence,
+    required this.presenceStale,
     required this.onCall,
     required this.onEdit,
     required this.onRemove,
@@ -361,6 +364,7 @@ class _QuickDialTile extends StatelessWidget {
 
   final QuickDialEntry entry;
   final DirectoryPresence? presence;
+  final bool presenceStale;
   final VoidCallback onCall;
   final VoidCallback? onEdit;
   final VoidCallback onRemove;
@@ -390,6 +394,7 @@ class _QuickDialTile extends StatelessWidget {
                       child: _QuickDialBlfBadge(
                         key: ValueKey('quick-dial-blf-${entry.id}'),
                         presence: presence!,
+                        stale: presenceStale,
                       ),
                     ),
                 ],
@@ -474,9 +479,14 @@ class _QuickDialTile extends StatelessWidget {
 enum _QuickDialAction { edit, remove }
 
 class _QuickDialBlfBadge extends StatelessWidget {
-  const _QuickDialBlfBadge({required this.presence, super.key});
+  const _QuickDialBlfBadge({
+    required this.presence,
+    required this.stale,
+    super.key,
+  });
 
   final DirectoryPresence presence;
+  final bool stale;
 
   @override
   Widget build(BuildContext context) {
@@ -490,16 +500,17 @@ class _QuickDialBlfBadge extends StatelessWidget {
         const Color(0xFF9CA3AF),
       ),
     };
+    final effectiveLabel = stale ? 'Last known: $label. Updating.' : label;
     return Semantics(
-      label: 'BLF status: $label',
+      label: 'BLF status: $effectiveLabel',
       child: ExcludeSemantics(
         child: Tooltip(
-          message: label,
+          message: effectiveLabel,
           child: Container(
             width: 14,
             height: 14,
             decoration: BoxDecoration(
-              color: color,
+              color: stale ? color.withValues(alpha: 0.55) : color,
               shape: BoxShape.circle,
               // Separate the badge from photos and initials in both themes.
               border: Border.all(

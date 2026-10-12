@@ -21,6 +21,7 @@ DirectoryEntry company(
   DirectoryPresence presence, {
   String number = '210',
   bool external = false,
+  DirectoryPresenceFreshness freshness = DirectoryPresenceFreshness.unavailable,
 }) => DirectoryEntry(
   id: number,
   displayName: 'Directory Test',
@@ -29,6 +30,7 @@ DirectoryEntry company(
       ? DirectoryTelephoneKind.external
       : DirectoryTelephoneKind.internal,
   presence: presence,
+  presenceFreshness: freshness,
 );
 
 void main() {
@@ -143,6 +145,25 @@ void main() {
         directStates: {'210': DirectoryPresence.busy},
       ),
       isNull,
+    );
+  });
+  test('freshness follows directory matches and direct PBX targets', () {
+    expect(
+      quickDialPresenceFreshness(quick(showBlf: true), [
+        company(
+          DirectoryPresence.busy,
+          freshness: DirectoryPresenceFreshness.stale,
+        ),
+      ]),
+      DirectoryPresenceFreshness.stale,
+    );
+    expect(
+      quickDialPresenceFreshness(
+        quick(showBlf: true),
+        [],
+        directFreshness: {'210': DirectoryPresenceFreshness.live},
+      ),
+      DirectoryPresenceFreshness.live,
     );
   });
   test('probe only enabled plain internal extensions, deduplicated', () {

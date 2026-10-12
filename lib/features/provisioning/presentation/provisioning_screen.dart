@@ -168,6 +168,7 @@ class _ActivationExperience extends StatelessWidget {
                           errorMessage: errorMessage,
                           onScan: onScan,
                           onActivate: onActivate,
+                          keyboardOpen: keyboardOpen,
                         ),
                 );
 
@@ -180,7 +181,7 @@ class _ActivationExperience extends StatelessWidget {
                         ScrollViewKeyboardDismissBehavior.onDrag,
                     padding: EdgeInsets.symmetric(
                       horizontal: horizontal,
-                      vertical: isWide ? 32 : 20,
+                      vertical: isWide ? 32 : (keyboardOpen ? 12 : 20),
                     ),
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
@@ -199,16 +200,14 @@ class _ActivationExperience extends StatelessWidget {
               },
             ),
           ),
-          AnimatedOpacity(
-            opacity: keyboardOpen ? 0 : 1,
+          AnimatedSize(
             duration: const Duration(milliseconds: 180),
-            child: IgnorePointer(
-              ignoring: keyboardOpen,
-              child: const Padding(
-                padding: EdgeInsets.fromLTRB(24, 4, 24, 16),
-                child: _PoweredByFooter(),
-              ),
-            ),
+            child: keyboardOpen
+                ? const SizedBox.shrink()
+                : const Padding(
+                    padding: EdgeInsets.fromLTRB(24, 4, 24, 16),
+                    child: _PoweredByFooter(),
+                  ),
           ),
         ],
       ),
@@ -223,6 +222,7 @@ class _CompactActivationLayout extends StatelessWidget {
     required this.errorMessage,
     required this.onScan,
     required this.onActivate,
+    required this.keyboardOpen,
   });
 
   final TextEditingController controller;
@@ -230,6 +230,7 @@ class _CompactActivationLayout extends StatelessWidget {
   final String? errorMessage;
   final VoidCallback onScan;
   final VoidCallback onActivate;
+  final bool keyboardOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -241,8 +242,7 @@ class _CompactActivationLayout extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const _AppIcon(),
-          const SizedBox(height: 36),
+          if (!keyboardOpen) ...[const _AppIcon(), const SizedBox(height: 36)],
           Text(
             'Set up your calling app',
             textAlign: TextAlign.center,
@@ -251,16 +251,18 @@ class _CompactActivationLayout extends StatelessWidget {
               height: 1.15,
             ),
           ),
-          const SizedBox(height: 18),
-          Text(
-            _activationDescription,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              height: 1.45,
+          if (!keyboardOpen) ...[
+            const SizedBox(height: 18),
+            Text(
+              _activationDescription,
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.45,
+              ),
             ),
-          ),
-          const SizedBox(height: 64),
+          ],
+          SizedBox(height: keyboardOpen ? 18 : 64),
           _ActivationActions(
             controller: controller,
             isLoading: isLoading,
@@ -617,16 +619,49 @@ class _SetupLinkSection extends StatefulWidget {
   State<_SetupLinkSection> createState() => _SetupLinkSectionState();
 }
 
-class _SetupLinkSectionState extends State<_SetupLinkSection> {
+class _SetupLinkSectionState extends State<_SetupLinkSection>
+    with WidgetsBindingObserver {
   static const _expandDuration = Duration(milliseconds: 220);
 
   final _focusNode = FocusNode();
+  final _expandedContentKey = GlobalKey();
   late var _expanded = widget.initiallyExpanded;
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _focusNode.addListener(_handleFocusChanged);
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _focusNode.removeListener(_handleFocusChanged);
     _focusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeMetrics() {
+    if (_focusNode.hasFocus) _revealExpandedContent();
+  }
+
+  void _handleFocusChanged() {
+    if (_focusNode.hasFocus) _revealExpandedContent();
+  }
+
+  void _revealExpandedContent() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final target = _expandedContentKey.currentContext;
+      if (!mounted || target == null) return;
+      Scrollable.ensureVisible(
+        target,
+        alignment: 1,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+    });
   }
 
   void _expand() {
@@ -659,12 +694,15 @@ class _SetupLinkSectionState extends State<_SetupLinkSection> {
           firstChild: _SetupLinkCollapsed(
             onTap: widget.isLoading ? null : _expand,
           ),
-          secondChild: _SetupLinkExpanded(
-            controller: widget.controller,
-            focusNode: _focusNode,
-            isLoading: widget.isLoading,
-            errorMessage: widget.errorMessage,
-            onActivate: widget.onActivate,
+          secondChild: KeyedSubtree(
+            key: _expandedContentKey,
+            child: _SetupLinkExpanded(
+              controller: widget.controller,
+              focusNode: _focusNode,
+              isLoading: widget.isLoading,
+              errorMessage: widget.errorMessage,
+              onActivate: widget.onActivate,
+            ),
           ),
         ),
       ),
@@ -778,6 +816,7 @@ class _SetupLinkExpanded extends StatelessWidget {
           ),
           const SizedBox(height: 14),
           FilledButton(
+            key: const ValueKey('activate-setup-link'),
             onPressed: isLoading ? null : onActivate,
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 180),

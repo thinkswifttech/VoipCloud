@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import '../../../core/logging/log_sanitizer.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
@@ -12,16 +13,27 @@ import '../domain/sip_log_entry.dart';
 class SipLogStore {
   SipLogStore({
     VoipPlatformChannel platformChannel = const VoipPlatformChannel(),
-  }) : _platform = platformChannel;
+  }) : _platform = platformChannel {
+    _controller = StreamController<List<SipLogEntry>>.broadcast(
+      onListen: () {
+        if (_enabled) _bindNativeLogs();
+      },
+      onCancel: () {
+        unawaited(_nativeSubscription?.cancel());
+        _nativeSubscription = null;
+        _emitTimer?.cancel();
+      },
+    );
+  }
 
   static const maxEntries = 4000;
 
   final VoipPlatformChannel _platform;
-  final List<SipLogEntry> _entries = <SipLogEntry>[];
-  final StreamController<List<SipLogEntry>> _controller =
-      StreamController<List<SipLogEntry>>.broadcast();
+  final _entries = ListQueue<SipLogEntry>(maxEntries);
+  late final StreamController<List<SipLogEntry>> _controller;
 
   StreamSubscription<Map<String, dynamic>>? _nativeSubscription;
+  Timer? _emitTimer;
   bool _enabled = false;
   bool _hydrating = false;
 
@@ -36,9 +48,6 @@ class SipLogStore {
 
   Future<void> setEnabled(bool enabled) async {
     if (_enabled == enabled) {
-      if (enabled) {
-        await refreshFromNativeFile();
-      }
       return;
     }
     _enabled = enabled;
@@ -50,7 +59,9 @@ class SipLogStore {
     if (enabled) {
       _bindNativeLogs();
       append(level: 'info', source: 'app', message: 'SIP logging enabled');
-      await refreshFromNativeFile();
+      if (_controller.hasListener) {
+        await refreshFromNativeFile();
+      }
     } else {
       await _nativeSubscription?.cancel();
       _nativeSubscription = null;
@@ -192,12 +203,16 @@ class SipLogStore {
   }
 
   void dispose() {
+    _emitTimer?.cancel();
     unawaited(_nativeSubscription?.cancel());
     _nativeSubscription = null;
     _controller.close();
   }
 
   void _bindNativeLogs() {
+    // Native captures the file independently. Don't ship thousands of verbose
+    // lines across the platform channel while navigating/scrolling elsewhere.
+    if (!_controller.hasListener) return;
     _nativeSubscription?.cancel();
     _nativeSubscription = _platform.sipLogEvents().listen((event) {
       if (!_enabled) {
@@ -244,15 +259,23 @@ class SipLogStore {
   }
 
   void _trim() {
-    final overflow = _entries.length - maxEntries;
-    if (overflow > 0) {
-      _entries.removeRange(0, overflow);
+    while (_entries.length > maxEntries) {
+      _entries.removeFirst();
     }
   }
 
   void _emit() {
-    if (!_controller.isClosed) {
-      _controller.add(entries);
+    // Capturing SIP traffic must not copy a 4,000-line buffer for every
+    // SUBSCRIBE/NOTIFY while the diagnostics viewer isn't even visible.
+    if (_controller.isClosed ||
+        !_controller.hasListener ||
+        _emitTimer?.isActive == true) {
+      return;
     }
+    _emitTimer = Timer(const Duration(milliseconds: 100), () {
+      if (!_controller.isClosed && _controller.hasListener) {
+        _controller.add(entries);
+      }
+    });
   }
 }

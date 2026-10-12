@@ -34,6 +34,7 @@ class LinphoneSipService implements SipService {
     this.postDialPause = const Duration(seconds: 2),
     this.postDialToneGap = const Duration(milliseconds: 120),
     this.outgoingRegistrationTimeout = const Duration(seconds: 12),
+    this.registrationTransitionGrace = const Duration(milliseconds: 1500),
   }) : _callHistoryRepository = callHistoryRepository,
        _onCallHistoryChanged = onCallHistoryChanged,
        _platformChannel = platformChannel ?? const VoipPlatformChannel(),
@@ -57,6 +58,7 @@ class LinphoneSipService implements SipService {
   final Duration postDialPause;
   final Duration postDialToneGap;
   final Duration outgoingRegistrationTimeout;
+  final Duration registrationTransitionGrace;
   final StreamController<SipRegistrationState> _registrationController =
       StreamController<SipRegistrationState>.broadcast();
   final StreamController<VoipCall?> _callController =
@@ -90,6 +92,11 @@ class LinphoneSipService implements SipService {
   Future<void>? _outgoingRegistrationRecovery;
   Future<void>? _outgoingCallOperation;
   String? _pendingOutgoingDestination;
+  final Map<String, Future<void>> _endCallOperations = {};
+  Timer? _registrationTransitionTimer;
+  SipRegistrationState? _pendingRegistrationTransition;
+  bool _nativeRegistrationReady = false;
+  bool _explicitlyUnregistered = false;
   Future<void> _audioRouteSerial = Future<void>.value();
   Timer? _windowsCallReconciliationTimer;
   bool _windowsSyncInFlight = false;
@@ -136,6 +143,7 @@ class LinphoneSipService implements SipService {
   @override
   Future<void> initialize(SipConfig config) async {
     _config = config;
+    _explicitlyUnregistered = false;
     _logConfig('initialize', config);
     _emitRegistration(
       SipRegistrationState(
@@ -183,6 +191,7 @@ class LinphoneSipService implements SipService {
 
   @override
   Future<void> register() {
+    _explicitlyUnregistered = false;
     final current = _registrationOperation;
     if (current != null) return current;
     final operation = _register();
@@ -199,13 +208,17 @@ class LinphoneSipService implements SipService {
       );
     }
 
-    _emitRegistration(
-      SipRegistrationState(
-        status: SipRegistrationStatus.registering,
-        updatedAt: DateTime.now(),
-        message: 'Registering with PBX',
-      ),
-    );
+    // A routine REGISTER refresh must not make a healthy account flash as
+    // offline. A real failure is still emitted immediately by native events.
+    if (!_registrationState.isRegistered) {
+      _emitRegistration(
+        SipRegistrationState(
+          status: SipRegistrationStatus.registering,
+          updatedAt: DateTime.now(),
+          message: 'Connecting to the calling service',
+        ),
+      );
+    }
     _logConfig('register', config);
     try {
       await _platformChannel.register();
@@ -272,6 +285,10 @@ class LinphoneSipService implements SipService {
 
   @override
   Future<void> unregister() async {
+    _explicitlyUnregistered = true;
+    _nativeRegistrationReady = false;
+    _registrationTransitionTimer?.cancel();
+    _pendingRegistrationTransition = null;
     Completer<void>? nativeUnregistered;
     StreamSubscription<SipRegistrationState>? unregisterSubscription;
     if (_initialized) {
@@ -378,21 +395,16 @@ class LinphoneSipService implements SipService {
         userMessage: 'Enter a number or SIP address.',
       );
     }
-    if (!_registrationState.isRegistered &&
-        !kIsWeb &&
-        defaultTargetPlatform == TargetPlatform.iOS) {
+    if (!_isOperationallyRegistered && !kIsWeb) {
       await _ensureOutgoingRegistrationReady();
     }
-    if (_disposed ||
-        (!kIsWeb &&
-            defaultTargetPlatform == TargetPlatform.iOS &&
-            _config?.hasCredentials != true)) {
+    if (_disposed || (!kIsWeb && _config?.hasCredentials != true)) {
       throw const VoipException(
         message: 'SIP session unavailable before dialing',
         userMessage: 'Sign in before placing a call.',
       );
     }
-    if (!_registrationState.isRegistered) {
+    if (!_isOperationallyRegistered) {
       throw VoipException(
         message: 'SIP account is not registered',
         userMessage: _registrationState.message == null
@@ -483,7 +495,7 @@ class LinphoneSipService implements SipService {
         userMessage: 'Your sign-in changed. Please try again.',
       );
     }
-    if (_registrationState.isRegistered) return;
+    if (_isOperationallyRegistered) return;
     final confirmation = Completer<bool>();
     final subscription = _registrationController.stream.listen(
       (state) {
@@ -506,7 +518,7 @@ class LinphoneSipService implements SipService {
       if (!ready ||
           _disposed ||
           !identical(_config, config) ||
-          !_registrationState.isRegistered) {
+          !_isOperationallyRegistered) {
         throw const VoipException(
           message: 'SIP registration recovery did not establish readiness',
           userMessage:
@@ -554,7 +566,7 @@ class LinphoneSipService implements SipService {
     if (requireImmediate) {
       final config = _config;
       final busy = await hasActiveCall();
-      if (!_registrationState.isRegistered ||
+      if (!_isOperationallyRegistered ||
           config == null ||
           busy ||
           liveCalls.isNotEmpty ||
@@ -569,7 +581,7 @@ class LinphoneSipService implements SipService {
       await _dialPbxDndToggle(propagateFailure: true);
       return;
     }
-    if (!_registrationState.isRegistered) {
+    if (!_isOperationallyRegistered) {
       _pendingPbxDndToggle = !_pendingPbxDndToggle;
       _sipLog('warn', 'PBX DND toggle queued until SIP is registered');
       return;
@@ -642,7 +654,7 @@ class LinphoneSipService implements SipService {
     if (!_pendingPbxDndToggle) {
       return;
     }
-    if (!_registrationState.isRegistered ||
+    if (!_isOperationallyRegistered ||
         _activeCall != null ||
         _featureCodeDialInFlight) {
       return;
@@ -738,12 +750,56 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> endCall(String callId) async {
-    await _traceCallAction(
-      'end',
-      callId,
-      () => _platformChannel.endCall(callId),
+  Future<void> endCall(String callId) {
+    final current = _endCallOperations[callId];
+    if (current != null) return current;
+    final operation = _endCall(callId);
+    _endCallOperations[callId] = operation;
+    unawaited(
+      operation.then<void>(
+        (_) => _clearEndCallOperation(callId, operation),
+        onError: (Object _, StackTrace _) =>
+            _clearEndCallOperation(callId, operation),
+      ),
     );
+    return operation;
+  }
+
+  void _clearEndCallOperation(String callId, Future<void> operation) {
+    if (identical(_endCallOperations[callId], operation)) {
+      _endCallOperations.remove(callId);
+    }
+  }
+
+  Future<void> _endCall(String callId) async {
+    final current = _knownCalls[callId];
+    if (current == null || _isFinished(current.status)) return;
+    try {
+      await _traceCallAction(
+        'end',
+        callId,
+        () => _platformChannel.endCall(callId),
+      );
+    } on PlatformException catch (error) {
+      // Hang-up is idempotent. The SDK can release the call before a repeated
+      // tap reaches native code; that is success, not a reason to strand UI.
+      if (error.code != 'CALL_ENDED' && error.code != 'CALL_NOT_FOUND') rethrow;
+      _traceCall('end_already_released', identity: callId);
+    }
+    _completeLocalCall(callId);
+  }
+
+  void _completeLocalCall(String callId) {
+    final call = _knownCalls[callId];
+    if (call == null || _isFinished(call.status)) return;
+    final ended = call.copyWith(
+      status: CallStatus.ended,
+      endedAt: DateTime.now(),
+    );
+    _recordCallState(ended);
+    _bindOrAdvancePostDial(ended);
+    _publishCallState();
+    _stopWindowsCallReconciliationIfIdle();
   }
 
   @override
@@ -1186,6 +1242,8 @@ class LinphoneSipService implements SipService {
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _registrationTransitionTimer?.cancel();
+    _registrationTransitionTimer = null;
     _windowsCallReconciliationTimer?.cancel();
     _windowsCallReconciliationTimer = null;
     await _registrationSubscription?.cancel();
@@ -1247,7 +1305,7 @@ class LinphoneSipService implements SipService {
           'Registration => ${state.status.name}'
               '${state.message == null || state.message!.isEmpty ? '' : ' · ${state.message}'}',
         );
-        _emitRegistration(state);
+        _handleNativeRegistration(state);
         if (state.isRegistered) {
           _flushPendingPbxDndToggleIfIdle();
         }
@@ -1305,7 +1363,19 @@ class LinphoneSipService implements SipService {
       _stopWindowsCallReconciliationIfIdle();
       return;
     }
-    final call = _callFromEvent(event);
+    final historyReplay = event['historyReplay'] == true;
+    final call = _callFromEvent(event, mergeWithLiveState: !historyReplay);
+    if (historyReplay && _isFinished(call.status)) {
+      // Durable terminal events exist to repair history after Flutter was
+      // detached. They must never re-enter live-call state or reopen call UI.
+      _recordCallState(
+        call,
+        historyEventId: _nullableString(event['historyEventId']),
+        historyOnly: true,
+      );
+      _stopWindowsCallReconciliationIfIdle();
+      return;
+    }
     _trackIncomingCallState(call);
     if (call.direction == CallDirection.incoming &&
         _isFinished(call.status) &&
@@ -1611,7 +1681,10 @@ class LinphoneSipService implements SipService {
     );
   }
 
-  VoipCall _callFromEvent(Map<String, dynamic> event) {
+  VoipCall _callFromEvent(
+    Map<String, dynamic> event, {
+    bool mergeWithLiveState = true,
+  }) {
     final id = _string(event['id'], fallback: 'native-call');
     final status = _callStatus('${event['status']}');
     final direction = _callDirection('${event['direction']}');
@@ -1623,14 +1696,15 @@ class LinphoneSipService implements SipService {
     // current time. Otherwise opening the app manufactures a new missed call
     // at the launch time.
     final historyPersistedAt = _date(event['historyPersistedAtEpochMs']);
-    final previous =
-        _knownCalls[id] ??
-        _promotePreviousCallIdentity(
-          newId: id,
-          direction: direction,
-          remoteUri: eventRemoteUri,
-          startedAt: eventStartedAt,
-        );
+    final previous = mergeWithLiveState
+        ? _knownCalls[id] ??
+              _promotePreviousCallIdentity(
+                newId: id,
+                direction: direction,
+                remoteUri: eventRemoteUri,
+                startedAt: eventStartedAt,
+              )
+        : null;
     final endedAt = _date(event['endedAt']);
     final parsedRoute = AudioOutputRoute.tryParse(
       _nullableString(event['audioRoute']),
@@ -1816,13 +1890,17 @@ class LinphoneSipService implements SipService {
     return user.startsWith('*') || user.startsWith('#');
   }
 
-  void _recordCallState(VoipCall call, {String? historyEventId}) {
+  void _recordCallState(
+    VoipCall call, {
+    String? historyEventId,
+    bool historyOnly = false,
+  }) {
     if (_featureCodeCallIds.contains(call.id) ||
         (_featureCodeDialInFlight && _looksLikePbxFeatureCode(call))) {
       return;
     }
-    final previous = _knownCalls[call.id];
-    _knownCalls[call.id] = call;
+    final previous = historyOnly ? null : _knownCalls[call.id];
+    if (!historyOnly) _knownCalls[call.id] = call;
     if (!_isFinished(call.status)) {
       return;
     }
@@ -1869,6 +1947,9 @@ class LinphoneSipService implements SipService {
       wasDeclined: wasDeclined,
       wasAnsweredElsewhere: call.answeredElsewhere,
     );
+    final persistenceKey = historyOnly && historyEventId != null
+        ? 'history:$historyEventId'
+        : call.id;
     late final Future<void> persistence;
     persistence = repository
         .syncCallLog(
@@ -1882,17 +1963,19 @@ class LinphoneSipService implements SipService {
           sipCallId: call.id,
         )
         .then<void>((_) async {
-          _rememberPersistedHistoryCall(call.id);
-          _ringingIncomingCallIds.remove(call.id);
-          _answeredIncomingCallIds.remove(call.id);
-          _dndRejectedCallIds.remove(call.id);
-          _declinedIncomingCallIds.remove(call.id);
+          if (!historyOnly) _rememberPersistedHistoryCall(call.id);
+          if (!historyOnly) {
+            _ringingIncomingCallIds.remove(call.id);
+            _answeredIncomingCallIds.remove(call.id);
+            _dndRejectedCallIds.remove(call.id);
+            _declinedIncomingCallIds.remove(call.id);
+          }
           if (historyEventId != null) {
             await _acknowledgeHistoryEvent(historyEventId);
           }
           if (!_disposed) _onCallHistoryChanged?.call();
         });
-    _historyPersistence[call.id] = persistence;
+    _historyPersistence[persistenceKey] = persistence;
     unawaited(
       persistence
           .then<void>(
@@ -1906,8 +1989,8 @@ class LinphoneSipService implements SipService {
             },
           )
           .whenComplete(() {
-            if (identical(_historyPersistence[call.id], persistence)) {
-              _historyPersistence.remove(call.id);
+            if (identical(_historyPersistence[persistenceKey], persistence)) {
+              _historyPersistence.remove(persistenceKey);
             }
           }),
     );
@@ -1939,6 +2022,38 @@ class LinphoneSipService implements SipService {
   void _emitRegistration(SipRegistrationState state) {
     _registrationState = state;
     _registrationController.add(state);
+  }
+
+  bool get _isOperationallyRegistered =>
+      kIsWeb ? _registrationState.isRegistered : _nativeRegistrationReady;
+
+  void _handleNativeRegistration(SipRegistrationState state) {
+    _nativeRegistrationReady = state.isRegistered;
+
+    final shouldDelayTransient =
+        !_explicitlyUnregistered &&
+        _registrationState.isRegistered &&
+        (state.status == SipRegistrationStatus.registering ||
+            state.status == SipRegistrationStatus.configuring ||
+            state.status == SipRegistrationStatus.unregistered);
+
+    if (!shouldDelayTransient || state.isRegistered) {
+      _registrationTransitionTimer?.cancel();
+      _registrationTransitionTimer = null;
+      _pendingRegistrationTransition = null;
+      _emitRegistration(state);
+      return;
+    }
+
+    _pendingRegistrationTransition = state;
+    _registrationTransitionTimer?.cancel();
+    _registrationTransitionTimer = Timer(registrationTransitionGrace, () {
+      if (_disposed || _nativeRegistrationReady) return;
+      final pending = _pendingRegistrationTransition;
+      _pendingRegistrationTransition = null;
+      _registrationTransitionTimer = null;
+      if (pending != null) _emitRegistration(pending);
+    });
   }
 
   Future<void> _traceCallAction(

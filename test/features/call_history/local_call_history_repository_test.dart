@@ -117,6 +117,27 @@ void main() {
     );
   });
 
+  test('retains a finalized immediate DND miss after reopening', () async {
+    final storage = InMemorySecureStorageService();
+    final repository = LocalCallHistoryRepository(storage);
+    final startedAt = DateTime.utc(2026, 10, 6);
+    await repository.syncCallLog(
+      remoteNumber: '211',
+      direction: CallDirection.incoming,
+      status: CallStatus.missed,
+      disposition: CallHistoryDisposition.missed,
+      startedAt: startedAt,
+      endedAt: startedAt,
+      sipCallId:
+          'b7d8e6bcdb6f4b96cdf67a61156efee92eb68967fcb1fed4d0bfb0e614334562',
+      serverFinalized: true,
+    );
+    final items = await LocalCallHistoryRepository(storage).getCallHistory();
+    expect(items, hasLength(1));
+    expect(items.single.serverFinalized, isTrue);
+    expect(items.single.effectiveDisposition, CallHistoryDisposition.missed);
+  });
+
   test('hides a cached zero-duration provisional server miss', () async {
     final repository = LocalCallHistoryRepository(
       InMemorySecureStorageService(),

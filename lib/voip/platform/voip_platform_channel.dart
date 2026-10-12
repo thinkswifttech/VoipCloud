@@ -68,11 +68,35 @@ class VoipPlatformChannel {
     {'diagnostic': true},
   );
 
-  Future<void> startPresenceSubscriptions(Iterable<String> extensions) {
+  Future<void> reconcilePresenceSubscriptions(
+    Iterable<String> extensions, {
+    Iterable<String>? additions,
+    required int generation,
+  }) {
     return _channel.invokeMethod<void>('startPresenceSubscriptions', {
       'extensions': extensions.toSet().toList(growable: false),
+      'additions': (additions ?? extensions).toSet().toList(growable: false),
+      'generation': generation,
     });
   }
+
+  Future<void> setPresenceTargets(Iterable<String> targets, int generation) =>
+      _channel.invokeMethod<void>('setPresenceTargets', {
+        'extensions': targets.toSet().toList(growable: false),
+        'generation': generation,
+      });
+
+  Future<void> enqueuePresenceTargets(
+    Iterable<String> targets,
+    int generation,
+  ) => _channel.invokeMethod<void>('enqueuePresenceTargets', {
+    'additions': targets.toSet().toList(growable: false),
+    'generation': generation,
+  });
+
+  @Deprecated('Use reconcilePresenceSubscriptions with an explicit generation')
+  Future<void> startPresenceSubscriptions(Iterable<String> extensions) =>
+      reconcilePresenceSubscriptions(extensions, generation: 0);
 
   Future<void> startPbxDndSubscription(
     String extension,

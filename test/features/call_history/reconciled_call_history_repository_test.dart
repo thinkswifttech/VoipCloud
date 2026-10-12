@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phone_app/core/storage/secure_storage_service.dart';
+import 'package:phone_app/core/constants/storage_keys.dart';
 import 'package:phone_app/features/call_history/data/reconciled_call_history_repository.dart';
 import 'package:phone_app/features/call_history/domain/call_history_item.dart';
 import 'package:phone_app/features/call_history/domain/call_history_repository.dart';
@@ -8,6 +11,151 @@ import 'package:phone_app/features/calls/domain/call_status.dart';
 void main() {
   group('ReconciledCallHistoryRepository', () {
     final startedAt = DateTime.utc(2026, 9, 28, 14, 30);
+
+    test('reset boundary cannot move backwards after restart', () async {
+      final storage = InMemorySecureStorageService();
+      final previousReset = startedAt.add(const Duration(hours: 1));
+      await storage.write(
+        StorageKeys.appCallHistoryVisibleSince,
+        previousReset.toIso8601String(),
+      );
+      final repository = ReconciledCallHistoryRepository(
+        local: _FakeRepository(),
+        server: _FakeRepository(),
+        visibilityStorage: storage,
+        now: () => startedAt,
+      );
+      await repository.clearCallHistory();
+      expect(
+        await storage.read(StorageKeys.appCallHistoryVisibleSince),
+        previousReset.toIso8601String(),
+      );
+    });
+
+    test('invalid persisted boundary fails closed', () async {
+      final storage = InMemorySecureStorageService();
+      await storage.write(StorageKeys.appCallHistoryVisibleSince, 'invalid');
+      final repository = ReconciledCallHistoryRepository(
+        local: _FakeRepository(),
+        server: _FakeRepository(),
+        visibilityStorage: storage,
+      );
+      await expectLater(repository.getCallHistory(), throwsFormatException);
+    });
+
+    test(
+      'reset hides old server history after restart on this device only',
+      () async {
+        final old = _item(
+          id: 'old',
+          remoteNumber: '211',
+          startedAt: startedAt,
+          disposition: CallHistoryDisposition.missed,
+        );
+        final fresh = _item(
+          id: 'fresh',
+          remoteNumber: '204',
+          startedAt: startedAt.add(const Duration(minutes: 2)),
+          disposition: CallHistoryDisposition.missed,
+        );
+        final server = _FakeRepository(items: [old, fresh]);
+        final storageA = InMemorySecureStorageService();
+        final storageB = InMemorySecureStorageService();
+        final deviceA = ReconciledCallHistoryRepository(
+          local: _FakeRepository(),
+          server: server,
+          visibilityStorage: storageA,
+          now: () => startedAt.add(const Duration(minutes: 1)),
+        );
+        await deviceA.clearCallHistory();
+        final reopened = ReconciledCallHistoryRepository(
+          local: _FakeRepository(items: [old]),
+          server: server,
+          visibilityStorage: storageA,
+        );
+        final deviceB = ReconciledCallHistoryRepository(
+          local: _FakeRepository(),
+          server: server,
+          visibilityStorage: storageB,
+        );
+        expect((await reopened.getCallHistory()).map((e) => e.id), ['fresh']);
+        expect(await deviceB.getCallHistory(), hasLength(2));
+        expect(server.items, hasLength(2));
+        expect(
+          await storageA.read(StorageKeys.appCallHistoryLastViewedAt),
+          isNotNull,
+        );
+        expect(
+          await storageB.read(StorageKeys.appCallHistoryVisibleSince),
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'response finishing after reset cannot return or cache old history',
+      () async {
+        final response = Completer<List<CallHistoryItem>>();
+        final server = _DelayedRepository(response);
+        final local = _FakeRepository();
+        final repository = ReconciledCallHistoryRepository(
+          local: local,
+          server: server,
+          visibilityStorage: InMemorySecureStorageService(),
+          now: () => startedAt,
+        );
+        final reading = repository.getCallHistory();
+        await server.requested.future;
+        await repository.clearCallHistory();
+        response.complete([
+          _item(
+            id: 'old',
+            remoteNumber: '211',
+            startedAt: startedAt.subtract(const Duration(minutes: 1)),
+            disposition: CallHistoryDisposition.missed,
+          ),
+        ]);
+        expect(await reading, isEmpty);
+        expect(local.synced, isEmpty);
+      },
+    );
+
+    test(
+      'obsolete native replay is acknowledged but never persisted',
+      () async {
+        final local = _FakeRepository();
+        final repository = ReconciledCallHistoryRepository(
+          local: local,
+          server: _FakeRepository(),
+          visibilityStorage: InMemorySecureStorageService(),
+          now: () => startedAt,
+        );
+        await repository.clearCallHistory();
+        await repository.syncCallLog(
+          remoteNumber: '211',
+          direction: CallDirection.incoming,
+          status: CallStatus.missed,
+          disposition: CallHistoryDisposition.missed,
+          startedAt: startedAt.subtract(const Duration(seconds: 1)),
+          sipCallId: 'replay',
+        );
+        expect(local.synced, isEmpty);
+      },
+    );
+
+    test(
+      'failed boundary persistence is not reported as successful reset',
+      () async {
+        final local = _FakeRepository();
+        final repository = ReconciledCallHistoryRepository(
+          local: local,
+          server: _FakeRepository(),
+          visibilityStorage: _FailingBoundaryStorage(),
+        );
+        await expectLater(repository.clearCallHistory(), throwsStateError);
+        expect(local.items, isEmpty);
+      },
+    );
 
     test('adds server-only calls and caches them locally', () async {
       final local = _FakeRepository();
@@ -293,6 +441,7 @@ class _FakeRepository implements CallHistoryRepository {
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
+    bool serverFinalized = false,
   }) async {
     final item = CallHistoryItem(
       id: sipCallId ?? 'generated-${synced.length}',
@@ -306,5 +455,26 @@ class _FakeRepository implements CallHistoryRepository {
     );
     synced.add(item);
     return item;
+  }
+}
+
+class _DelayedRepository extends _FakeRepository {
+  _DelayedRepository(this.response);
+  final Completer<List<CallHistoryItem>> response;
+  final requested = Completer<void>();
+  @override
+  Future<List<CallHistoryItem>> getCallHistory() {
+    requested.complete();
+    return response.future;
+  }
+}
+
+class _FailingBoundaryStorage extends InMemorySecureStorageService {
+  @override
+  Future<void> write(String key, String value) async {
+    if (key == StorageKeys.appCallHistoryVisibleSince) {
+      throw StateError('locked');
+    }
+    await super.write(key, value);
   }
 }

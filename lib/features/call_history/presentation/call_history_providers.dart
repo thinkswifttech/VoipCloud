@@ -27,6 +27,7 @@ final callHistoryStorageProvider = Provider<SecureStorageService>((ref) {
 final callHistoryRepositoryProvider = Provider<CallHistoryRepository>((ref) {
   final storage = ref.watch(callHistoryStorageProvider);
   return ReconciledCallHistoryRepository(
+    visibilityStorage: storage,
     local: LocalCallHistoryRepository(storage),
     server: ApiCallHistoryRepository(
       storage: ref.watch(secureStorageProvider),
@@ -94,7 +95,9 @@ int unreadMissedCallCount(
 
 class CallHistoryController extends AsyncNotifier<List<CallHistoryItem>> {
   @override
-  Future<List<CallHistoryItem>> build() async {
+  Future<List<CallHistoryItem>> build() => _load();
+
+  Future<List<CallHistoryItem>> _load() async {
     try {
       return await ref
           .watch(callHistoryRepositoryProvider)
@@ -108,6 +111,11 @@ class CallHistoryController extends AsyncNotifier<List<CallHistoryItem>> {
   }
 
   Future<void> refresh() async {
-    ref.invalidateSelf();
+    // Refresh is complete only after the authoritative server result has been
+    // reconciled. Recompute the badge as well: a provisional local Missed
+    // entry may become Answered elsewhere once the other device's final leg
+    // reaches the history endpoint.
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(_load);
   }
 }

@@ -199,22 +199,34 @@ Payload:
 
 ### `startPresenceSubscriptions`
 
-Starts or replaces the active BLF subscription set. For each extension, native
-code sends SIP `SUBSCRIBE` requests using both the `dialog` event package
+Reconciles the ordered BLF subscription set for the signed-in account. Native
+code retains unchanged targets, terminates only removed targets, and creates
+subscriptions only for `additions`. For each addition, native code sends SIP
+`SUBSCRIBE` requests using both the `dialog` event package
 (`application/dialog-info+xml`) and the `presence` event package
 (`application/pidf+xml`). The signed-in account's domain is used. The contract
 is implemented by the Android, iOS, macOS, and Windows bridges.
 
 ```json
 {
-  "extensions": ["210", "211"]
+  "extensions": ["210", "211"],
+  "additions": ["211"],
+  "generation": 7
 }
 ```
 
+`extensions` order is the activation priority. Flutter submits at most eight
+extensions (16 event-package subscriptions) in one activation batch. Native
+events echo `generation`, allowing Flutter to reject callbacks from an obsolete
+reconciliation. Retained targets emit the synthetic lifecycle state `retained`
+without sending a new SIP request.
+
 ### `stopPresenceSubscriptions`
 
-Terminates the ordinary BLF set when invoked from Flutter. Native account
-cleanup and core disposal terminate both ordinary and diagnostic sets.
+Terminates the ordinary BLF set only for logout, reset, account replacement, or
+core disposal. Navigation and same-content directory refreshes never invoke it.
+Native account cleanup and core disposal terminate both ordinary and diagnostic
+sets.
 
 Both subscription methods accept an optional `diagnostic` boolean (default
 false). With true, start accepts one numeric DND hint, e.g.
@@ -310,6 +322,8 @@ Presence NOTIFY event:
   "kind": "notify",
   "extension": "210",
   "event": "dialog",
+  "generation": 7,
+  "observedAt": 1791392400000,
   "contentType": "application/dialog-info+xml",
   "body": "<dialog-info>...</dialog-info>"
 }
@@ -322,12 +336,14 @@ Subscription lifecycle event:
   "kind": "subscription",
   "extension": "210",
   "event": "presence",
-  "state": "active"
+  "state": "active",
+  "generation": 7,
+  "observedAt": 1791392400000
 }
 ```
 
 Allowed subscription states are `none`, `incoming`, `progress`, `pending`,
-`active`, `terminated`, `error`, and `unknown`. Lifecycle states describe the
+`active`, `retained`, `terminated`, `error`, and `unknown`. Lifecycle states describe the
 subscription itself; they must not be confused with the `<state>` inside a
 dialog-info NOTIFY.
 
@@ -340,8 +356,8 @@ Directory presence mapping:
 - dialog ringing/busy states take priority over PIDF reachability;
 - an empty dialog list or dialog state `terminated` is used as the legacy idle
   fallback when no PIDF result has arrived;
-- subscription state `terminated` or `error` means the live status is unknown
-  and displays grey;
+- subscription state `terminated` or `error` preserves a valid last-known value
+  as stale while a bounded retry is scheduled;
 - setup states such as `progress`, `pending`, and `active` do not overwrite the
   last valid dialog-info state while awaiting a NOTIFY.
 
@@ -369,6 +385,23 @@ Allowed call statuses:
 - `ended`
 - `missed`
 - `failed`
+## BLF delta reconciliation (Android, iOS, Windows, macOS)
+
+- `setPresenceTargets`: `{extensions: [numeric extension], generation: int}`.
+  Reconcile the complete desired set once per generation, retaining unchanged
+  native subscriptions and removing only obsolete ordinary BLF targets.
+- `enqueuePresenceTargets`: `{additions: [numeric extension], generation: int}`.
+  Accept only the currently configured generation and desired targets. Create
+  missing dialog/presence pairs using an indexed extension/package/subscription
+  ID key; duplicate additions emit retained lifecycle events without SIP traffic.
+- The application issues at most one pair every 32 ms, with up to 16 package
+  activations outstanding. Visible targets have priority; off-screen starts are
+  slowed to 250 ms while scrolling. Renewals and received events are not paused.
+- Stopping ordinary BLF invalidates the desired set/generation. Separate `*76`
+  all-devices DND subscriptions are never reconciled or stopped by these methods.
+- Legacy `startPresenceSubscriptions` remains for DND and compatibility. New
+  ordinary BLF clients must not send the full directory for every addition.
+
 ## Default calling and messaging intents (iOS and Android)
 
 Channel: `voipcloud/external_communication_intents`

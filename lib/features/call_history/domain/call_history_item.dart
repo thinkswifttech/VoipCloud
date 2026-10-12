@@ -19,6 +19,7 @@ class CallHistoryItem {
     this.disposition,
     this.remoteDisplayName,
     this.endedAt,
+    this.serverFinalized = false,
   });
 
   final String id;
@@ -28,6 +29,7 @@ class CallHistoryItem {
   final CallStatus status;
   final DateTime startedAt;
   final DateTime? endedAt;
+  final bool serverFinalized;
   final CallHistoryDisposition? disposition;
 
   CallHistoryDisposition get effectiveDisposition {
@@ -63,6 +65,7 @@ class CallHistoryItem {
       'startedAt': startedAt.toIso8601String(),
       'endedAt': endedAt?.toIso8601String(),
       'disposition': disposition?.name,
+      'serverFinalized': serverFinalized,
     };
   }
 
@@ -80,6 +83,7 @@ class CallHistoryItem {
           DateTime.tryParse(_string(json['startedAt'])) ?? DateTime.now(),
       endedAt: DateTime.tryParse(_string(json['endedAt'])),
       disposition: _callDisposition(json['disposition']),
+      serverFinalized: json['serverFinalized'] == true,
     );
   }
 }

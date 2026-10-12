@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../core/logging/app_logger.dart';
 
 import '../data/directory_repository.dart';
 import '../domain/directory_entry.dart';
@@ -15,8 +16,16 @@ class DirectoryController extends AsyncNotifier<List<DirectoryEntry>> {
   Future<List<DirectoryEntry>> build() => _load();
 
   Future<void> refresh() async {
-    state = const AsyncLoading();
-    state = await AsyncValue.guard(_load);
+    final previous = state;
+    final result = await AsyncValue.guard(_load);
+    // Refresh in place: never transiently publish an empty desired BLF set.
+    if (result.hasError && previous.hasValue) {
+      AppLogger.warning(
+        'Directory refresh failed; retaining last known entries',
+      );
+      return;
+    }
+    state = result;
   }
 
   Future<List<DirectoryEntry>> _load() async {

@@ -717,6 +717,19 @@ private class LinphoneBridge private constructor(private val context: android.co
         hostActivity = activity
     }
 
+    private fun publishDeviceCallPolicy() {
+        val currentAccount = account ?: core?.defaultAccount ?: return
+        val params = currentAccount.params.clone()
+        val updated = DeviceCallPolicy.contactParameters(
+            params.contactUriParameters, CallerIdentityStore.isDnd(context)
+        )
+        if (params.contactUriParameters == updated) return
+        params.contactUriParameters = updated
+        // Refresh this contact, retaining registration and messaging push tokens.
+        currentAccount.params = params
+        currentAccount.refreshRegister()
+    }
+
     private var core: Core? = null
     private var account: Account? = null
     private val calls = mutableMapOf<String, Call>()
@@ -724,11 +737,22 @@ private class LinphoneBridge private constructor(private val context: android.co
     private data class PresenceSubscription(
         val extension: String,
         val eventPackage: String,
-        val subscriptionId: String = ""
+        val subscriptionId: String = "",
+        val generation: Int = 0
     )
 
     private val presenceSubscriptions =
         IdentityHashMap<Event, PresenceSubscription>()
+    private var desiredPresenceTargets = emptyList<String>()
+    private var desiredPresenceSet = emptySet<String>()
+    private var desiredPresenceGeneration = -1
+    private val presenceSubscriptionIndex = mutableMapOf<String, Event>()
+
+    private fun removePresenceSubscription(event: Event): PresenceSubscription? {
+        val removed = presenceSubscriptions.remove(event) ?: return null
+        presenceSubscriptionIndex.remove("${removed.extension}|${removed.eventPackage}|${removed.subscriptionId}")
+        return removed
+    }
     private val featureCodeCalls =
         Collections.newSetFromMap(IdentityHashMap<Call, Boolean>())
     private val featureCodeTerminateScheduled =
@@ -748,8 +772,15 @@ private class LinphoneBridge private constructor(private val context: android.co
     private var outgoingRingbackTone: ToneGenerator? = null
     private var ringtoneSourcePath: String? = null
     @Volatile private var sipLoggingEnabled: Boolean = false
-    private val sipLogFileLock = Any()
-    private val maxSipLogBytes = 1_500_000L
+    private val sipLogWriter by lazy {
+        BufferedSipLogFile(::sipLogFile, onError = {
+            Log.w("VoIPCloud/Linphone", "Failed to persist SIP log batch", it)
+        })
+    }
+    private val sipPushTokenPattern = Regex("(?i)(pn-prid=)[^;>\\s]+")
+    private val sipAuthorizationPattern = Regex("(?im)^(Proxy-)?Authorization:.*$")
+    private val blfTargetPattern = Regex("^[0-9]{2,8}$")
+    private val dndDiagnosticTargetPattern = Regex("^\\*76[0-9]{2,8}$")
     private val audioLevelPrefs by lazy {
         context.getSharedPreferences("voipcloud_audio_levels", Context.MODE_PRIVATE)
     }
@@ -843,7 +874,9 @@ private class LinphoneBridge private constructor(private val context: android.co
                     "event" to notifiedEvent,
                     "subscriptionId" to subscription.subscriptionId,
                     "contentType" to "${body?.type.orEmpty()}/${body?.subtype.orEmpty()}",
-                    "body" to body?.utf8Text.orEmpty()
+                    "body" to body?.utf8Text.orEmpty(),
+                    "generation" to subscription.generation,
+                    "observedAt" to System.currentTimeMillis()
                 )
             )
         }
@@ -854,15 +887,21 @@ private class LinphoneBridge private constructor(private val context: android.co
             state: SubscriptionState?
         ) {
             val subscription = presenceSubscriptions[linphoneEvent] ?: return
+            val stateName = subscriptionState(state)
             presenceSink?.success(
                 mapOf(
                     "kind" to "subscription",
                     "extension" to subscription.extension,
                     "event" to subscription.eventPackage,
                     "subscriptionId" to subscription.subscriptionId,
-                    "state" to subscriptionState(state)
+                    "state" to stateName,
+                    "generation" to subscription.generation,
+                    "observedAt" to System.currentTimeMillis()
                 )
             )
+            if (stateName == "error" || stateName == "terminated") {
+                removePresenceSubscription(linphoneEvent)
+            }
         }
     }
 
@@ -961,6 +1000,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                         context,
                         call.argument<Boolean>("enabled") ?: false
                     )
+                    publishDeviceCallPolicy()
                     result.success(null)
                 }
                 "clearNativeCallState" -> {
@@ -1162,10 +1202,35 @@ private class LinphoneBridge private constructor(private val context: android.co
                     )
                     result.success(null)
                 }
+                "setPresenceTargets" -> {
+                    val generation = call.argument<Int>("generation") ?: 0
+                    if (generation >= desiredPresenceGeneration) {
+                        startPresenceSubscriptions(
+                            call.argument<List<*>>("extensions") ?: emptyList<Any?>(),
+                            generation = generation, rawAdditions = emptyList<Any?>()
+                        )
+                    }
+                    result.success(null)
+                }
+                "enqueuePresenceTargets" -> {
+                    val generation = call.argument<Int>("generation") ?: 0
+                    if (generation == desiredPresenceGeneration) {
+                        startPresenceSubscriptions(desiredPresenceTargets,
+                            generation = generation,
+                            rawAdditions = call.argument<List<*>>("additions") ?: emptyList<Any?>(),
+                            reconcileSet = false)
+                    }
+                    result.success(null)
+                }
                 "startPresenceSubscriptions" -> {
                     val extensions = call.argument<List<*>>("extensions") ?: emptyList<Any?>()
-                    startPresenceSubscriptions(extensions, call.argument<Boolean>("diagnostic") ?: false,
-                        call.argument<String>("subscriptionId") ?: "")
+                    startPresenceSubscriptions(
+                        extensions,
+                        call.argument<Boolean>("diagnostic") ?: false,
+                        call.argument<String>("subscriptionId") ?: "",
+                        call.argument<Int>("generation") ?: 0,
+                        call.argument<List<*>>("additions") ?: extensions
+                    )
                     result.success(null)
                 }
                 "stopPresenceSubscriptions" -> {
@@ -1779,6 +1844,9 @@ private class LinphoneBridge private constructor(private val context: android.co
             pushParam,
             pushBundleId,
             pushTeamId
+        )
+        params.contactUriParameters = DeviceCallPolicy.contactParameters(
+            params.contactUriParameters, CallerIdentityStore.isDnd(context)
         )
         params.setRegisterEnabled(true)
 
@@ -2561,19 +2629,70 @@ private class LinphoneBridge private constructor(private val context: android.co
         return requireNotNull(Factory.instance().createAddress(uri))
     }
 
-    private fun startPresenceSubscriptions(rawExtensions: List<*>, diagnostic: Boolean = false, subscriptionId: String = "") {
+    private fun startPresenceSubscriptions(
+        rawExtensions: List<*>,
+        diagnostic: Boolean = false,
+        subscriptionId: String = "",
+        generation: Int = 0,
+        rawAdditions: List<*> = rawExtensions,
+        reconcileSet: Boolean = true
+    ) {
         val currentCore = requireNotNull(core) { "Linphone core is not initialized" }
-        stopPresenceSubscriptions(diagnostic)
-        rawExtensions
+        val extensions = if (!reconcileSet) desiredPresenceTargets else rawExtensions
             .mapNotNull { (it as? String)?.trim() }
-            .filter { it.matches(Regex(if (diagnostic) "^\\*76[0-9]{2,8}$" else "^[0-9]{2,8}$")) }
+            .filter { it.matches(if (diagnostic) dndDiagnosticTargetPattern else blfTargetPattern) }
             .distinct()
             .take(if (diagnostic) 1 else 250)
-            .forEach { extension ->
+        val additions = if (diagnostic) {
+            extensions
+        } else {
+            rawAdditions
+                .mapNotNull { (it as? String)?.trim() }
+                .filter { it in (if (reconcileSet) extensions.toSet() else desiredPresenceSet) }
+                .distinct()
+        }
+        if (diagnostic) {
+            stopPresenceSubscriptions(true)
+        } else if (reconcileSet) {
+            desiredPresenceTargets = extensions
+            desiredPresenceSet = extensions.toSet()
+            desiredPresenceGeneration = generation
+            val desired = extensions.toSet()
+            val obsolete = presenceSubscriptions.filter {
+                !it.value.extension.startsWith("*76") && it.value.extension !in desired
+            }.keys.toList()
+            obsolete.forEach { event ->
+                removePresenceSubscription(event)
+                try { event.terminate() } catch (_: Throwable) {}
+            }
+            presenceSubscriptions.entries.toList().forEach { entry ->
+                if (!entry.value.extension.startsWith("*76") &&
+                    entry.value.extension in desired && entry.value.generation != generation) {
+                    presenceSubscriptions[entry.key] = entry.value.copy(generation = generation)
+                }
+            }
+        }
+        additions.forEach { extension ->
               listOf(
                 "dialog" to "application/dialog-info+xml",
                 "presence" to "application/pidf+xml"
-              ).filter { subscriptionId.isEmpty() || it.first == "dialog" }.forEach { (eventPackage, accept) ->
+              ).filter { subscriptionId.isEmpty() || it.first == "dialog" }.forEach packageLoop@ { (eventPackage, accept) ->
+                val indexKey = "$extension|$eventPackage|$subscriptionId"
+                val retained = presenceSubscriptionIndex.containsKey(indexKey)
+                if (retained) {
+                    presenceSink?.success(
+                        mapOf(
+                            "kind" to "subscription",
+                            "extension" to extension,
+                            "event" to eventPackage,
+                            "subscriptionId" to subscriptionId,
+                            "state" to "retained",
+                            "generation" to generation,
+                            "observedAt" to System.currentTimeMillis()
+                        )
+                    )
+                    return@packageLoop
+                }
                 val event = currentCore.createSubscribe(
                     normalizeDestination(extension),
                     eventPackage,
@@ -2583,10 +2702,12 @@ private class LinphoneBridge private constructor(private val context: android.co
                 presenceSubscriptions[event] = PresenceSubscription(
                     extension,
                     eventPackage,
-                    subscriptionId
+                    subscriptionId,
+                    generation
                 )
+                presenceSubscriptionIndex[indexKey] = event
                 if (event.sendSubscribe(null) != 0) {
-                    presenceSubscriptions.remove(event)
+                    removePresenceSubscription(event)
                     event.terminate()
                     presenceSink?.success(
                         mapOf(
@@ -2594,24 +2715,31 @@ private class LinphoneBridge private constructor(private val context: android.co
                             "extension" to extension,
                             "event" to eventPackage,
                             "subscriptionId" to subscriptionId,
-                            "state" to "error"
+                            "state" to "error",
+                            "generation" to generation,
+                            "observedAt" to System.currentTimeMillis()
                         )
                     )
                 }
               }
             }
-        Log.i(
+        if (reconcileSet) Log.i(
             "VoIPCloud/Linphone",
-            "Started ${presenceSubscriptions.size} dialog/PIDF subscriptions"
+            "Reconciled ${extensions.size} BLF targets; trackedObjects=${presenceSubscriptions.size} generation=$generation"
         )
     }
 
     private fun stopPresenceSubscriptions(diagnostic: Boolean? = null) {
+        if (diagnostic != true) {
+            desiredPresenceTargets = emptyList()
+            desiredPresenceSet = emptySet()
+            desiredPresenceGeneration = -1
+        }
         val events = presenceSubscriptions.filter {
             diagnostic == null || it.value.extension.startsWith("*76") == diagnostic
         }.keys.toList()
         events.forEach { event ->
-            presenceSubscriptions.remove(event)
+            removePresenceSubscription(event)
             try {
                 event.terminate()
             } catch (error: Throwable) {
@@ -3102,25 +3230,11 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun readSipLogFile(): String {
-        val file = sipLogFile()
-        if (!file.exists()) return ""
-        return try {
-            file.readText()
-        } catch (_: Throwable) {
-            ""
-        }
+        return sipLogWriter.read()
     }
 
     private fun clearSipLogFile() {
-        synchronized(sipLogFileLock) {
-            try {
-                val file = sipLogFile()
-                if (file.exists()) {
-                    file.writeText("")
-                }
-            } catch (_: Throwable) {
-            }
-        }
+        sipLogWriter.clear()
     }
 
     private fun configureLinphoneLogging(enabled: Boolean) {
@@ -3153,9 +3267,9 @@ private class LinphoneBridge private constructor(private val context: android.co
                     when (level) {
                         LogLevel.Error, LogLevel.Fatal -> Log.e(tag, line)
                         LogLevel.Warning -> Log.w(tag, line)
-                        LogLevel.Message -> Log.i(tag, line)
-                        LogLevel.Debug, LogLevel.Trace -> Log.d(tag, line)
-                        else -> Log.v(tag, line)
+                        // Verbose signaling belongs in the exported log, not
+                        // thousands of logcat writes on the calling thread.
+                        else -> Unit
                     }
                     if (!sipLoggingEnabled) {
                         return
@@ -3177,10 +3291,10 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun sanitizeLinphoneLog(message: String): String = message
-        .replace(Regex("(?i)(pn-prid=)[^;>\\s]+")) { match ->
+        .replace(sipPushTokenPattern) { match ->
             "${match.groupValues[1]}<redacted>"
         }
-        .replace(Regex("(?im)^(Proxy-)?Authorization:.*$")) { match ->
+        .replace(sipAuthorizationPattern) { match ->
             if (match.value.startsWith("Proxy-", ignoreCase = true)) {
                 "Proxy-Authorization: <redacted>"
             } else {
@@ -3207,19 +3321,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun writeSipLogLine(line: String) {
-        synchronized(sipLogFileLock) {
-            try {
-                val file = sipLogFile()
-                file.parentFile?.mkdirs()
-                if (file.exists() && file.length() > maxSipLogBytes) {
-                    val keep = file.readText().takeLast((maxSipLogBytes / 2).toInt())
-                    file.writeText(keep)
-                }
-                file.appendText(line.trimEnd() + "\n")
-            } catch (error: Throwable) {
-                Log.w("VoIPCloud/Linphone", "Failed to append SIP log line", error)
-            }
-        }
+        sipLogWriter.append(line)
     }
 
     private fun sipLogFile(): java.io.File {

@@ -18,6 +18,7 @@ import '../../messages/data/messaging_providers.dart';
 import '../../messages/domain/carrier_messaging_config.dart';
 import '../../sip/application/sip_service.dart';
 import '../../directory/data/directory_repository.dart';
+import '../../directory/presentation/blf_feed_providers.dart';
 import '../../sip/application/linphone_sip_service.dart';
 import '../../sip/application/sip_push_token_service.dart';
 import '../../sip/domain/sip_routing.dart';
@@ -382,6 +383,11 @@ class SessionController extends AsyncNotifier<AppSession?> {
 
   Future<void> resetLocal() async {
     _registrationRetryTimer?.cancel();
+    // Close the BLF feed first: its socket authenticates with the directory
+    // token that is revoked below.
+    try {
+      await ref.read(blfFeedClientProvider)?.release();
+    } catch (_) {}
     // Revoke messaging while its access token and the control-plane directory
     // token are still available. Clearing either first would leave the server
     // session and its push endpoint active even though the device logged out.
@@ -428,12 +434,17 @@ class SessionController extends AsyncNotifier<AppSession?> {
       }
     }
     final sipService = ref.read(sipServiceProvider);
+    // Reset is device-scoped: clear this installation's edge DND marker while
+    // its SIP account still exists. Do not alter account-wide PBX DND.
+    await ref
+        .read(settingsControllerProvider.notifier)
+        .resetDeviceDndForAppReset();
     await sipService.unregister();
     // A disabled native account can be restored by a later FCM/APNs wake.
     // Purge it only for a real local reset, after the unregister transaction.
     await sipService.purgeAccount();
-    await ref.read(secureSessionStorageProvider).clearSession();
     await ref.read(callHistoryRepositoryProvider).clearCallHistory();
+    await ref.read(secureSessionStorageProvider).clearSession();
     try {
       await const VoipPlatformChannel().setAppBadgeCount(0);
     } catch (_) {

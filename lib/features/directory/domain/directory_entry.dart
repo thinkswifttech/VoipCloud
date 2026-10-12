@@ -17,6 +17,8 @@ enum DirectoryPresence {
 
 enum DirectoryTelephoneKind { internal, external, unknown }
 
+enum DirectoryPresenceFreshness { unavailable, live, stale }
+
 class DirectoryEntry {
   const DirectoryEntry({
     required this.id,
@@ -27,6 +29,8 @@ class DirectoryEntry {
     this.company = '',
     this.teams = const [],
     this.deviceRegistered,
+    this.presenceFreshness = DirectoryPresenceFreshness.unavailable,
+    this.presenceObservedAt,
   }) : assert(numbers.length > 0);
 
   final String id;
@@ -36,6 +40,8 @@ class DirectoryEntry {
   final List<String> teams;
   final DirectoryTelephoneKind telephoneKind;
   final DirectoryPresence presence;
+  final DirectoryPresenceFreshness presenceFreshness;
+  final DateTime? presenceObservedAt;
 
   /// Whether Flexisip has a reachable, non-anchor device binding.
   ///
@@ -68,7 +74,12 @@ class DirectoryEntry {
 
   bool get hasMultipleNumbers => numbers.length > 1;
 
-  DirectoryEntry copyWith({DirectoryPresence? presence}) => DirectoryEntry(
+  DirectoryEntry copyWith({
+    DirectoryPresence? presence,
+    DirectoryPresenceFreshness? presenceFreshness,
+    DateTime? presenceObservedAt,
+    bool clearPresenceObservedAt = false,
+  }) => DirectoryEntry(
     id: id,
     displayName: displayName,
     numbers: numbers,
@@ -76,6 +87,10 @@ class DirectoryEntry {
     teams: teams,
     telephoneKind: telephoneKind,
     presence: presence ?? this.presence,
+    presenceFreshness: presenceFreshness ?? this.presenceFreshness,
+    presenceObservedAt: clearPresenceObservedAt
+        ? null
+        : presenceObservedAt ?? this.presenceObservedAt,
     deviceRegistered: deviceRegistered,
   );
 

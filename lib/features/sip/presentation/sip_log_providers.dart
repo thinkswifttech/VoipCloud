@@ -9,6 +9,8 @@ final sipLogStoreProvider = Provider<SipLogStore>((ref) {
   return store;
 });
 
-final sipLogEntriesProvider = StreamProvider<List<SipLogEntry>>((ref) {
+final sipLogEntriesProvider = StreamProvider.autoDispose<List<SipLogEntry>>((
+  ref,
+) {
   return ref.watch(sipLogStoreProvider).stream;
 });

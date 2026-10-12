@@ -43,6 +43,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
   /// are SHA-256 hex values; native call IDs use platform-specific formats, so
   /// this migration does not discard genuine native history.
   bool _isLegacyProvisionalServerMiss(CallHistoryItem item) {
+    if (item.serverFinalized) return false;
     if (item.effectiveDisposition != CallHistoryDisposition.missed ||
         !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(item.id)) {
       return false;
@@ -52,12 +53,12 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
   }
 
   @override
-  Future<void> clearCallHistory() async {
-    try {
-      await _storage.delete(StorageKeys.appCallHistory);
-    } catch (error) {
-      AppLogger.warning('Call history clear skipped', data: error);
-    }
+  Future<void> clearCallHistory() {
+    final operation = _writeSerial.then(
+      (_) => _storage.delete(StorageKeys.appCallHistory),
+    );
+    _writeSerial = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
   }
 
   @override
@@ -70,6 +71,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
+    bool serverFinalized = false,
   }) {
     final operation = _writeSerial.then(
       (_) => _syncCallLog(
@@ -81,6 +83,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
         startedAt: startedAt,
         endedAt: endedAt,
         sipCallId: sipCallId,
+        serverFinalized: serverFinalized,
       ),
     );
     _writeSerial = operation.then<void>((_) {}, onError: (_, _) {});
@@ -96,6 +99,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
+    bool serverFinalized = false,
   }) async {
     final id = sipCallId?.trim().isNotEmpty == true
         ? sipCallId!.trim()
@@ -109,6 +113,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
       disposition: disposition,
       startedAt: startedAt,
       endedAt: endedAt,
+      serverFinalized: serverFinalized,
     );
     final current = await _safeCallHistoryForSync();
     final deduped = [

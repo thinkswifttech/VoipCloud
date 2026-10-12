@@ -144,6 +144,26 @@ class SettingsController extends Notifier<SettingsState> {
     _persistDnd(StorageKeys.appDndScope, scope.name);
   }
 
+  /// Clears only this installation's DND preference during an app reset.
+  ///
+  /// Account-wide DND belongs to the extension and may still be enabled on
+  /// the PBX, so resetting one device must never toggle that shared state.
+  Future<void> resetDeviceDndForAppReset() async {
+    _localDndEdited = true;
+    _scopeEdited = true;
+    state = state.copyWith(dndEnabled: false, dndScope: DndScope.thisDevice);
+
+    // Publish an unmuted contact before SIP unregisters it. This also clears
+    // the native preference used before Flutter starts after reprovisioning.
+    await _syncNativeDnd(false);
+    await _dndWrites;
+
+    final storage = ref.read(secureStorageProvider);
+    await storage.delete(StorageKeys.appLocalDndEnabled);
+    await storage.delete(StorageKeys.appDndScope);
+    await storage.delete(StorageKeys.appDndEnabled);
+  }
+
   void setThemeMode(AppThemeMode themeMode) {
     state = state.copyWith(themeMode: themeMode);
     unawaited(

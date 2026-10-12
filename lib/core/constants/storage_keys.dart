@@ -21,7 +21,10 @@ class StorageKeys {
   static const appPushTokenStatus = 'app.push_token_status';
   static const appCallHistory = 'app.call_history';
   static const appCallHistoryLastViewedAt = 'app.call_history_last_viewed_at';
+  // Kept in device-only history storage across provisioning/session resets.
+  static const appCallHistoryVisibleSince = 'app.call_history_visible_since';
   static const appQuickDial = 'app.quick_dial';
+  static const appDirectoryPresenceCache = 'app.directory_presence_cache';
   static const appContacts = 'app.contacts';
   static const appTermsAcceptance = 'app.terms_acceptance';
 

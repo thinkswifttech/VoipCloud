@@ -42,9 +42,15 @@ void main() {
       );
     });
 
-    test('does not treat different or empty numbers as the same contact phone', () {
-      expect(contactPhoneNumbersMatch('+14165550142', '+14165550143'), isFalse);
-      expect(contactPhoneNumbersMatch('', '+14165550142'), isFalse);
-    });
+    test(
+      'does not treat different or empty numbers as the same contact phone',
+      () {
+        expect(
+          contactPhoneNumbersMatch('+14165550142', '+14165550143'),
+          isFalse,
+        );
+        expect(contactPhoneNumbersMatch('', '+14165550142'), isFalse);
+      },
+    );
   });
 }

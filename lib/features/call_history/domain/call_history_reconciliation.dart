@@ -55,6 +55,7 @@ CallHistoryItem mergeLogicalCall(
     disposition: preferred.effectiveDisposition,
     startedAt: earliestStart,
     endedAt: latestEnd,
+    serverFinalized: primary.serverFinalized || secondary.serverFinalized,
   );
 }
 

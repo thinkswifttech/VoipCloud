@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phone_app/features/contacts/domain/quick_dial_presence.dart';
 import 'package:phone_app/core/constants/storage_keys.dart';
 import 'package:phone_app/core/storage/secure_storage_service.dart';
 import 'package:phone_app/features/contacts/data/local_quick_dial_repository.dart';
@@ -52,11 +53,13 @@ void main() {
           quickDialRepositoryProvider.overrideWithValue(
             LocalQuickDialRepository(storage),
           ),
-          liveDirectoryProvider.overrideWith(
-            (ref) => Stream.value([directory]),
-          ),
-          quickDialLivePresenceProvider.overrideWith(
-            (ref) => Stream.value(directStates),
+          quickDialEntryPresenceProvider.overrideWith(
+            (ref, entry) => Stream.value((
+              presence: quickDialPresence(entry, [
+                directory,
+              ], directStates: directStates),
+              freshness: DirectoryPresenceFreshness.live,
+            )),
           ),
         ],
         child: const MaterialApp(home: Scaffold(body: QuickDialPanel())),

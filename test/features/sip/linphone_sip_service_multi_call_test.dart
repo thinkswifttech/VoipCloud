@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,9 +9,11 @@ import 'package:phone_app/features/call_history/domain/call_history_item.dart';
 import 'package:phone_app/features/call_history/domain/call_history_repository.dart';
 import 'package:phone_app/features/calls/domain/call_direction.dart';
 import 'package:phone_app/features/calls/domain/call_status.dart';
+import 'package:phone_app/features/calls/domain/voip_call.dart';
 import 'package:phone_app/features/calls/presentation/call_session_providers.dart';
 import 'package:phone_app/features/sip/application/linphone_sip_service.dart';
 import 'package:phone_app/features/sip/domain/sip_config.dart';
+import 'package:phone_app/features/sip/domain/sip_registration_state.dart';
 import 'package:phone_app/voip/platform/voip_platform_channel.dart';
 
 void main() {
@@ -30,6 +33,7 @@ void main() {
         postDialPause: Duration.zero,
         postDialToneGap: Duration.zero,
         outgoingRegistrationTimeout: const Duration(milliseconds: 80),
+        registrationTransitionGrace: const Duration(milliseconds: 20),
       );
       await service.initialize(_config);
       platform.emitRegistration({'status': 'registered'});
@@ -192,18 +196,60 @@ void main() {
       expect(platform.actions, isEmpty);
     });
 
+    for (final platformKind in [TargetPlatform.windows, TargetPlatform.macOS]) {
+      test(
+        '$platformKind recovers registration before the first outgoing call',
+        () async {
+          debugDefaultTargetPlatformOverride = platformKind;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          platform.emitRegistration({'status': 'failed'});
+          await _flushEvents();
+          platform.onRegister = () async =>
+              platform.emitRegistration({'status': 'registered'});
+
+          await service.makeCall('211');
+
+          expect(platform.registrationRequests, 1);
+          expect(platform.actions, ['call:211']);
+        },
+      );
+    }
+
     test(
-      'desktop registration failure retains existing dialing behavior',
+      'routine registration refresh does not flicker desktop status',
       () async {
         debugDefaultTargetPlatformOverride = TargetPlatform.windows;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        platform.emitRegistration({'status': 'failed'});
+        final visible = <String>[];
+        final subscription = service.registrationStateStream.listen(
+          (state) => visible.add(state.status.name),
+        );
+        addTearDown(subscription.cancel);
+
+        platform.emitRegistration({'status': 'registering'});
         await _flushEvents();
-        await expectLater(service.makeCall('211'), throwsA(isA<Exception>()));
-        expect(platform.registrationRequests, 0);
-        expect(platform.actions, isEmpty);
+        expect(service.getRegistrationState().isRegistered, isTrue);
+        platform.emitRegistration({'status': 'registered'});
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+
+        expect(service.getRegistrationState().isRegistered, isTrue);
+        expect(visible, isNot(contains('registering')));
+        expect(visible, isNot(contains('unregistered')));
       },
     );
+
+    test('persistent desktop registration loss is still reported', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      platform.emitRegistration({'status': 'unregistered'});
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      expect(
+        service.getRegistrationState().status,
+        SipRegistrationStatus.unregistered,
+      );
+    });
 
     test('DND dials *76 twice and never enters call UI or history', () async {
       for (var index = 0; index < 2; index++) {
@@ -329,6 +375,50 @@ void main() {
       expect(service.activeCall?.id, 'second');
       expect(service.activeCall?.status, CallStatus.active);
     });
+
+    test(
+      'coalesces repeated hang-up taps and clears UI after acceptance',
+      () async {
+        platform.emitCall(
+          _event('ending-call', 'active', direction: 'outgoing'),
+        );
+        await _flushEvents();
+        final gate = Completer<void>();
+        platform.onEndCall = (_) => gate.future;
+
+        final first = service.endCall('ending-call');
+        final second = service.endCall('ending-call');
+        await _flushEvents();
+
+        expect(platform.actions, ['end:ending-call']);
+        gate.complete();
+        await Future.wait([first, second]);
+        await _flushEvents();
+
+        expect(service.liveCalls, isEmpty);
+        expect(history.items, hasLength(1));
+      },
+    );
+
+    test(
+      'already released native call is an idempotent hang-up success',
+      () async {
+        platform.emitCall(
+          _event('released-call', 'active', direction: 'outgoing'),
+        );
+        await _flushEvents();
+        platform.onEndCall = (_) async => throw PlatformException(
+          code: 'CALL_ENDED',
+          message: 'The selected call is no longer available.',
+        );
+
+        await service.endCall('released-call');
+        await _flushEvents();
+
+        expect(service.liveCalls, isEmpty);
+        expect(history.items, hasLength(1));
+      },
+    );
 
     test('blind transfer sends the PBX ## feature code as DTMF', () async {
       platform.emitCall(_event('original', 'active', direction: 'outgoing'));
@@ -781,6 +871,37 @@ void main() {
     );
 
     test(
+      'terminal history replay never replaces or republishes a live call',
+      () async {
+        platform.emitCall(_event('collision', 'active', direction: 'outgoing'));
+        await _flushEvents();
+        final visible = <VoipCall?>[];
+        final subscription = service.callStateStream.listen(visible.add);
+        addTearDown(subscription.cancel);
+
+        platform.emitCall({
+          ..._event('collision', 'ended'),
+          'historyReplay': true,
+          'historyEventId': 'outbox-collision',
+          'historyPersistedAtEpochMs': DateTime(
+            2026,
+            9,
+            17,
+            9,
+          ).millisecondsSinceEpoch,
+        });
+        await _flushEvents();
+        await _flushEvents();
+
+        expect(service.activeCall?.id, 'collision');
+        expect(service.activeCall?.status, CallStatus.active);
+        expect(visible, isEmpty);
+        expect(history.items, hasLength(1));
+        expect(platform.acknowledgedHistoryEvents, ['outbox-collision']);
+      },
+    );
+
+    test(
       'does not acknowledge replay when history persistence fails',
       () async {
         history.writeError = StateError('storage unavailable');
@@ -867,6 +988,7 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   final List<String> acknowledgedHistoryEvents = [];
   final Map<String, Map<String, dynamic>> _calls = {};
   Future<void> Function()? onRegister;
+  Future<void> Function(String callId)? onEndCall;
   int registrationRequests = 0;
 
   @override
@@ -922,7 +1044,12 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   @override
   Future<void> endCall(String callId) async {
     actions.add('end:$callId');
-    _changeStatus(callId, 'ended');
+    final handler = onEndCall;
+    if (handler != null) {
+      await handler(callId);
+    } else {
+      _changeStatus(callId, 'ended');
+    }
   }
 
   @override
@@ -1004,6 +1131,7 @@ class _MemoryCallHistoryRepository implements CallHistoryRepository {
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
+    bool serverFinalized = false,
   }) async {
     await writeGate;
     if (writeError case final error?) throw error;

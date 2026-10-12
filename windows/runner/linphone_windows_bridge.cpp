@@ -1,5 +1,6 @@
 #include "linphone_windows_bridge.h"
 #include "audio_device_preference.h"
+#include "device_call_policy.h"
 
 #include <flutter/event_channel.h>
 #include <flutter/event_stream_handler_functions.h>
@@ -1132,6 +1133,12 @@ class LinphoneApi {
     linphone_account_get_params =
         LoadSymbol<const LinphoneAccountParams* (*)(LinphoneAccount*)>(
             "linphone_account_get_params");
+    linphone_account_params_get_contact_uri_parameters =
+        LoadSymbol<const char* (*)(const LinphoneAccountParams*)>(
+            "linphone_account_params_get_contact_uri_parameters");
+    linphone_account_params_set_contact_uri_parameters =
+        LoadSymbol<void (*)(LinphoneAccountParams*, const char*)>(
+            "linphone_account_params_set_contact_uri_parameters");
     linphone_account_params_clone =
         LoadSymbol<LinphoneAccountParams* (*)(const LinphoneAccountParams*)>(
             "linphone_account_params_clone");
@@ -1467,6 +1474,10 @@ class LinphoneApi {
       nullptr;
   const LinphoneAccountParams* (*linphone_account_get_params)(
       LinphoneAccount*) = nullptr;
+  const char* (*linphone_account_params_get_contact_uri_parameters)(
+      const LinphoneAccountParams*) = nullptr;
+  void (*linphone_account_params_set_contact_uri_parameters)(
+      LinphoneAccountParams*, const char*) = nullptr;
   LinphoneAccountParams* (*linphone_account_params_clone)(
       const LinphoneAccountParams*) = nullptr;
   int (*linphone_account_set_params)(LinphoneAccount*, LinphoneAccountParams*) =
@@ -1832,11 +1843,21 @@ class LinphoneWindowsBridge::Impl {
     } else if (method == "sendMessage") {
       result->Error("LINPHONE_UNSUPPORTED",
                     "Windows SIP messaging is not implemented yet.");
+    } else if (method == "setPresenceTargets") {
+      StartPresenceSubscriptions(
+          StringListArg(ArgsMap(call), "extensions"), std::move(result),
+          false, "", IntArg(ArgsMap(call), "generation"), {});
+    } else if (method == "enqueuePresenceTargets") {
+      StartPresenceSubscriptions({}, std::move(result), false, "",
+          IntArg(ArgsMap(call), "generation"),
+          StringListArg(ArgsMap(call), "additions"), false);
     } else if (method == "startPresenceSubscriptions") {
       StartPresenceSubscriptions(
           StringListArg(ArgsMap(call), "extensions"), std::move(result),
           BoolArg(ArgsMap(call), "diagnostic"),
-          StringArg(ArgsMap(call), "subscriptionId"));
+          StringArg(ArgsMap(call), "subscriptionId"),
+          IntArg(ArgsMap(call), "generation"),
+          StringListArg(ArgsMap(call), "additions"));
     } else if (method == "stopPresenceSubscriptions") {
       StopPresenceSubscriptions(BoolArg(ArgsMap(call), "diagnostic") ? 2 : 1);
       result->Success();
@@ -2137,6 +2158,10 @@ class LinphoneWindowsBridge::Impl {
       api_.linphone_account_params_enable_register(params, 1);
     }
 
+    if (api_.linphone_account_params_set_contact_uri_parameters != nullptr) {
+      api_.linphone_account_params_set_contact_uri_parameters(
+          params, DeviceDndContactParameters(nullptr, device_dnd_enabled_).c_str());
+    }
     TraceNative("ConfigureAccount create account begin");
     account_ = api_.linphone_core_create_account(core_, params);
     TraceNative(account_ != nullptr ? "ConfigureAccount create account complete"
@@ -2218,7 +2243,10 @@ class LinphoneWindowsBridge::Impl {
       const int state = api_.linphone_call_get_state != nullptr
                             ? api_.linphone_call_get_state(call)
                             : 0;
-      auto payload = BuildCallPayload(call, state);
+      // Reconciliation runs frequently while a call is visible. Do not
+      // enumerate Windows audio devices on the platform/UI thread for every
+      // snapshot; route details are supplied by live events and route APIs.
+      auto payload = BuildCallPayload(call, state, nullptr, false);
       result->Success(EncodableValue(payload));
     }
   }
@@ -2231,6 +2259,32 @@ class LinphoneWindowsBridge::Impl {
       return;
     }
     device_dnd_enabled_ = enabled;
+    if (account_ != nullptr && api_.linphone_account_get_params != nullptr &&
+        api_.linphone_account_params_clone != nullptr &&
+        api_.linphone_account_set_params != nullptr &&
+        api_.linphone_account_params_get_contact_uri_parameters != nullptr &&
+        api_.linphone_account_params_set_contact_uri_parameters != nullptr) {
+      const auto* current = api_.linphone_account_get_params(account_);
+      auto* params = current == nullptr ? nullptr : api_.linphone_account_params_clone(current);
+      if (params == nullptr) {
+        result->Error("DND_REGISTRATION_ERROR", "Unable to update call notifications.");
+        return;
+      }
+      const auto* original = api_.linphone_account_params_get_contact_uri_parameters(params);
+      const auto updated = DeviceDndContactParameters(original, enabled);
+      if (original == nullptr || updated != original) {
+        api_.linphone_account_params_set_contact_uri_parameters(params, updated.c_str());
+        const auto status = api_.linphone_account_set_params(account_, params);
+        if (api_.linphone_account_params_unref != nullptr) api_.linphone_account_params_unref(params);
+        if (status != 0) {
+          result->Error("DND_REGISTRATION_ERROR", "Unable to update call notifications.");
+          return;
+        }
+        if (api_.linphone_account_refresh_register != nullptr) api_.linphone_account_refresh_register(account_);
+      } else if (api_.linphone_account_params_unref != nullptr) {
+        api_.linphone_account_params_unref(params);
+      }
+    }
     if (enabled) {
       LinphoneCall* call = CurrentCall();
       const int state = call != nullptr && api_.linphone_call_get_state != nullptr
@@ -3440,8 +3494,14 @@ class LinphoneWindowsBridge::Impl {
   void StartPresenceSubscriptions(
       std::vector<std::string> extensions,
       std::unique_ptr<MethodResult> result, bool diagnostic = false,
-      const std::string& subscription_id = "") {
+      const std::string& subscription_id = "", int generation = 0,
+      std::vector<std::string> additions = {}, bool reconcile_set = true) {
     std::lock_guard<std::mutex> lock(core_mutex_);
+    if (!diagnostic && ((!reconcile_set && generation != desired_presence_generation_) ||
+        (reconcile_set && generation < desired_presence_generation_))) {
+      result->Success();
+      return;
+    }
     if (!EnsureReady(result.get())) {
       return;
     }
@@ -3456,7 +3516,7 @@ class LinphoneWindowsBridge::Impl {
       return;
     }
 
-    StopPresenceSubscriptionsLocked(diagnostic ? 2 : 1);
+    if (reconcile_set) {
     for (auto& extension : extensions) {
       extension.erase(
           extension.begin(),
@@ -3481,26 +3541,84 @@ class LinphoneWindowsBridge::Impl {
                      });
             }),
         extensions.end());
-    std::sort(extensions.begin(), extensions.end());
-    extensions.erase(std::unique(extensions.begin(), extensions.end()),
-                     extensions.end());
+    std::unordered_set<std::string> seen_extensions;
+    extensions.erase(
+        std::remove_if(extensions.begin(), extensions.end(),
+                       [&seen_extensions](const std::string& value) {
+                         return !seen_extensions.insert(value).second;
+                       }),
+        extensions.end());
     if (extensions.size() > (diagnostic ? 1u : 250u)) {
       extensions.resize(diagnostic ? 1 : 250);
     }
+    } else {
+      extensions = desired_presence_targets_;
+    }
+    if (diagnostic) {
+      additions = extensions;
+    } else {
+      std::unordered_set<std::string> new_desired;
+      if (reconcile_set) new_desired.insert(extensions.begin(), extensions.end());
+      const auto& desired = reconcile_set ? new_desired : desired_presence_set_;
+      std::unordered_set<std::string> seen_additions;
+      additions.erase(
+          std::remove_if(additions.begin(), additions.end(),
+                         [&](std::string& value) {
+                           value.erase(0, value.find_first_not_of(" \t\r\n"));
+                           const auto last = value.find_last_not_of(" \t\r\n");
+                           if (last != std::string::npos) value.erase(last + 1);
+                           return desired.find(value) == desired.end() ||
+                                  !seen_additions.insert(value).second;
+                         }),
+          additions.end());
+    }
+
+    if (diagnostic) {
+      StopPresenceSubscriptionsLocked(2);
+    } else if (reconcile_set) {
+      desired_presence_targets_ = extensions;
+      desired_presence_set_ = std::unordered_set<std::string>(extensions.begin(), extensions.end());
+      desired_presence_generation_ = generation;
+      const std::unordered_set<std::string> desired(extensions.begin(),
+                                                     extensions.end());
+      std::vector<LinphoneEvent*> obsolete;
+      for (const auto& entry : presence_subscriptions_) {
+        if (entry.second.first.rfind("*76", 0) != 0 &&
+            desired.find(entry.second.first) == desired.end()) {
+          obsolete.push_back(entry.first);
+        } else if (entry.second.first.rfind("*76", 0) != 0) {
+          presence_subscription_generations_[entry.first] = generation;
+        }
+      }
+      for (LinphoneEvent* event : obsolete) {
+        RemovePresenceSubscription(event);
+        api_.linphone_event_terminate(event);
+        if (api_.linphone_event_unref != nullptr) {
+          api_.linphone_event_unref(event);
+        }
+      }
+    }
 
     LinphoneFactory* factory = api_.linphone_factory_get();
-    for (const auto& extension : extensions) {
+    for (const auto& extension : additions) {
       const std::pair<const char*, const char*> packages[] = {
           {"dialog", "application/dialog-info+xml"},
           {"presence", "application/pidf+xml"}};
       for (const auto& package : packages) {
       if (!subscription_id.empty() && std::string(package.first) != "dialog") continue;
+      const std::string index_key = extension + "|" + package.first + "|" + subscription_id;
+      if (presence_subscription_index_.count(index_key) != 0) {
+        EmitPresenceSubscription(extension, package.first, "retained",
+                                 subscription_id, generation);
+        continue;
+      }
       const std::string destination =
           NormalizeDestination(extension, sip_domain_);
       LinphoneAddress* address =
           api_.linphone_factory_create_address(factory, destination.c_str());
       if (address == nullptr) {
-        EmitPresenceSubscription(extension, package.first, "error", subscription_id);
+        EmitPresenceSubscription(extension, package.first, "error",
+                                 subscription_id, generation);
         continue;
       }
       LinphoneEvent* event = api_.linphone_core_create_subscribe(
@@ -3509,7 +3627,8 @@ class LinphoneWindowsBridge::Impl {
         api_.linphone_address_unref(address);
       }
       if (event == nullptr) {
-        EmitPresenceSubscription(extension, package.first, "error", subscription_id);
+        EmitPresenceSubscription(extension, package.first, "error",
+                                 subscription_id, generation);
         continue;
       }
       if (api_.linphone_event_add_custom_header != nullptr) {
@@ -3518,18 +3637,34 @@ class LinphoneWindowsBridge::Impl {
       }
       presence_subscriptions_[event] = {extension, package.first};
       presence_subscription_ids_[event] = subscription_id;
+      presence_subscription_generations_[event] = generation;
+      presence_subscription_index_.insert(index_key);
       if (api_.linphone_event_send_subscribe(event, nullptr) != 0) {
-        presence_subscriptions_.erase(event);
-        presence_subscription_ids_.erase(event);
+        RemovePresenceSubscription(event);
         api_.linphone_event_terminate(event);
         if (api_.linphone_event_unref != nullptr) {
           api_.linphone_event_unref(event);
         }
-        EmitPresenceSubscription(extension, package.first, "error", subscription_id);
+        EmitPresenceSubscription(extension, package.first, "error",
+                                 subscription_id, generation);
       }
       }
     }
+    if (reconcile_set) TraceNative("Reconciled BLF desired=" + std::to_string(extensions.size()) +
+                " trackedObjects=" + std::to_string(presence_subscriptions_.size()) +
+                " generation=" + std::to_string(generation));
     result->Success();
+  }
+
+  void RemovePresenceSubscription(LinphoneEvent* event) {
+    const auto found = presence_subscriptions_.find(event);
+    if (found != presence_subscriptions_.end()) {
+      presence_subscription_index_.erase(found->second.first + "|" +
+          found->second.second + "|" + presence_subscription_ids_[event]);
+    }
+    presence_subscriptions_.erase(event);
+    presence_subscription_ids_.erase(event);
+    presence_subscription_generations_.erase(event);
   }
 
   void StopPresenceSubscriptions(int scope = 0) {
@@ -3538,6 +3673,11 @@ class LinphoneWindowsBridge::Impl {
   }
 
   void StopPresenceSubscriptionsLocked(int scope = 0) {
+    if (scope != 2) {
+      desired_presence_targets_.clear();
+      desired_presence_set_.clear();
+      desired_presence_generation_ = -1;
+    }
     std::vector<LinphoneEvent*> subscriptions;
     subscriptions.reserve(presence_subscriptions_.size());
     for (const auto& entry : presence_subscriptions_) {
@@ -3546,8 +3686,7 @@ class LinphoneWindowsBridge::Impl {
       subscriptions.push_back(entry.first);
     }
     for (LinphoneEvent* event : subscriptions) {
-      presence_subscriptions_.erase(event);
-      presence_subscription_ids_.erase(event);
+      RemovePresenceSubscription(event);
       if (api_.linphone_event_terminate != nullptr) {
         api_.linphone_event_terminate(event);
       }
@@ -3560,7 +3699,8 @@ class LinphoneWindowsBridge::Impl {
   void EmitPresenceSubscription(const std::string& extension,
                                 const std::string& event_package,
                                 const std::string& state,
-                                const std::string& subscription_id = "") {
+                                const std::string& subscription_id = "",
+                                int generation = 0) {
     owner_->EnqueueEvent(
         "presence",
         EncodableMap{{EncodableValue("kind"),
@@ -3568,6 +3708,9 @@ class LinphoneWindowsBridge::Impl {
                      {EncodableValue("extension"), EncodableValue(extension)},
                      {EncodableValue("event"), EncodableValue(event_package)},
                      {EncodableValue("subscriptionId"), EncodableValue(subscription_id)},
+                     {EncodableValue("generation"), EncodableValue(generation)},
+                     {EncodableValue("observedAt"),
+                      EncodableValue(CurrentEpochMilliseconds())},
                      {EncodableValue("state"), EncodableValue(state)}});
   }
 
@@ -3792,6 +3935,10 @@ class LinphoneWindowsBridge::Impl {
                       EncodableValue(found->second.first)},
                      {EncodableValue("subscriptionId"),
                       EncodableValue(active_impl_->presence_subscription_ids_[event])},
+                     {EncodableValue("generation"),
+                      EncodableValue(active_impl_->presence_subscription_generations_[event])},
+                     {EncodableValue("observedAt"),
+                      EncodableValue(CurrentEpochMilliseconds())},
                      {EncodableValue("event"),
                       EncodableValue(found->second.second)},
                      {EncodableValue("contentType"),
@@ -3809,11 +3956,19 @@ class LinphoneWindowsBridge::Impl {
     if (found == active_impl_->presence_subscriptions_.end()) {
       return;
     }
+    const std::string state_name = SubscriptionStateName(state);
     active_impl_->EmitPresenceSubscription(
         found->second.first,
         found->second.second,
-        SubscriptionStateName(state),
-        active_impl_->presence_subscription_ids_[event]);
+        state_name,
+        active_impl_->presence_subscription_ids_[event],
+        active_impl_->presence_subscription_generations_[event]);
+    if (state_name == "error" || state_name == "terminated") {
+      active_impl_->RemovePresenceSubscription(event);
+      if (active_impl_->api_.linphone_event_unref != nullptr) {
+        active_impl_->api_.linphone_event_unref(event);
+      }
+    }
   }
 
   std::string CallTerminationMessage(LinphoneCall* call,
@@ -3859,7 +4014,8 @@ class LinphoneWindowsBridge::Impl {
 
   EncodableMap BuildCallPayload(LinphoneCall* call,
                                 int state,
-                                const char* state_message = nullptr) {
+                                const char* state_message = nullptr,
+                                bool include_audio_details = true) {
     if (call == nullptr) {
       return {{EncodableValue("status"),
                EncodableValue(std::string("none"))}};
@@ -3950,32 +4106,36 @@ class LinphoneWindowsBridge::Impl {
                 api_.linphone_call_get_dir(call) == 1
             ? "incoming"
             : "outgoing";
-    auto audio_endpoints = AudioEndpointPayload();
-    const std::string audio_route = CurrentAudioRoute();
+    std::vector<EncodableValue> audio_endpoints;
+    std::string audio_route;
     std::string current_endpoint_id;
-    for (const auto& endpoint_value : audio_endpoints) {
-      const auto* endpoint = std::get_if<EncodableMap>(&endpoint_value);
-      if (endpoint == nullptr) {
-        continue;
-      }
-      const auto selected = endpoint->find(EncodableValue("selected"));
-      const auto id = endpoint->find(EncodableValue("id"));
-      const auto endpoint_direction =
-          endpoint->find(EncodableValue("direction"));
-      if (endpoint_direction != endpoint->end()) {
-        const auto* value =
-            std::get_if<std::string>(&endpoint_direction->second);
-        if (value != nullptr && *value != "output") {
+    if (include_audio_details) {
+      audio_endpoints = AudioEndpointPayload();
+      audio_route = CurrentAudioRoute();
+      for (const auto& endpoint_value : audio_endpoints) {
+        const auto* endpoint = std::get_if<EncodableMap>(&endpoint_value);
+        if (endpoint == nullptr) {
           continue;
         }
-      }
-      if (selected != endpoint->end() && id != endpoint->end() &&
-          std::get_if<bool>(&selected->second) != nullptr &&
-          *std::get_if<bool>(&selected->second)) {
-        if (const auto* value = std::get_if<std::string>(&id->second)) {
-          current_endpoint_id = *value;
+        const auto selected = endpoint->find(EncodableValue("selected"));
+        const auto id = endpoint->find(EncodableValue("id"));
+        const auto endpoint_direction =
+            endpoint->find(EncodableValue("direction"));
+        if (endpoint_direction != endpoint->end()) {
+          const auto* value =
+              std::get_if<std::string>(&endpoint_direction->second);
+          if (value != nullptr && *value != "output") {
+            continue;
+          }
         }
-        break;
+        if (selected != endpoint->end() && id != endpoint->end() &&
+            std::get_if<bool>(&selected->second) != nullptr &&
+            *std::get_if<bool>(&selected->second)) {
+          if (const auto* value = std::get_if<std::string>(&id->second)) {
+            current_endpoint_id = *value;
+          }
+          break;
+        }
       }
     }
     const auto call_status = CallStatus(state);
@@ -4005,7 +4165,7 @@ class LinphoneWindowsBridge::Impl {
       dnd_declined_incoming_call_ = nullptr;
       owner_->ClearIncomingCallNotification();
     }
-    return EncodableMap{{EncodableValue("id"), EncodableValue(call_id)},
+    EncodableMap payload{{EncodableValue("id"), EncodableValue(call_id)},
                      {EncodableValue("startedAt"),
                       EncodableValue(started_at_ms)},
                      {EncodableValue("endedAt"),
@@ -4020,17 +4180,20 @@ class LinphoneWindowsBridge::Impl {
                      {EncodableValue("stateMessage"),
                       EncodableValue(termination_message)},
                      {EncodableValue("isMuted"),
-                      EncodableValue(microphone_muted_)},
-                     {EncodableValue("isSpeakerEnabled"),
-                      EncodableValue(audio_route == "speaker")},
-                     {EncodableValue("audioRoute"),
-                      EncodableValue(audio_route)},
-                     {EncodableValue("currentEndpointId"),
+                      EncodableValue(microphone_muted_)}};
+    if (include_audio_details) {
+      payload.emplace(EncodableValue("isSpeakerEnabled"),
+                      EncodableValue(audio_route == "speaker"));
+      payload.emplace(EncodableValue("audioRoute"),
+                      EncodableValue(audio_route));
+      payload.emplace(EncodableValue("currentEndpointId"),
                       current_endpoint_id.empty()
                           ? EncodableValue()
-                          : EncodableValue(current_endpoint_id)},
-                     {EncodableValue("availableEndpoints"),
-                      EncodableValue(audio_endpoints)}};
+                          : EncodableValue(current_endpoint_id));
+      payload.emplace(EncodableValue("availableEndpoints"),
+                      EncodableValue(audio_endpoints));
+    }
+    return payload;
   }
 
   void TrackFeatureCodeCall(LinphoneCall* call) {
@@ -4099,6 +4262,11 @@ class LinphoneWindowsBridge::Impl {
                      std::pair<std::string, std::string>>
       presence_subscriptions_;
   std::unordered_map<LinphoneEvent*, std::string> presence_subscription_ids_;
+  std::unordered_map<LinphoneEvent*, int> presence_subscription_generations_;
+  std::vector<std::string> desired_presence_targets_;
+  std::unordered_set<std::string> desired_presence_set_;
+  int desired_presence_generation_ = -1;
+  std::unordered_set<std::string> presence_subscription_index_;
   std::string sip_domain_;
   std::string sip_instance_id_;
   std::string ringtone_source_path_;

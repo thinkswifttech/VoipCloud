@@ -104,6 +104,7 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
+    bool serverFinalized = false,
   }) {
     throw UnsupportedError('Server call history is read-only');
   }
@@ -144,6 +145,9 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
       startedAt: _requiredDate(json, 'startedAt'),
       endedAt: _optionalDate(json['endedAt']),
       disposition: _dispositionFromApi(direction: direction, status: apiStatus),
+      // Only the explicit terminal statuses accepted above reach this point.
+      // A call silenced at the edge may legitimately end in the same second.
+      serverFinalized: true,
     );
   }
 

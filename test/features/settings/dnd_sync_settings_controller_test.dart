@@ -190,4 +190,64 @@ void main() {
       await events.close();
     },
   );
+
+  test(
+    'app reset clears only this device DND and leaves PBX DND untouched',
+    () async {
+      final calls = <MethodCall>[];
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        const MethodChannel('voipcloud/linphone'),
+        (call) async {
+          calls.add(call);
+          return null;
+        },
+      );
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(
+          const MethodChannel('voipcloud/linphone'),
+          null,
+        ),
+      );
+      final events = StreamController<Map<String, dynamic>>.broadcast();
+      var pbxToggles = 0;
+      final monitor = PbxDndMonitor(
+        events: events.stream,
+        start: (_, _) async {},
+        stop: () async {},
+        toggle: () async => pbxToggles++,
+        canToggle: () => true,
+      );
+      final storage = _Storage({
+        StorageKeys.appLocalDndEnabled: 'true',
+        StorageKeys.appDndScope: DndScope.allDevices.name,
+        StorageKeys.appDndEnabled: 'true',
+      });
+      final container = ProviderContainer(
+        overrides: [
+          secureStorageProvider.overrideWithValue(storage),
+          pbxDndMonitorProvider.overrideWithValue(monitor),
+        ],
+      );
+      final controller = container.read(settingsControllerProvider.notifier);
+      await flush();
+
+      await controller.resetDeviceDndForAppReset();
+
+      final state = container.read(settingsControllerProvider);
+      expect(state.localDndEnabled, isFalse);
+      expect(state.dndScope, DndScope.thisDevice);
+      expect(storage.values[StorageKeys.appLocalDndEnabled], isNull);
+      expect(storage.values[StorageKeys.appDndScope], isNull);
+      expect(storage.values[StorageKeys.appDndEnabled], isNull);
+      expect(pbxToggles, 0);
+      expect(calls.last.method, 'setNativeDnd');
+      expect(calls.last.arguments, {'enabled': false});
+
+      container.dispose();
+      monitor.dispose();
+      await events.close();
+    },
+  );
 }

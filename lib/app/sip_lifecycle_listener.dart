@@ -8,6 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/logging/app_logger.dart';
 import '../../features/calls/domain/call_status.dart';
 import '../../features/calls/domain/voip_call.dart';
+import '../../features/call_history/presentation/call_history_providers.dart';
+import '../../features/directory/presentation/blf_feed_providers.dart';
+import '../../features/directory/presentation/directory_presence_providers.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/settings/presentation/settings_controller.dart';
 import '../../features/settings/presentation/pbx_dnd_providers.dart';
@@ -37,6 +40,22 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   StreamSubscription<VoipCall?>? _callSubscription;
   bool? _hadNetwork;
+  DateTime? _lastHistoryRefresh;
+
+  void _refreshHistoryIfNeeded({bool force = false}) {
+    if (!mounted ||
+        ref.read(sessionControllerProvider).value?.directoryAccess == null) {
+      return;
+    }
+    final now = DateTime.now();
+    if (!force &&
+        _lastHistoryRefresh != null &&
+        now.difference(_lastHistoryRefresh!) < const Duration(seconds: 30)) {
+      return;
+    }
+    _lastHistoryRefresh = now;
+    ref.invalidate(callHistoryProvider);
+  }
 
   @override
   void initState() {
@@ -77,13 +96,24 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
     switch (state) {
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
+        // Mobile only: no BLF socket (or polling) while backgrounded.
+        if (isMobileBlfPlatform) {
+          ref.read(blfFeedClientProvider)?.setForeground(false);
+        }
         if (!_backgroundTransitionSent) {
           _backgroundTransitionSent = true;
           await _platformChannel.enterBackground();
           await _maybePromptForBackgroundPermission();
         }
       case AppLifecycleState.resumed:
+        if (isMobileBlfPlatform) {
+          ref.read(blfFeedClientProvider)?.setForeground(true);
+        }
+        final wasBackgrounded = _backgroundTransitionSent;
         _backgroundTransitionSent = false;
+        // A device silenced at the edge receives no call event to refresh history.
+        // Reconcile completed server calls (and badge) independently of SIP refresh.
+        _refreshHistoryIfNeeded(force: wasBackgrounded);
         await _platformChannel.enterForeground();
         ref.read(pbxDndMonitorProvider).refresh();
         if (ref.read(settingsControllerProvider).voipDebugLogsEnabled) {
@@ -133,6 +163,7 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
           WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) {
         return;
       }
+      _refreshHistoryIfNeeded();
       unawaited(
         _registrationRefresh
             .request(RegistrationRefreshReason.connectivityRestored)
@@ -176,6 +207,7 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
   Widget build(BuildContext context) {
     ref.watch(sessionControllerProvider);
     ref.watch(sipRegistrationStateProvider);
+    ref.watch(directoryPresenceSessionProvider);
     // Configure after the frame to avoid changing other provider state while
     // widgets are building; reread current values to discard stale frames.
     WidgetsBinding.instance.addPostFrameCallback((_) {

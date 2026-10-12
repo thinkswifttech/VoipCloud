@@ -80,6 +80,8 @@ void main() {
     });
     expect(calls.last.arguments, {
       'extensions': ['211'],
+      'additions': ['211'],
+      'generation': 0,
     });
   });
 

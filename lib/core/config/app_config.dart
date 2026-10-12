@@ -3,6 +3,15 @@ import 'package:flutter/foundation.dart';
 import 'app_environment.dart';
 import 'sip_transport.dart';
 
+/// Build-time gate for the server-fed BLF feed; store builds leave it off.
+const bool blfFeedEnabled = bool.fromEnvironment(
+  'BLF_FEED_ENABLED',
+  defaultValue: false,
+);
+
+/// Optional origin of the BLF service; defaults to the directory origin.
+const String blfFeedBaseUrl = String.fromEnvironment('BLF_FEED_BASE_URL');
+
 class AppConfig {
   const AppConfig({
     required this.environment,

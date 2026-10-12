@@ -191,10 +191,16 @@ class QuickDialController extends AsyncNotifier<List<QuickDialEntry>> {
   }
 
   Future<void> refresh() async {
+    // Riverpod keeps the previous value while loading; BLF targets derive
+    // from it (`.value`) and must not briefly lose the Quick Dial numbers.
+    final previous = state;
     state = const AsyncLoading();
-    state = await AsyncValue.guard(
+    final result = await AsyncValue.guard(
       () => ref.read(quickDialRepositoryProvider).getEntries(),
     );
+    state = result.hasError && previous.hasValue
+        ? AsyncData(previous.requireValue)
+        : result;
   }
 
   bool _hasNumber(

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show kProfileMode;
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -18,8 +19,10 @@ import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
 import '../domain/directory_entry.dart';
+import '../data/directory_presentation_projection.dart';
 import 'directory_presence_providers.dart';
 import 'directory_providers.dart';
+import 'blf_frame_profile.dart';
 
 enum _DirectoryTab { company, external }
 
@@ -77,7 +80,6 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
   @override
   Widget build(BuildContext context) {
     final directory = ref.watch(directoryProvider);
-    final liveDirectory = ref.watch(liveDirectoryProvider);
     final transferMode = ref.watch(callTransferModeProvider) != null;
 
     ref.listen<CallTransferRequest?>(callTransferModeProvider, (
@@ -102,7 +104,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
       padding: const EdgeInsets.fromLTRB(20, 12, 8, 0),
       child: directory.when(
         data: (items) {
-          final displayedItems = liveDirectory.asData?.value ?? items;
+          final displayedItems = items;
           final hasExternalContacts = displayedItems.any(
             (entry) => entry.isExternal,
           );
@@ -123,6 +125,12 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
             });
           }
           return _DirectoryPanel(
+            onVisibleTargets: ref
+                .read(directoryPresenceMonitorProvider)
+                .prioritizeVisibleTargets,
+            onScrolling: ref
+                .read(directoryPresenceMonitorProvider)
+                .setScrolling,
             entries: _visibleEntries(displayedItems, forcedTab: effectiveTab),
             totalInTab: _tabEntries(
               displayedItems,
@@ -199,12 +207,22 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
         (ref.read(callTransferModeProvider) != null
             ? _DirectoryTab.company
             : _tab);
-    if (identical(_lastInput, entries) &&
+    if (_lastInput != null &&
         _lastQuery == _query &&
         _lastTab == effectiveTab &&
         _lastSort == _sort &&
         _lastAscending == _ascending) {
-      return _lastVisible!;
+      if (identical(_lastInput, entries)) return _lastVisible!;
+      final projected = projectDirectoryPresenceUpdate(
+        previousInput: _lastInput!,
+        input: entries,
+        previousVisible: _lastVisible!,
+      );
+      if (projected != null) {
+        _lastInput = entries;
+        _lastVisible = projected;
+        return projected;
+      }
     }
 
     final visible = _filteredAndSorted(
@@ -494,6 +512,8 @@ enum _NumberAction { call, transfer }
 
 class _DirectoryPanel extends StatefulWidget {
   const _DirectoryPanel({
+    required this.onVisibleTargets,
+    required this.onScrolling,
     required this.entries,
     required this.totalInTab,
     required this.tab,
@@ -514,6 +534,8 @@ class _DirectoryPanel extends StatefulWidget {
   });
 
   final List<DirectoryEntry> entries;
+  final ValueChanged<Iterable<String>> onVisibleTargets;
+  final ValueChanged<bool> onScrolling;
   final int totalInTab;
   final _DirectoryTab tab;
   final bool showExternalTab;
@@ -543,6 +565,8 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
   static const _indexBarWidth = 24.0;
 
   final _scrollController = ScrollController();
+  ScrollPosition? _observedScrollPosition;
+  BlfFrameProfile? _frameProfile;
   final _activeSectionIndex = ValueNotifier<int>(0);
   final _showIndexBubble = ValueNotifier<bool>(false);
   List<_DirectoryListEntry> _entries = const [];
@@ -557,10 +581,26 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
       : _companyTileHeight;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (kProfileMode) {
+      _frameProfile ??= BlfFrameProfile(
+        refreshRate: View.of(context).display.refreshRate,
+      );
+    }
+  }
+
+  @override
   void initState() {
     super.initState();
     _rebuildEntries();
     _scrollController.addListener(_syncActiveSection);
+    _scrollController.addListener(_prioritizeViewport);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _prioritizeViewport();
+      }
+    });
   }
 
   @override
@@ -575,11 +615,25 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
         oldWidget.sort != widget.sort ||
         oldWidget.ascending != widget.ascending ||
         oldWidget.tab != widget.tab) {
-      _rebuildEntries();
+      if (!resetScroll &&
+          sameDirectoryContent(oldWidget.entries, widget.entries)) {
+        // BLF changes don't alter section geometry or the scroll index.
+        var index = 0;
+        _entries = [
+          for (final item in _entries)
+            if (item.entry == null)
+              item
+            else
+              _DirectoryListEntry.item(widget.entries[index++]),
+        ];
+      } else {
+        _rebuildEntries();
+      }
       if (resetScroll) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && _scrollController.hasClients) {
             _scrollController.jumpTo(0);
+            _prioritizeViewport();
           }
         });
       }
@@ -600,8 +654,14 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
   @override
   void dispose() {
     _hideIndexBubbleTimer?.cancel();
+    _frameProfile?.dispose();
+    _observedScrollPosition?.isScrollingNotifier.removeListener(
+      _reportScrolling,
+    );
+    widget.onScrolling(false);
     _scrollController
       ..removeListener(_syncActiveSection)
+      ..removeListener(_prioritizeViewport)
       ..dispose();
     _activeSectionIndex.dispose();
     _showIndexBubble.dispose();
@@ -610,6 +670,39 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
 
   bool get _isDefaultSort =>
       widget.sort == _DirectorySort.displayName && widget.ascending;
+
+  void _prioritizeViewport() {
+    if (!_scrollController.hasClients) return;
+    final position = _scrollController.position;
+    if (!identical(position, _observedScrollPosition)) {
+      _observedScrollPosition?.isScrollingNotifier.removeListener(
+        _reportScrolling,
+      );
+      _observedScrollPosition = position;
+      position.isScrollingNotifier.addListener(_reportScrolling);
+    }
+    final top = _scrollController.offset;
+    var offset = 0.0;
+    final targets = <String>[];
+    for (final item in _entries) {
+      final height = item.entry == null ? _sectionHeaderHeight : _tileHeight;
+      if (offset + height > top && item.entry?.isCompany == true) {
+        targets.addAll(item.entry!.numbers.map((number) => number.trim()));
+        if (targets.length >= 8) break;
+      }
+      offset += height;
+    }
+    widget.onVisibleTargets(targets.take(8));
+  }
+
+  void _reportScrolling() {
+    if (_scrollController.hasClients) {
+      widget.onScrolling(_scrollController.position.isScrollingNotifier.value);
+      _frameProfile?.setScrolling(
+        _scrollController.position.isScrollingNotifier.value,
+      );
+    }
+  }
 
   void _rebuildEntries() {
     final entries = <_DirectoryListEntry>[];
@@ -918,9 +1011,9 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
                                             ScrollViewKeyboardDismissBehavior
                                                 .onDrag,
                                         scrollCacheExtent:
-                                            const ScrollCacheExtent.pixels(960),
+                                            const ScrollCacheExtent.pixels(320),
                                         addAutomaticKeepAlives: false,
-                                        addRepaintBoundaries: false,
+                                        addRepaintBoundaries: true,
                                         itemExtentBuilder: _extentForIndex,
                                         padding: const EdgeInsets.only(
                                           bottom: _listBottomPadding,
@@ -1403,7 +1496,7 @@ class _DirectoryTile extends StatelessWidget {
           child: Row(
             children: [
               if (!showCompany) ...[
-                _PresenceDot(presence: entry.presence),
+                _DirectoryPresenceIndicator(entry: entry),
                 const SizedBox(width: 12),
               ],
               Expanded(
@@ -1458,10 +1551,30 @@ class _DirectoryTile extends StatelessWidget {
   }
 }
 
+class _DirectoryPresenceIndicator extends ConsumerWidget {
+  const _DirectoryPresenceIndicator({required this.entry});
+  final DirectoryEntry entry;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final value = ref
+        .watch(directoryEntryPresenceProvider(entry))
+        .asData
+        ?.value;
+    return _PresenceDot(
+      presence: value?.presence ?? entry.presence,
+      stale:
+          (value?.freshness ?? entry.presenceFreshness) ==
+          DirectoryPresenceFreshness.stale,
+    );
+  }
+}
+
 class _PresenceDot extends StatefulWidget {
-  const _PresenceDot({required this.presence});
+  const _PresenceDot({required this.presence, this.stale = false});
 
   final DirectoryPresence presence;
+  final bool stale;
 
   @override
   State<_PresenceDot> createState() => _PresenceDotState();
@@ -1486,11 +1599,14 @@ class _PresenceDotState extends State<_PresenceDot>
   @override
   void didUpdateWidget(covariant _PresenceDot oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.presence != widget.presence) _updateAnimation();
+    if (oldWidget.presence != widget.presence ||
+        oldWidget.stale != widget.stale) {
+      _updateAnimation();
+    }
   }
 
   void _updateAnimation() {
-    if (widget.presence == DirectoryPresence.ringing) {
+    if (widget.presence == DirectoryPresence.ringing && !widget.stale) {
       _ringingController.repeat(reverse: true);
     } else {
       _ringingController
@@ -1514,20 +1630,25 @@ class _PresenceDotState extends State<_PresenceDot>
       DirectoryPresence.unregistered => const Color(0xFF9CA3AF),
       DirectoryPresence.unknown => const Color(0xFF9CA3AF),
     };
-    final label = switch (widget.presence) {
+    final statusLabel = switch (widget.presence) {
       DirectoryPresence.available => 'Available',
       DirectoryPresence.busy => 'On a call',
       DirectoryPresence.ringing => 'Ringing',
       DirectoryPresence.unregistered => 'Not registered',
       DirectoryPresence.unknown => 'Status unavailable',
     };
+    final label = widget.stale
+        ? 'Last known: $statusLabel. Updating.'
+        : statusLabel;
 
     return Tooltip(
       message: label,
       child: Semantics(
         label: label,
         child: FadeTransition(
-          opacity: _ringingController,
+          opacity: widget.stale
+              ? const AlwaysStoppedAnimation<double>(0.55)
+              : _ringingController,
           child: Container(
             width: 10,
             height: 10,

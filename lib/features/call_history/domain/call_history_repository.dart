@@ -16,5 +16,6 @@ abstract class CallHistoryRepository {
     required DateTime startedAt,
     DateTime? endedAt,
     String? sipCallId,
+    bool serverFinalized = false,
   });
 }

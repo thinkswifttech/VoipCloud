@@ -246,10 +246,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               cards[2],
               if (Platform.isWindows) ...[
                 const SizedBox(height: 16),
-                const AppCard(
-                  title: 'Window',
-                  child: WindowsAlwaysOnTopTile(),
-                ),
+                const AppCard(title: 'Window', child: WindowsAlwaysOnTopTile()),
               ],
               const SizedBox(height: 16),
               cards[3],
@@ -303,6 +300,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(sessionControllerProvider.notifier).revokeDeviceAndReset();
       if (mounted) {
         context.go(RoutePaths.provisioning);
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Unable to finish resetting this device. Please try again.',
+            ),
+          ),
+        );
       }
     } finally {
       if (mounted) {
