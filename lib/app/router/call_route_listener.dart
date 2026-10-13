@@ -108,6 +108,18 @@ class CallRouteListener extends ConsumerWidget {
             // page was already shown or deliberately skipped.
             return;
           }
+          final endedAt = call.endedAt;
+          final isOldCall =
+              endedAt != null &&
+              DateTime.now().difference(endedAt) > const Duration(seconds: 10);
+          if (isOldCall) {
+            // A late report about a call that finished a while ago must not
+            // flash up as if it had just ended.
+            AppLogger.info(
+              'Call route decision => stale finished call id=${call.id}, skip call-ended page',
+            );
+            return;
+          }
           if (_appIsInBackground()) {
             // A call that ended while the app was away (answered on another
             // device, picked up by a queue colleague) must not queue a

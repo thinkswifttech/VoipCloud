@@ -100,6 +100,10 @@ class LinphoneSipService implements SipService {
   Future<void> _audioRouteSerial = Future<void>.value();
   Timer? _windowsCallReconciliationTimer;
   bool _windowsSyncInFlight = false;
+  // Consecutive Windows syncs in which the engine reported no call while the
+  // app still held a live one.
+  int _windowsNoCallStreak = 0;
+  static const _windowsNoCallStreakLimit = 5;
   final Stopwatch _callTraceClock = Stopwatch()..start();
   int _callTraceSequence = 0;
   _PostDialPlan? _pendingPostDialPlan;
@@ -783,7 +787,15 @@ class LinphoneSipService implements SipService {
     } on PlatformException catch (error) {
       // Hang-up is idempotent. The SDK can release the call before a repeated
       // tap reaches native code; that is success, not a reason to strand UI.
-      if (error.code != 'CALL_ENDED' && error.code != 'CALL_NOT_FOUND') rethrow;
+      if (error.code != 'CALL_ENDED' && error.code != 'CALL_NOT_FOUND') {
+        // Any other failure is only real if the engine still has the call. If
+        // it is already gone, finish the call here instead of leaving it
+        // stuck on screen with an error.
+        final engineStillHasCall = await _platformChannel
+            .hasActiveCall()
+            .catchError((Object _) => true);
+        if (engineStillHasCall) rethrow;
+      }
       _traceCall('end_already_released', identity: callId);
     }
     _completeLocalCall(callId);
@@ -1436,6 +1448,9 @@ class LinphoneSipService implements SipService {
       _stopWindowsCallReconciliationIfIdle();
       return;
     }
+    final earlierState = _knownCalls[call.id];
+    final wasLiveBefore =
+        earlierState != null && !_isFinished(earlierState.status);
     _recordCallState(
       call,
       historyEventId: _nullableString(event['historyEventId']),
@@ -1443,7 +1458,10 @@ class LinphoneSipService implements SipService {
     _bindOrAdvancePostDial(call);
     final previousActive = _activeCall;
     _publishCallState();
-    if (_activeCall == null && call.answeredElsewhere) {
+    // Only a call this app saw ringing or live can complete in front of the
+    // user. A finished call that first reaches the app late (after launch, or
+    // while another call was ending) belongs to history, not to the screen.
+    if (_activeCall == null && call.answeredElsewhere && wasLiveBefore) {
       // Let the router/incoming screen present the meaningful completion before
       // publishing the normal idle state.
       _callController.add(call);
@@ -1637,6 +1655,33 @@ class LinphoneSipService implements SipService {
     _windowsCallReconciliationTimer = null;
   }
 
+  /// A single "no call" answer can race a registration refresh and is ignored
+  /// while a call is live. If the engine keeps saying it has no call, its
+  /// "ended" event was lost, so the stale call is closed locally rather than
+  /// left on screen forever.
+  void _trackWindowsNoCallStreak(Map<String, dynamic> snapshot) {
+    final status = '${snapshot['status']}'.trim().toLowerCase();
+    if (status != 'none' && status != 'cleared') {
+      _windowsNoCallStreak = 0;
+      return;
+    }
+    final live = _orderedLiveCalls();
+    if (live.isEmpty) {
+      _windowsNoCallStreak = 0;
+      return;
+    }
+    _windowsNoCallStreak++;
+    if (_windowsNoCallStreak < _windowsNoCallStreakLimit) return;
+    _windowsNoCallStreak = 0;
+    for (final call in live) {
+      _sipLog(
+        'warn',
+        'Calling engine reports no call; closing stale call id=${call.id}',
+      );
+      _completeLocalCall(call.id);
+    }
+  }
+
   Future<void> _reconcileWindowsCall() async {
     if (_windowsSyncInFlight) {
       return;
@@ -1645,6 +1690,7 @@ class LinphoneSipService implements SipService {
     try {
       final snapshot = await _platformChannel.syncCurrentCall();
       if (snapshot != null) {
+        _trackWindowsNoCallStreak(snapshot);
         _handleNativeCallEvent(snapshot);
       }
     } on Object catch (error) {

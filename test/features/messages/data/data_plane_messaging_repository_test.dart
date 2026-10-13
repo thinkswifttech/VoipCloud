@@ -7,6 +7,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:phone_app/core/storage/secure_storage_service.dart';
 import 'package:phone_app/features/messages/data/data_plane_messaging_repository.dart';
+import 'package:phone_app/features/messages/data/link_shortener.dart';
 import 'package:phone_app/features/messages/data/messaging_api_client.dart';
 import 'package:phone_app/features/messages/data/messaging_connectivity.dart';
 import 'package:phone_app/features/messages/data/messaging_outbox_store.dart';
@@ -380,6 +381,76 @@ void main() {
       await directory.delete(recursive: true);
     },
   );
+
+  group('link service from the server', () {
+    final built = <String>[];
+
+    LinkShortener factory(String baseUrl) {
+      built.add(baseUrl);
+      return _PrefixShortener(baseUrl);
+    }
+
+    setUp(built.clear);
+
+    test('is used when the server publishes an address', () async {
+      final fixture = await _fixture(
+        canSend: true,
+        linkServiceUrl: 'https://go.voipcloud.ca',
+        linkShortenerFactory: factory,
+      );
+      await fixture.repository.loadInbox(config: config);
+
+      expect(
+        await fixture.repository.shortenLinks('see https://x.example/a'),
+        'short(https://go.voipcloud.ca):see https://x.example/a',
+      );
+      expect(built, ['https://go.voipcloud.ca']);
+    });
+
+    test('is left off when the server publishes nothing', () async {
+      final fixture = await _fixture(
+        canSend: true,
+        linkShortenerFactory: factory,
+      );
+      await fixture.repository.loadInbox(config: config);
+
+      expect(await fixture.repository.shortenLinks('hello'), 'hello');
+      expect(built, isEmpty);
+    });
+
+    test('ignores an address that is not https on voipcloud.ca', () async {
+      for (final bad in [
+        'http://go.voipcloud.ca',
+        'https://evil.example.test',
+        'https://voipcloud.ca.evil.test',
+        'https://user@go.voipcloud.ca',
+        'https://go.voipcloud.ca/path?x=1',
+        42,
+      ]) {
+        final fixture = await _fixture(
+          canSend: true,
+          linkServiceUrl: bad,
+          linkShortenerFactory: factory,
+        );
+        await fixture.repository.loadInbox(config: config);
+        expect(await fixture.repository.shortenLinks('hello'), 'hello');
+      }
+      expect(built, isEmpty);
+    });
+
+    test('a development override beats the server value', () async {
+      final fixture = await _fixture(
+        canSend: true,
+        linkServiceUrl: 'https://go.voipcloud.ca',
+        linkShortenerFactory: factory,
+        linkShortenerOverride: 'https://links.example.test',
+      );
+      await fixture.repository.loadInbox(config: config);
+
+      await fixture.repository.shortenLinks('x');
+      expect(built, ['https://links.example.test']);
+    });
+  });
 }
 
 Future<_Fixture> _fixture({
@@ -391,8 +462,12 @@ Future<_Fixture> _fixture({
   MessagingOutboxStore? outbox,
   MessagingConnectivity? connectivity,
   bool replayTombstones = false,
+  Object? linkServiceUrl,
+  LinkShortener Function(String baseUrl)? linkShortenerFactory,
+  String linkShortenerOverride = '',
 }) async {
   final adapter = _MessagingAdapter(
+    linkServiceUrl: linkServiceUrl,
     canSend: canSend,
     canSendMms: canSendMms,
     maxSmsSegments: maxSmsSegments,
@@ -434,6 +509,8 @@ Future<_Fixture> _fixture({
           : () async => pushRegistration,
       outbox: outbox,
       connectivity: connectivity,
+      linkShortenerFactory: linkShortenerFactory,
+      linkShortenerOverride: linkShortenerOverride,
     ),
   );
 }
@@ -470,6 +547,7 @@ class _FakeMessagingConnectivity implements MessagingConnectivity {
 
 class _MessagingAdapter implements HttpClientAdapter {
   _MessagingAdapter({
+    this.linkServiceUrl,
     required this.canSend,
     required this.canSendMms,
     required this.maxSmsSegments,
@@ -477,6 +555,7 @@ class _MessagingAdapter implements HttpClientAdapter {
     required this.replayTombstones,
   });
 
+  final Object? linkServiceUrl;
   final bool canSend;
   final bool canSendMms;
   final int? maxSmsSegments;
@@ -514,6 +593,7 @@ class _MessagingAdapter implements HttpClientAdapter {
         'data': {
           'can_send': canSend,
           'can_send_mms': canSendMms,
+          if (linkServiceUrl != null) 'link_shortener_url': linkServiceUrl,
           if (maxSmsSegments != null)
             'outbound_sms_max_segments': maxSmsSegments,
           'outbound_sms_independent_parts': independentSmsParts,
@@ -735,4 +815,13 @@ ResponseBody _json(Map<String, Object?> body, {int statusCode = 200}) {
       Headers.contentTypeHeader: [Headers.jsonContentType],
     },
   );
+}
+
+class _PrefixShortener implements LinkShortener {
+  _PrefixShortener(this.baseUrl);
+
+  final String baseUrl;
+
+  @override
+  Future<String> shorten(String text) async => 'short($baseUrl):$text';
 }

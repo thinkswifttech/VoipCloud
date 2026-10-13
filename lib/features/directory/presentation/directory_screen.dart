@@ -158,6 +158,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
             onOpen: _openEntry,
             onCall: _callEntry,
             onTransfer: _transferEntry,
+            onTransferNumber: _transferToNumber,
           );
         },
         loading: () => const Center(child: CircularProgressIndicator()),
@@ -315,6 +316,21 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     context.go(RoutePaths.dialer);
   }
 
+  /// Transfers to a number typed in the search box, whether or not it is in
+  /// the directory (including numbers the directory hides).
+  Future<void> _transferToNumber(String number) {
+    return _transferEntry(
+      DirectoryEntry(
+        id: 'typed-$number',
+        displayName: number,
+        numbers: [number],
+        telephoneKind: DirectoryTelephoneKind.unknown,
+        presence: DirectoryPresence.unknown,
+      ),
+      selectedNumber: number,
+    );
+  }
+
   Future<void> _transferEntry(
     DirectoryEntry entry, {
     String? selectedNumber,
@@ -355,9 +371,7 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  attended
-                      ? 'The current caller is on hold while you choose who to speak with. Call ${entry.displayName} · $destination to consult before transferring.'
-                      : 'Send the PBX transfer code ##$destination for ${entry.displayName}.',
+                  'Transfer call to ${_transferTargetLabel(entry, destination)}.',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -510,6 +524,97 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
 
 enum _NumberAction { call, transfer }
 
+/// Asks for the number or extension to transfer to.
+class _TransferNumberSheet extends StatefulWidget {
+  const _TransferNumberSheet({this.initial = ''});
+
+  final String initial;
+
+  @override
+  State<_TransferNumberSheet> createState() => _TransferNumberSheetState();
+}
+
+class _TransferNumberSheetState extends State<_TransferNumberSheet> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final number = _dialableNumber(_controller.text);
+    if (number != null) Navigator.of(context).pop(number);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          8,
+          20,
+          24 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Transfer to a number or extension',
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              keyboardType: TextInputType.phone,
+              textInputAction: TextInputAction.done,
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) => _submit(),
+              decoration: const InputDecoration(
+                labelText: 'Number or extension',
+                prefixIcon: Icon(AppIcons.keypad),
+              ),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: _dialableNumber(_controller.text) == null
+                  ? null
+                  : _submit,
+              icon: const Icon(AppIcons.callForward, size: AppIconSize.sm),
+              label: const Text('Continue'),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The search text as a dialable number, or null when it is not one.
+String? _dialableNumber(String query) {
+  final compact = query.replaceAll(RegExp(r'[\s().-]'), '');
+  return RegExp(r'^\+?[0-9*#]{2,32}$').hasMatch(compact) ? compact : null;
+}
+
+/// The person's name, or the number when only a number is known.
+String _transferTargetLabel(DirectoryEntry entry, String destination) {
+  final name = entry.displayName.trim();
+  final nameIsNumber = RegExp(r'^[0-9+*#,\s()-]+$').hasMatch(name);
+  return name.isEmpty || nameIsNumber ? destination : name;
+}
+
 class _DirectoryPanel extends StatefulWidget {
   const _DirectoryPanel({
     required this.onVisibleTargets,
@@ -531,6 +636,7 @@ class _DirectoryPanel extends StatefulWidget {
     required this.onOpen,
     required this.onCall,
     required this.onTransfer,
+    required this.onTransferNumber,
   });
 
   final List<DirectoryEntry> entries;
@@ -552,6 +658,7 @@ class _DirectoryPanel extends StatefulWidget {
   final ValueChanged<DirectoryEntry> onOpen;
   final ValueChanged<DirectoryEntry> onCall;
   final ValueChanged<DirectoryEntry> onTransfer;
+  final ValueChanged<String> onTransferNumber;
 
   @override
   State<_DirectoryPanel> createState() => _DirectoryPanelState();
@@ -563,6 +670,19 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
   static const _externalTileHeight = 84.0;
   static const _listBottomPadding = 28.0;
   static const _indexBarWidth = 24.0;
+
+  Future<void> _askForTransferNumber() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final number = await showAppModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) =>
+          _TransferNumberSheet(initial: _dialableNumber(widget.query) ?? ''),
+    );
+    if (number == null || !mounted) return;
+    widget.onTransferNumber(number);
+  }
 
   final _scrollController = ScrollController();
   ScrollPosition? _observedScrollPosition;
@@ -982,6 +1102,23 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
                   )
                 : const SizedBox.shrink(),
           ),
+          if (widget.transferMode)
+            Padding(
+              padding: const EdgeInsets.only(top: 10, right: 12),
+              child: Card(
+                margin: EdgeInsets.zero,
+                clipBehavior: Clip.antiAlias,
+                child: ListTile(
+                  leading: const Icon(AppIcons.keypad),
+                  title: const Text('Transfer to a number or extension'),
+                  subtitle: const Text(
+                    "Type any number, even if it isn't listed",
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _askForTransferNumber,
+                ),
+              ),
+            ),
           const SizedBox(height: 10),
           Expanded(
             child: widget.entries.isEmpty

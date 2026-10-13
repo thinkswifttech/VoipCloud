@@ -86,20 +86,21 @@ final messagingRepositoryProvider = Provider<MessagingRepository>((ref) {
     outbox: MessagingOutboxStore(secureStorage: storage),
     attachmentCache: MessagingAttachmentCache(secureStorage: storage),
     connectivity: PlatformMessagingConnectivity(),
-    linkShortener: _linkShortenerFor(sessions),
+    linkShortenerFactory: (baseUrl) => _linkShortenerFor(baseUrl, sessions),
+    linkShortenerOverride: linkShortenerBaseUrl,
   );
   ref.onDispose(() => repository.dispose());
   return repository;
 });
 
-/// Only active when a link-service origin was configured at build time.
-LinkShortener _linkShortenerFor(MessagingSessionManager sessions) {
-  final origin = Uri.tryParse(linkShortenerBaseUrl.trim());
-  if (origin == null || origin.scheme != 'https' || origin.host.isEmpty) {
-    return const NoopLinkShortener();
-  }
+/// Builds the link shortener for the address the messaging server published
+/// (or a development override). The repository validates the address first.
+LinkShortener _linkShortenerFor(
+  String baseUrl,
+  MessagingSessionManager sessions,
+) {
   return ApiLinkShortener(
-    baseUrl: origin.origin,
+    baseUrl: baseUrl,
     minLength: linkShortenerMinLength,
     dio: Dio(
       BaseOptions(

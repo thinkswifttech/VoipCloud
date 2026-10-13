@@ -6,6 +6,7 @@ import 'package:dio/dio.dart';
 import '../../../core/errors/app_exception.dart';
 import '../domain/carrier_message.dart';
 import '../domain/carrier_messaging_config.dart';
+import '../domain/link_shortening.dart';
 import '../domain/messaging_repository.dart';
 import '../domain/sms_segment_info.dart';
 import 'link_shortener.dart';
@@ -29,7 +30,8 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     MessagingOutboxStore? outbox,
     MessagingAttachmentCache? attachmentCache,
     MessagingConnectivity? connectivity,
-    LinkShortener? linkShortener,
+    LinkShortener Function(String baseUrl)? linkShortenerFactory,
+    String linkShortenerOverride = '',
   }) : _api = api,
        _sessions = sessions,
        _store = store,
@@ -37,7 +39,8 @@ class DataPlaneMessagingRepository implements MessagingRepository {
        _outbox = outbox,
        _attachmentCache = attachmentCache,
        _connectivity = connectivity,
-       _linkShortener = linkShortener ?? const NoopLinkShortener() {
+       _linkShortenerFactory = linkShortenerFactory,
+       _linkShortenerOverride = linkShortenerOverride.trim() {
     _realtime = PusherRealtimeClient(api);
     if (outbox != null && connectivity != null) {
       _connectivitySubscription = connectivity.changes.listen((online) {
@@ -53,7 +56,13 @@ class DataPlaneMessagingRepository implements MessagingRepository {
   final MessagingOutboxStore? _outbox;
   final MessagingAttachmentCache? _attachmentCache;
   final MessagingConnectivity? _connectivity;
-  final LinkShortener _linkShortener;
+  final LinkShortener Function(String baseUrl)? _linkShortenerFactory;
+  // Development builds can point at a test service; store builds leave it
+  // empty and follow the server.
+  final String _linkShortenerOverride;
+  String? _linkShortenerUrl;
+  LinkShortener? _linkShortener;
+  String? _linkShortenerFor;
   late PusherRealtimeClient _realtime;
   final Map<String, String> _conversationByRemote = {};
   final Map<String, String> _remoteByConversation = {};
@@ -135,6 +144,9 @@ class DataPlaneMessagingRepository implements MessagingRepository {
       '/api/v1/messaging/capabilities',
     );
     final capabilityData = capabilityResponse.data?['data'];
+    _linkShortenerUrl = capabilityData is Map
+        ? acceptedLinkServiceUrl(capabilityData['link_shortener_url'])
+        : null;
     _canSend = capabilityData is Map && capabilityData['can_send'] == true;
     _canSendMms =
         capabilityData is Map && capabilityData['can_send_mms'] == true;
@@ -331,7 +343,18 @@ class DataPlaneMessagingRepository implements MessagingRepository {
   }
 
   @override
-  Future<String> shortenLinks(String text) => _linkShortener.shorten(text);
+  Future<String> shortenLinks(String text) {
+    final factory = _linkShortenerFactory;
+    final url = _linkShortenerOverride.isNotEmpty
+        ? _linkShortenerOverride
+        : _linkShortenerUrl;
+    if (factory == null || url == null) return Future.value(text);
+    if (_linkShortenerFor != url) {
+      _linkShortener = factory(url);
+      _linkShortenerFor = url;
+    }
+    return _linkShortener!.shorten(text);
+  }
 
   @override
   Future<CarrierMessage> sendMessage({
@@ -530,6 +553,7 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     _activeConfig = null;
     _canSend = false;
     _canSendMms = false;
+    _linkShortenerUrl = null;
     _maxOutboundAttachmentBytes = 1000000;
     _outboundAttachmentMimeTypes = const {'image/jpeg'};
     _outboxRetryTimer?.cancel();

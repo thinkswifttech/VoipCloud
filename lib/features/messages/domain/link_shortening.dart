@@ -68,3 +68,20 @@ bool _hasOrigin(String link, String origin) {
   if (uri == null || base == null) return false;
   return uri.host.toLowerCase() == base.host.toLowerCase();
 }
+
+/// The link-service address the messaging server publishes, or null when it
+/// must not be used. Only the origin of an `https` address on voipcloud.ca is
+/// accepted, so a wrong or tampered setting can never route messages through
+/// another site.
+String? acceptedLinkServiceUrl(Object? value) {
+  if (value is! String) return null;
+  final uri = Uri.tryParse(value.trim());
+  if (uri == null || uri.scheme != 'https' || uri.userInfo.isNotEmpty) {
+    return null;
+  }
+  final host = uri.host.toLowerCase();
+  if (host != 'voipcloud.ca' && !host.endsWith('.voipcloud.ca')) return null;
+  if (uri.hasQuery || uri.hasFragment) return null;
+  if (uri.path.isNotEmpty && uri.path != '/') return null;
+  return uri.hasPort ? 'https://$host:${uri.port}' : 'https://$host';
+}

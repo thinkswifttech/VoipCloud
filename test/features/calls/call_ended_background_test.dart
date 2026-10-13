@@ -24,7 +24,11 @@ class _Sip extends Fake implements SipService {
   Future<bool> hasActiveCall() async => false;
 }
 
-VoipCall _call(CallStatus status, {bool answeredElsewhere = false}) => VoipCall(
+VoipCall _call(
+  CallStatus status, {
+  bool answeredElsewhere = false,
+  DateTime? endedAt,
+}) => VoipCall(
   id: 'queue-call',
   remoteUri: 'sip:caller@example.test',
   remoteDisplayName: 'Caller',
@@ -32,6 +36,7 @@ VoipCall _call(CallStatus status, {bool answeredElsewhere = false}) => VoipCall(
   status: status,
   startedAt: DateTime.utc(2026, 10, 12, 14),
   answeredElsewhere: answeredElsewhere,
+  endedAt: endedAt,
 );
 
 void main() {
@@ -114,4 +119,24 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
     },
   );
+
+  testWidgets('a late report about an old finished call is not presented', (
+    tester,
+  ) async {
+    final events = StreamController<VoipCall?>.broadcast();
+    addTearDown(events.close);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    final router = await pump(tester, events);
+
+    events.add(
+      _call(
+        CallStatus.ended,
+        answeredElsewhere: true,
+        endedAt: DateTime.now().subtract(const Duration(minutes: 5)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(router.state.uri.path, isNot('/calls/ended'));
+  });
 }

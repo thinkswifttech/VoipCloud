@@ -110,25 +110,36 @@ std::wstring Utf8ToWide(const std::string& value) {
   return converted;
 }
 
-void TraceNative(const std::string& message) {
-  wchar_t local_app_data[MAX_PATH] = {};
-  const auto length = GetEnvironmentVariableW(
-      L"LOCALAPPDATA", local_app_data, MAX_PATH);
-  if (length == 0 || length >= MAX_PATH) {
-    return;
-  }
-  std::wstring trace_path(local_app_data, length);
-  trace_path.append(L"\\ThinkSwift");
-  CreateDirectoryW(trace_path.c_str(), nullptr);
-  trace_path.append(L"\\VoipCloud");
-  CreateDirectoryW(trace_path.c_str(), nullptr);
-  trace_path.append(L"\\logs");
-  CreateDirectoryW(trace_path.c_str(), nullptr);
-  trace_path.append(L"\\voipcloud_linphone_trace.log");
+// The trace file is opened once and kept open. TraceNative runs on the UI
+// thread for every native call, so creating folders, reopening the file and
+// forcing a disk flush each time made every click wait on the disk. Appended
+// writes reach the operating system immediately and survive a crash of the
+// app, which is all the trace is for.
+HANDLE TraceFileHandle() {
+  static const HANDLE handle = []() -> HANDLE {
+    wchar_t local_app_data[MAX_PATH] = {};
+    const auto length =
+        GetEnvironmentVariableW(L"LOCALAPPDATA", local_app_data, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+      return INVALID_HANDLE_VALUE;
+    }
+    std::wstring trace_path(local_app_data, length);
+    trace_path.append(L"\\ThinkSwift");
+    CreateDirectoryW(trace_path.c_str(), nullptr);
+    trace_path.append(L"\\VoipCloud");
+    CreateDirectoryW(trace_path.c_str(), nullptr);
+    trace_path.append(L"\\logs");
+    CreateDirectoryW(trace_path.c_str(), nullptr);
+    trace_path.append(L"\\voipcloud_linphone_trace.log");
+    return CreateFileW(trace_path.c_str(), FILE_APPEND_DATA,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  }();
+  return handle;
+}
 
-  HANDLE file = CreateFileW(trace_path.c_str(), FILE_APPEND_DATA,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+void TraceNative(const std::string& message) {
+  const HANDLE file = TraceFileHandle();
   if (file == INVALID_HANDLE_VALUE) {
     return;
   }
@@ -142,8 +153,6 @@ void TraceNative(const std::string& message) {
   DWORD written = 0;
   WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &written,
             nullptr);
-  FlushFileBuffers(file);
-  CloseHandle(file);
   OutputDebugStringA(line.c_str());
 }
 
@@ -1721,7 +1730,17 @@ class LinphoneWindowsBridge::Impl {
       if (trace_this_iteration) {
         TraceNative("Linphone iterate first call begin");
       }
+      const auto iterate_started = std::chrono::steady_clock::now();
       api_.linphone_core_iterate(core_);
+      const auto iterate_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - iterate_started)
+              .count();
+      if (iterate_ms >= 200) {
+        // The engine runs on the UI thread: a slow pass is felt as lag.
+        TraceNative("Linphone iterate slow: " + std::to_string(iterate_ms) +
+                    " ms");
+      }
       ReconcileWaitingAlert();
       ReconcileRingback();
       // Feature-code calls are hidden, short-lived PBX control operations.

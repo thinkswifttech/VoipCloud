@@ -488,6 +488,7 @@ class MainActivity : FlutterActivity() {
         val manager = NotificationManagerCompat.from(this)
         if (count == 0) {
             manager.cancel(MISSED_CALLS_NOTIFICATION_ID)
+            UnreadNotificationState.setDismissedCount(this, 0)
             return
         }
 
@@ -500,6 +501,10 @@ class MainActivity : FlutterActivity() {
         ) {
             return
         }
+
+        // The user swiped this notification away: do not bring it back for
+        // the same unread count, only when there is more unread activity.
+        if (!UnreadNotificationState.shouldShow(this, count)) return
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager =
@@ -527,6 +532,15 @@ class MainActivity : FlutterActivity() {
             launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val dismissedIntent = PendingIntent.getBroadcast(
+            this,
+            MISSED_CALLS_NOTIFICATION_ID,
+            Intent(this, UnreadNotificationDismissedReceiver::class.java).apply {
+                action = UnreadNotificationDismissedReceiver.ACTION_DISMISSED
+                putExtra(UnreadNotificationDismissedReceiver.EXTRA_COUNT, count)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val label = when {
             missedCalls == 0 && unreadMessages == 0 && count == 1 -> "1 unread item"
             missedCalls == 0 && unreadMessages == 0 -> "$count unread items"
@@ -548,6 +562,7 @@ class MainActivity : FlutterActivity() {
             .setContentTitle(label)
             .setContentText(detail)
             .setContentIntent(pendingIntent)
+            .setDeleteIntent(dismissedIntent)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)

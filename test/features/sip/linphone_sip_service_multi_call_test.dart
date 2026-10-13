@@ -420,6 +420,63 @@ void main() {
       },
     );
 
+    test(
+      'a failed hang-up is success when the engine already released the call',
+      () async {
+        platform.emitCall(
+          _event('quiet-release', 'dialing', direction: 'outgoing'),
+        );
+        await _flushEvents();
+        platform.onEndCall = (id) async {
+          platform._calls.remove(id);
+          throw PlatformException(
+            code: 'LINPHONE_ERROR',
+            message: 'Unable to update the selected call.',
+          );
+        };
+
+        await service.endCall('quiet-release');
+        await _flushEvents();
+
+        expect(service.liveCalls, isEmpty);
+        expect(service.activeCall, isNull);
+      },
+    );
+
+    test('a failed hang-up is still reported while the call is live', () async {
+      platform.emitCall(_event('still-live', 'active', direction: 'outgoing'));
+      await _flushEvents();
+      platform.onEndCall = (_) async => throw PlatformException(
+        code: 'LINPHONE_ERROR',
+        message: 'Unable to update the selected call.',
+      );
+
+      await expectLater(
+        service.endCall('still-live'),
+        throwsA(isA<PlatformException>()),
+      );
+      expect(service.liveCalls, hasLength(1));
+    });
+
+    test(
+      'Windows closes a stale call when the engine keeps reporting none',
+      () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        platform.syncSnapshot = {'status': 'none'};
+        platform.emitCall(
+          _event('lost-end-event', 'dialing', direction: 'outgoing'),
+        );
+        await _flushEvents();
+        expect(service.liveCalls, hasLength(1));
+
+        await Future<void>.delayed(const Duration(milliseconds: 4600));
+
+        expect(service.liveCalls, isEmpty);
+        expect(service.activeCall, isNull);
+      },
+    );
+
     test('blind transfer sends the PBX ## feature code as DTMF', () async {
       platform.emitCall(_event('original', 'active', direction: 'outgoing'));
       await _flushEvents();
@@ -989,6 +1046,7 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   final Map<String, Map<String, dynamic>> _calls = {};
   Future<void> Function()? onRegister;
   Future<void> Function(String callId)? onEndCall;
+  Map<String, dynamic>? syncSnapshot;
   int registrationRequests = 0;
 
   @override
@@ -1017,6 +1075,10 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   Future<void> acknowledgeCallHistoryEvent(String eventId) async {
     acknowledgedHistoryEvents.add(eventId);
   }
+
+  @override
+  Future<Map<String, dynamic>?> syncCurrentCall() async =>
+      syncSnapshot ?? super.syncCurrentCall();
 
   @override
   Future<bool> hasActiveCall() async => _calls.values.any(

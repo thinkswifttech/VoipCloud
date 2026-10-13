@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import '../../../shared/utils/display_name.dart';
 
 import '../../contacts/domain/contact.dart';
 import '../../contacts/domain/quick_dial_entry.dart';
@@ -26,11 +27,9 @@ class CallerIdentity {
     if (!isResolvedName) {
       return '';
     }
-    final parts = label
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((part) => part.isNotEmpty)
-        .toList();
+    final parts = nameWithoutPrefixTag(
+      label,
+    ).split(RegExp(r'\s+')).where((part) => part.isNotEmpty).toList();
     if (parts.isEmpty) {
       return '';
     }
