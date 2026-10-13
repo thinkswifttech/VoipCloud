@@ -3,7 +3,10 @@ param(
   [string]$Configuration = "Release",
   [string]$CertificateThumbprint = $env:VOIPCLOUD_WINDOWS_SIGNING_THUMBPRINT,
   [string]$TimestampUrl = "http://timestamp.digicert.com",
-  [string]$ShortBuildDrive = "V:"
+  [string]$ShortBuildDrive = "V:",
+  # Extra build-time flags on top of config\production.json, e.g.
+  # -AdditionalDefines "BLF_FEED_ENABLED=true"
+  [string[]]$AdditionalDefines = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -199,8 +202,9 @@ try {
   # network-backed `pub get` making an otherwise reproducible MSI build hang.
   $mappedProductionConfig = Join-Path $buildProjectRoot `
     "config\production.json"
+  $extraDefineArguments = @($AdditionalDefines | ForEach-Object { "--dart-define=$_" })
   & $flutter build windows --release --no-pub --config-only `
-    "--dart-define-from-file=$mappedProductionConfig"
+    "--dart-define-from-file=$mappedProductionConfig" @extraDefineArguments
   if ($LASTEXITCODE -ne 0) {
     throw "Flutter Windows release configuration failed."
   }
@@ -231,6 +235,14 @@ try {
     )
     if (-not $generatedConfigText.Contains($encodedDefine)) {
       throw "Flutter omitted production define '$($entry.Key)'."
+    }
+  }
+  foreach ($define in $AdditionalDefines) {
+    $encodedDefine = [Convert]::ToBase64String(
+      [Text.Encoding]::UTF8.GetBytes($define)
+    )
+    if (-not $generatedConfigText.Contains($encodedDefine)) {
+      throw "Flutter omitted additional define '$define'."
     }
   }
   Write-Host "Verified config\production.json in generated Windows defines."
