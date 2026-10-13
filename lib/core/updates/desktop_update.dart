@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:dio/dio.dart';
@@ -172,11 +173,26 @@ final desktopUpdateProvider =
     );
 
 class DesktopUpdateController extends AsyncNotifier<DesktopUpdateResult> {
+  /// The desktop app keeps running in the tray for days, so the startup check
+  /// alone would never see a release published later.
+  static const recheckInterval = Duration(hours: 6);
+  static const staleAfter = Duration(minutes: 30);
+
+  DateTime? _lastCheckedAt;
+  bool _refreshing = false;
+
   @override
-  Future<DesktopUpdateResult> build() {
+  Future<DesktopUpdateResult> build() async {
     // Watching this provider at application startup performs one quiet check.
     // Failures remain available to Settings without interrupting app startup.
-    return ref.watch(desktopUpdateServiceProvider).check();
+    final timer = Timer.periodic(
+      recheckInterval,
+      (_) => unawaited(refreshIfStale()),
+    );
+    ref.onDispose(timer.cancel);
+    final result = await ref.watch(desktopUpdateServiceProvider).check();
+    _lastCheckedAt = DateTime.now();
+    return result;
   }
 
   Future<void> check() async {
@@ -184,6 +200,29 @@ class DesktopUpdateController extends AsyncNotifier<DesktopUpdateResult> {
     state = await AsyncValue.guard(
       () => ref.read(desktopUpdateServiceProvider).check(),
     );
+    _lastCheckedAt = DateTime.now();
+  }
+
+  /// Quietly checks again when the last check is old, for example when the app
+  /// window is reopened from the tray. The badge only changes when the answer
+  /// does; a failed check keeps the previous result.
+  Future<void> refreshIfStale({Duration maxAge = staleAfter}) async {
+    final last = _lastCheckedAt;
+    if (_refreshing ||
+        state.isLoading ||
+        (last != null && DateTime.now().difference(last) < maxAge)) {
+      return;
+    }
+    _refreshing = true;
+    try {
+      final result = await ref.read(desktopUpdateServiceProvider).check();
+      _lastCheckedAt = DateTime.now();
+      state = AsyncData(result);
+    } catch (_) {
+      // Keep what Settings already shows; the next attempt will retry.
+    } finally {
+      _refreshing = false;
+    }
   }
 }
 

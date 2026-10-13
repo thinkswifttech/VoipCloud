@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/logging/app_logger.dart';
+import '../../core/updates/desktop_update.dart';
 import '../../features/calls/domain/call_status.dart';
 import '../../features/calls/domain/voip_call.dart';
 import '../../features/call_history/presentation/call_history_providers.dart';
@@ -111,6 +112,9 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
         }
         final wasBackgrounded = _backgroundTransitionSent;
         _backgroundTransitionSent = false;
+        // The desktop app lives in the tray; look for a new release whenever
+        // the window comes back (throttled, and quiet on failure).
+        unawaited(ref.read(desktopUpdateProvider.notifier).refreshIfStale());
         // A device silenced at the edge receives no call event to refresh history.
         // Reconcile completed server calls (and badge) independently of SIP refresh.
         _refreshHistoryIfNeeded(force: wasBackgrounded);

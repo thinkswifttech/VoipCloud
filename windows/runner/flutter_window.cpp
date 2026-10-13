@@ -171,6 +171,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
       break;
     case kTrayIconMessage:
       switch (LOWORD(lparam)) {
+        // With NOTIFYICON_VERSION_4 a single click arrives as NIN_SELECT (and
+        // NIN_KEYSELECT from the keyboard), not as a mouse message, which is
+        // why only double-click and the menu used to open the app.
+        case NIN_SELECT:
+        case NIN_KEYSELECT:
+        case WM_LBUTTONUP:
         case WM_LBUTTONDBLCLK:
         case NIN_BALLOONUSERCLICK:
           ShowAndActivate();
