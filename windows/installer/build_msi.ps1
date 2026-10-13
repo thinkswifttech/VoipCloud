@@ -229,7 +229,14 @@ try {
   }
   $generatedConfigText = Get-Content -LiteralPath $generatedConfig -Raw
   foreach ($entry in $productionValues.GetEnumerator()) {
-    $define = "$($entry.Key)=$($entry.Value)"
+    # JSON booleans must be compared the way Flutter writes them ("true", not
+    # PowerShell's "True").
+    $entryValue = if ($entry.Value -is [bool]) {
+      $entry.Value.ToString().ToLowerInvariant()
+    } else {
+      $entry.Value
+    }
+    $define = "$($entry.Key)=$entryValue"
     $encodedDefine = [Convert]::ToBase64String(
       [Text.Encoding]::UTF8.GetBytes($define)
     )
