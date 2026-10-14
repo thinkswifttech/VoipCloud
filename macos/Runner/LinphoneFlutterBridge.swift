@@ -1080,6 +1080,7 @@ private final class NativeLinphoneController: LinphoneController {
       repeating: 0,
       count: Int(size) / MemoryLayout<AudioDeviceID>.size
     )
+    guard !devices.isEmpty else { return nil }
     let deviceStatus = devices.withUnsafeMutableBytes { bytes in
       AudioObjectGetPropertyData(
         AudioObjectID(kAudioObjectSystemObject),
@@ -1087,7 +1088,7 @@ private final class NativeLinphoneController: LinphoneController {
         0,
         nil,
         &size,
-        bytes.baseAddress
+        bytes.baseAddress!
       )
     }
     guard deviceStatus == noErr else { return nil }
@@ -1882,7 +1883,8 @@ private final class NativeLinphoneController: LinphoneController {
       u16(offset) | (u16(offset + 2) << 16)
     }
     var pcm16 = false
-    var audioRange: Range<Int>?
+    // linphonesw declares its own `Range`, so name Swift's explicitly.
+    var audioRange: Swift.Range<Int>?
     var offset = 12
     while offset + 8 <= bytes.count {
       let size = u32(offset + 4)

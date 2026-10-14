@@ -14,6 +14,12 @@ find_library() {
   local candidate
   local source_packages_root=""
 
+  # An explicit, universal build of the library wins (for example a lipo of the
+  # arm64 and x86_64 Homebrew copies) so universal archives can be produced.
+  if [[ -n "${HIDAPI_DYLIB:-}" && -f "${HIDAPI_DYLIB}" ]]; then
+    printf '%s\n' "${HIDAPI_DYLIB}"
+  fi
+
   if [[ -n "${BUILD_DIR:-}" ]]; then
     source_packages_root="${BUILD_DIR%%/Build/*}/SourcePackages"
   fi
@@ -35,7 +41,9 @@ find_library() {
   done
 }
 
-source_library="$(find_library | head -n 1)"
+# `sed -n 1p` reads all of the output; `head -n 1` would close the pipe early
+# and, with pipefail, silently fail the script when there are several matches.
+source_library="$(find_library | sed -n 1p)"
 if [[ -z "$source_library" ]]; then
   cat >&2 <<EOF
 error: Linphone requires ${library_name}, but it was not found in the resolved
