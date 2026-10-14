@@ -189,7 +189,9 @@ class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not export SIP logs.')),
+        const SnackBar(
+          content: Text("Couldn't export the logs. Please try again."),
+        ),
       );
     } finally {
       if (mounted) {
@@ -210,20 +212,18 @@ class _SipLogsScreenState extends ConsumerState<SipLogsScreen> {
         content: ref.read(sipLogStoreProvider).exportText(),
         sharePositionOrigin: sharePositionOrigin,
       );
-    } on PlatformException catch (error) {
+    } on PlatformException {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            error.message ?? 'Could not open sharing options for the SIP logs.',
-          ),
+          content: const Text("Couldn't open sharing. Please try again."),
         ),
       );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Could not open sharing options for the SIP logs.'),
+          content: Text("Couldn't open sharing. Please try again."),
         ),
       );
     } finally {

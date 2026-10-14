@@ -366,17 +366,6 @@ class DataPlaneMessagingRepository implements MessagingRepository {
     void Function(int sent, int total)? onSendProgress,
   }) async {
     final effectiveText = attachment == null ? smartEncodeSmsText(text) : text;
-    if (attachment == null) {
-      final segments = _outboundSmsUsesIndependentParts
-          ? analyzeIndependentSmsParts(effectiveText)
-          : analyzeSmsSegments(effectiveText);
-      if (!segments.fitsWithin(_maxOutboundSmsSegments)) {
-        throw MessagingSmsSegmentLimitExceeded(
-          actualSegments: segments.segmentCount,
-          maximumSegments: _maxOutboundSmsSegments,
-        );
-      }
-    }
     if (!_canSend) throw const MessagingOutboundUnavailable();
     if (attachment != null && !_canSendMms) {
       throw const MessagingOutboundUnavailable();

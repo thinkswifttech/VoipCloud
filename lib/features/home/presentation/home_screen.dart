@@ -13,6 +13,7 @@ import '../../session/domain/service_account.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../messages/domain/messaging_platform.dart';
 import '../../sip/domain/sip_registration_state.dart';
+import '../../sip/presentation/calling_status_text.dart';
 
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -25,7 +26,11 @@ class HomeScreen extends ConsumerWidget {
     return sessionAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (error, _) => PageContent(
-        child: AppCard(child: Text('Unable to load session: $error')),
+        child: AppCard(
+          child: const Text(
+            "We couldn't load your account. Please close and reopen the app.",
+          ),
+        ),
       ),
       data: (session) {
         if (session == null) {
@@ -58,7 +63,7 @@ class HomeScreen extends ConsumerWidget {
                       icon: AppIcons.sipDiagnostics,
                       title: sip?.extension ?? 'No active extension',
                       subtitle: sip == null
-                          ? 'SIP is disabled for this service state'
+                          ? 'Calling is turned off for this account'
                           : '${sip.sipIdentity} via ${sip.transportLabel}',
                     ),
                     const Divider(),
@@ -71,10 +76,12 @@ class HomeScreen extends ConsumerWidget {
                     registration.when(
                       data: (state) => AppInfoTile(
                         icon: AppIcons.initialize,
-                        title: state.status.name,
-                        subtitle: state.message ?? 'SIP service idle',
+                        title: CallingStatusText.title(state.status),
+                        subtitle: CallingStatusText.description(state.status),
                         trailing: StatusPill(
-                          label: state.status.name.toUpperCase(),
+                          label: CallingStatusText.label(
+                            state.status,
+                          ).toUpperCase(),
                           color: _registrationColor(context, state.status),
                         ),
                       ),
@@ -82,7 +89,7 @@ class HomeScreen extends ConsumerWidget {
                       error: (_, _) => AppInfoTile(
                         icon: AppIcons.warning,
                         title: 'Unavailable',
-                        subtitle: 'SIP registration state is unavailable',
+                        subtitle: "Calling status isn't available right now",
                       ),
                     ),
                   ],

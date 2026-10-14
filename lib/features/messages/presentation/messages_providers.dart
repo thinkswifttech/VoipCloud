@@ -241,7 +241,7 @@ class MessagesController extends Notifier<MessagesState> {
       state = state.copyWith(
         availability: MessagingAvailability.integrationPending,
         isLoading: false,
-        errorMessage: 'Messaging assignment could not be synchronized.',
+        errorMessage: "Couldn't update your messaging. We'll keep trying.",
       );
     }
   }
@@ -464,18 +464,6 @@ class MessagesController extends Notifier<MessagesState> {
         (trimmed.isEmpty && attachment == null)) {
       throw const FormatException('A valid public phone number is required.');
     }
-    if (attachment == null) {
-      final segments = state.outboundSmsUsesIndependentParts
-          ? analyzeIndependentSmsParts(trimmed)
-          : analyzeSmsSegments(trimmed);
-      if (!segments.fitsWithin(state.maxOutboundSmsSegments)) {
-        throw MessagingSmsSegmentLimitExceeded(
-          actualSegments: segments.segmentCount,
-          maximumSegments: state.maxOutboundSmsSegments,
-        );
-      }
-    }
-
     final effectiveClientId =
         clientId ?? 'app-${DateTime.now().microsecondsSinceEpoch}';
     final pending = CarrierMessage(
@@ -602,7 +590,7 @@ class MessagesController extends Notifier<MessagesState> {
           ...state.unreadByRemoteNumber,
           remoteNumber: previousUnread,
         },
-        errorMessage: 'Read status could not be synchronized.',
+        errorMessage: "Couldn't update your read messages. We'll keep trying.",
       );
     }
   }
@@ -836,14 +824,14 @@ class MessagesController extends Notifier<MessagesState> {
       }
       state = state.copyWith(
         isLoading: false,
-        errorMessage: 'Messages could not be synchronized.',
+        errorMessage: "Couldn't update your messages. We'll keep trying.",
       );
     }
   }
 
   void _recordStreamError(Object _) {
     state = state.copyWith(
-      errorMessage: 'Realtime message updates are temporarily unavailable.',
+      errorMessage: "Live updates are paused. Pull down to refresh.",
     );
   }
 
@@ -928,7 +916,8 @@ class MessagesController extends Notifier<MessagesState> {
       final loading = {...state.loadingOlderThreads}..remove(remoteNumber);
       state = state.copyWith(
         loadingOlderThreads: loading,
-        errorMessage: 'Conversation history could not be synchronized.',
+        errorMessage:
+            "Couldn't load your earlier messages. Pull down to try again.",
       );
     } finally {
       if (generation == _sessionGeneration) {

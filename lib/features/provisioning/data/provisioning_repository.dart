@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 
 import '../../../core/config/app_config.dart';
@@ -30,7 +32,7 @@ class ProvisioningRepository {
     if (!input.hasUsableValue) {
       throw const AppException(
         message: 'Missing provisioning token',
-        userMessage: 'Enter a provisioning token or Softphone activation link.',
+        userMessage: 'Paste the setup link you were sent, or scan the QR code.',
       );
     }
 
@@ -43,7 +45,8 @@ class ProvisioningRepository {
       if (sipConfig == null) {
         throw const AppException(
           message: 'Missing provisioning result',
-          userMessage: 'This activation link did not return SIP configuration.',
+          userMessage:
+              "This setup link didn't return any phone settings. $_askForNewLink",
         );
       }
       return AppSession.localSip(
@@ -120,22 +123,38 @@ class ProvisioningRepository {
         ),
       );
     } on DioException catch (error) {
-      throw _sipProvisioningException(
-        ApiExceptionMapper.mapDioException(error),
+      throw await _describeSetupLinkFailure(
+        error,
+        provisioningUri,
+        _internetReachable,
       );
     }
     final data = response.data;
-    if (data == null) {
+    if (data == null || data.trim().isEmpty) {
       throw const ApiException(
         statusCode: null,
         message: 'Missing SIP provisioning response',
+        userMessage:
+            "This setup link didn't return any phone settings. $_askForNewLink",
       );
     }
-    return parseProvisionedConfiguration(
-      data,
-      provisioningUri,
-      accountDomainOverride: _devAccountDomainOverride,
-    );
+    try {
+      return parseProvisionedConfiguration(
+        data,
+        provisioningUri,
+        accountDomainOverride: _devAccountDomainOverride,
+      );
+    } on AppException {
+      rethrow;
+    } on Object catch (error) {
+      throw ApiException(
+        statusCode: null,
+        message: 'Unreadable SIP provisioning response: $error',
+        userMessage:
+            "This setup link didn't return settings the app can read. "
+            '$_askForNewLink',
+      );
+    }
   }
 
   String? get _devAccountDomainOverride {
@@ -147,28 +166,111 @@ class ProvisioningRepository {
   }
 }
 
-AppException _sipProvisioningException(AppException error) {
-  if (error is ApiException && error.statusCode == 410) {
-    return ApiException(
-      statusCode: error.statusCode,
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      userMessage:
-          'This activation link has expired or reached its registration limit. Request a new QR code or ask an administrator to allow unlimited registrations.',
+const _askForNewLink = 'Ask your administrator for a new QR code or link.';
+
+Future<bool> _internetReachable() async {
+  try {
+    final result = await InternetAddress.lookup(
+      'voipcloud.ca',
+    ).timeout(const Duration(seconds: 4));
+    return result.isNotEmpty;
+  } on Object {
+    return false;
+  }
+}
+
+bool _isHostLookupFailure(DioException error) {
+  final cause = error.error;
+  if (cause is! SocketException) {
+    return false;
+  }
+  final text = '${cause.message} ${cause.osError?.message ?? ''}'.toLowerCase();
+  return text.contains('host lookup') ||
+      text.contains('no address associated') ||
+      text.contains('nodename nor servname') ||
+      text.contains('no such host') ||
+      text.contains('name or service not known') ||
+      cause.osError?.errorCode == 11001;
+}
+
+/// Turns a failed setup-link request into a message a customer can act on.
+Future<AppException> _describeSetupLinkFailure(
+  DioException error,
+  Uri link,
+  Future<bool> Function() internetReachable,
+) async {
+  final mapped = ApiExceptionMapper.mapDioException(error);
+  AppException failure(String userMessage) => ApiException(
+    statusCode: error.response?.statusCode,
+    message: mapped.message,
+    code: mapped.code,
+    details: mapped.details,
+    userMessage: userMessage,
+  );
+
+  switch (error.type) {
+    case DioExceptionType.badCertificate:
+      return failure(
+        "We couldn't make a secure connection. Check that your device's date "
+        'and time are correct, then try again.',
+      );
+    case DioExceptionType.connectionTimeout:
+    case DioExceptionType.transformTimeout:
+    case DioExceptionType.sendTimeout:
+    case DioExceptionType.receiveTimeout:
+      return failure(
+        'The setup server is taking too long to answer. Check your internet '
+        'connection and try again.',
+      );
+    case DioExceptionType.connectionError:
+    case DioExceptionType.unknown:
+      if (_isHostLookupFailure(error)) {
+        if (await internetReachable()) {
+          return failure(
+            "We couldn't find a server at ${link.host}. Check the link for "
+            'typing mistakes, or scan the QR code instead.',
+          );
+        }
+        return failure(
+          "You're offline. Connect to Wi-Fi or mobile data and try again.",
+        );
+      }
+      return failure(
+        "We couldn't reach the setup server. Check your internet connection "
+        'and try again.',
+      );
+    case DioExceptionType.cancel:
+      return mapped;
+    case DioExceptionType.badResponse:
+      break;
+  }
+
+  final status = error.response?.statusCode;
+  if (status == 410) {
+    return failure(
+      'This setup link has expired or reached its registration limit. '
+      '$_askForNewLink',
     );
   }
-  if (error is ApiException && error.statusCode == 400) {
-    return ApiException(
-      statusCode: error.statusCode,
-      message: error.message,
-      code: error.code,
-      details: error.details,
-      userMessage:
-          'The SIP provisioning server rejected this activation link. Request a new QR code or link.',
+  if (status == 404) {
+    return failure(
+      "This setup link isn't recognized. Check that you copied all of it, "
+      'or scan the QR code instead. $_askForNewLink',
     );
   }
-  return error;
+  if (status == 400 || status == 401 || status == 403) {
+    return failure("This setup link can't be used. $_askForNewLink");
+  }
+  if (status == 429) {
+    return failure('Too many attempts. Wait a minute and try again.');
+  }
+  if (status != null && status >= 500) {
+    return failure(
+      'The setup service is temporarily unavailable. Please try again in a '
+      'few minutes.',
+    );
+  }
+  return failure("We couldn't use this setup link. $_askForNewLink");
 }
 
 ApiException _provisioningExchangeException(ApiException error) {
@@ -178,8 +280,7 @@ ApiException _provisioningExchangeException(ApiException error) {
       message: error.message,
       code: error.code,
       details: error.details,
-      userMessage:
-          'The app backend rejected this activation token. Request a new QR code or link.',
+      userMessage: "This setup link can't be used. $_askForNewLink",
     );
   }
   return error;

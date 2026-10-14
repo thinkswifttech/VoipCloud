@@ -32,10 +32,13 @@ class ProvisioningController extends Notifier<ProvisioningState> {
 
   Future<bool> activate(String input) async {
     final provisioningInput = parseProvisioningInput(input);
-    if (provisioningInput == null) {
-      state = const ProvisioningState(
+    final problem = provisioningInputProblem(input);
+    if (provisioningInput == null || problem != null) {
+      state = ProvisioningState(
         failure: Failure(
-          userMessage: 'Enter a provisioning link or scan the QR code again.',
+          userMessage:
+              problem ??
+              'Paste the setup link you were sent, or scan the QR code.',
         ),
       );
       return false;

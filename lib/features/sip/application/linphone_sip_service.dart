@@ -208,7 +208,8 @@ class LinphoneSipService implements SipService {
     if (config == null || !config.hasCredentials) {
       throw const VoipException(
         message: 'SIP credentials are not provisioned',
-        userMessage: 'SIP provisioning is incomplete. Reprovision this device.',
+        userMessage:
+            "Calling needs to be set up again on this device. Please contact support.",
       );
     }
 
@@ -412,8 +413,8 @@ class LinphoneSipService implements SipService {
       throw VoipException(
         message: 'SIP account is not registered',
         userMessage: _registrationState.message == null
-            ? 'SIP is not registered. Open diagnostics and check provisioning.'
-            : 'SIP is not registered: ${_registrationState.message}',
+            ? "You're not connected to calling right now. Check your connection and try again in a moment."
+            : "You're not connected to calling right now. Check your connection and try again in a moment.",
       );
     }
     final started = Stopwatch()..start();

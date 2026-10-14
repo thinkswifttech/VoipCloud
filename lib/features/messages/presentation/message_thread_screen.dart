@@ -18,6 +18,7 @@ import '../../../features/contacts/domain/contact.dart';
 import '../../../features/contacts/data/device_contacts_repository.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../features/messages/domain/carrier_message.dart';
+import '../../../features/messages/domain/message_delivery_status.dart';
 import '../../../features/messages/domain/messaging_repository.dart';
 import '../../../features/messages/domain/sms_compatibility.dart';
 import '../../../features/messages/domain/sms_segment_info.dart';
@@ -122,9 +123,6 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                   smartEncodeSmsText(expandSmsEmojiShortcodes(draftText)),
                 )
         : null;
-    final exceedsSmsLimit =
-        smsSegments != null &&
-        !smsSegments.fitsWithin(messaging.maxOutboundSmsSegments);
     final contactsState = ref.watch(contactsProvider);
     final contacts = contactsState.value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
@@ -344,6 +342,8 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                                               : null,
                                           onLongPress: () =>
                                               _showMessageActions(message),
+                                          onStatusTap: () =>
+                                              _showMessageInfo(message),
                                           onRetry: message.canRetry
                                               ? () => _retryMessage(message)
                                               : null,
@@ -487,8 +487,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                                   messaging.canSend &&
                                       !isBlocked &&
                                       canReplyToRemote &&
-                                      !_isSending &&
-                                      !exceedsSmsLimit
+                                      !_isSending
                                   ? _send
                                   : null,
                               icon: _isSending
@@ -513,12 +512,8 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                         AnimatedSwitcher(
                           duration: const Duration(milliseconds: 180),
                           child: _SmsSegmentCounter(
-                            key: ValueKey(
-                              '${smsSegments?.segmentCount}-'
-                              '$exceedsSmsLimit',
-                            ),
+                            key: ValueKey('${smsSegments?.segmentCount}'),
                             info: smsSegments,
-                            maximumSegments: messaging.maxOutboundSmsSegments,
                           ),
                         ),
                       ],
@@ -595,10 +590,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            error is MessagingSmsSegmentLimitExceeded
-                ? 'This message is too long for the carrier. Keep it within '
-                      '${error.maximumSegments} SMS segment.'
-                : error is AppException
+            error is AppException
                 ? error.userMessage
                 : 'This message could not be safely retried.',
           ),
@@ -853,6 +845,13 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                 subtitle: const Text('Copy just a part, like a code or key'),
                 onTap: () => Navigator.pop(context, _MessageAction.selectText),
               ),
+            if (message.direction == MessageDirection.outgoing)
+              ListTile(
+                leading: const Icon(Icons.info_outline_rounded),
+                title: const Text('Message info'),
+                subtitle: const Text('See where this message is'),
+                onTap: () => Navigator.pop(context, _MessageAction.info),
+              ),
             ListTile(
               leading: Icon(
                 AppIcons.trash,
@@ -882,12 +881,74 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       await _showSelectableText(message);
       return;
     }
+    if (action == _MessageAction.info) {
+      await _showMessageInfo(message);
+      return;
+    }
     if (action != _MessageAction.copy) return;
     await Clipboard.setData(ClipboardData(text: message.text));
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(const SnackBar(content: Text('Message copied')));
+  }
+
+  Future<void> _showMessageInfo(CarrierMessage message) {
+    final delivery = describeMessageDelivery(message);
+    if (delivery == null) return Future.value();
+    final theme = Theme.of(context);
+    final color = delivery.ticks == null
+        ? theme.colorScheme.error
+        : theme.colorScheme.primary;
+    return showAppModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(_tickIcon(delivery), color: color),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      delivery.title,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(delivery.explanation, style: theme.textTheme.bodyMedium),
+              const SizedBox(height: 14),
+              Text(
+                '${_dayLabel(message.createdAt)} at '
+                '${_timeLabel(message.createdAt)}',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              if (message.canRetry) ...[
+                const SizedBox(height: 14),
+                FilledButton.tonal(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _retryMessage(message);
+                  },
+                  child: const Text('Retry'),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _showSelectableText(CarrierMessage message) {
@@ -1103,24 +1164,6 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final text = _outboundText(typedText, reply);
     final attachment = _attachment;
     if (_isSending || (typedText.isEmpty && attachment == null)) return;
-    if (attachment == null) {
-      final state = ref.read(messagesControllerProvider);
-      final encoded = smartEncodeSmsText(expandSmsEmojiShortcodes(text));
-      final segments = state.outboundSmsUsesIndependentParts
-          ? analyzeIndependentSmsParts(encoded)
-          : analyzeSmsSegments(encoded);
-      final maximum = state.maxOutboundSmsSegments;
-      if (!segments.fitsWithin(maximum)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'This message is too long. Keep it within $maximum SMS parts.',
-            ),
-          ),
-        );
-        return;
-      }
-    }
     final clientId =
         _draftClientId ?? 'app-${DateTime.now().microsecondsSinceEpoch}';
     _draftClientId = clientId;
@@ -1158,10 +1201,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            error is MessagingSmsSegmentLimitExceeded
-                ? 'This message is too long. Keep it within '
-                      '${error.maximumSegments} SMS parts.'
-                : error is AppException
+            error is AppException
                 ? error.userMessage
                 : attachment == null
                 ? 'Message could not be sent. Tap send to retry.'
@@ -1226,14 +1266,9 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
 }
 
 class _SmsSegmentCounter extends StatelessWidget {
-  const _SmsSegmentCounter({
-    required this.info,
-    required this.maximumSegments,
-    super.key,
-  });
+  const _SmsSegmentCounter({required this.info, super.key});
 
   final SmsSegmentInfo? info;
-  final int maximumSegments;
 
   @override
   Widget build(BuildContext context) {
@@ -1242,13 +1277,10 @@ class _SmsSegmentCounter extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final exceedsLimit = !value.fitsWithin(maximumSegments);
     final theme = Theme.of(context);
-    final message = exceedsLimit
-        ? 'Message is too long (${value.segmentCount} of '
-              '$maximumSegments SMS parts).'
-        : '${value.segmentCount} SMS '
-              '${value.segmentCount == 1 ? 'part' : 'parts'}';
+    final message =
+        '${value.segmentCount} SMS '
+        '${value.segmentCount == 1 ? 'part' : 'parts'}';
     return Padding(
       padding: const EdgeInsets.only(top: 5, right: 52),
       child: Align(
@@ -1259,10 +1291,7 @@ class _SmsSegmentCounter extends StatelessWidget {
             message,
             textAlign: TextAlign.end,
             style: theme.textTheme.labelSmall?.copyWith(
-              color: exceedsLimit
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.onSurfaceVariant,
-              fontWeight: exceedsLimit ? FontWeight.w600 : null,
+              color: theme.colorScheme.onSurfaceVariant,
             ),
           ),
         ),
@@ -1469,6 +1498,7 @@ class _MessageBubble extends StatelessWidget {
     required this.reactions,
     required this.onLongPress,
     required this.highlighted,
+    this.onStatusTap,
     this.replyTarget,
     this.onQuotedMessageTap,
     this.onReply,
@@ -1479,6 +1509,7 @@ class _MessageBubble extends StatelessWidget {
   final CarrierMessage? replyTarget;
   final List<SmsReactionPresentation> reactions;
   final VoidCallback onLongPress;
+  final VoidCallback? onStatusTap;
   final VoidCallback? onQuotedMessageTap;
   final VoidCallback? onReply;
   final VoidCallback? onRetry;
@@ -1608,6 +1639,7 @@ class _MessageBubble extends StatelessWidget {
                             const SizedBox(height: 4),
                             _MessageMeta(
                               message: message,
+                              onStatusTap: onStatusTap,
                               foreground: foreground.withValues(alpha: 0.72),
                             ),
                             if (onRetry != null) ...[
@@ -2344,17 +2376,20 @@ String _timeLabel(DateTime value) {
 }
 
 class _MessageMeta extends StatelessWidget {
-  const _MessageMeta({required this.message, required this.foreground});
+  const _MessageMeta({
+    required this.message,
+    required this.foreground,
+    this.onStatusTap,
+  });
 
   final CarrierMessage message;
   final Color foreground;
+  final VoidCallback? onStatusTap;
 
   @override
   Widget build(BuildContext context) {
     final time = _timeLabel(message.createdAt);
-    final status = message.direction == MessageDirection.incoming
-        ? null
-        : _statusPresentation(message);
+    final delivery = describeMessageDelivery(message);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -2364,9 +2399,9 @@ class _MessageMeta extends StatelessWidget {
             context,
           ).textTheme.labelSmall?.copyWith(color: foreground, letterSpacing: 0),
         ),
-        if (status case final value?) ...[
+        if (delivery != null) ...[
           const SizedBox(width: 4),
-          if (message.status == MessageStatus.sending &&
+          if (delivery.stage == MessageDeliveryStage.withVoipCloud &&
               message.segmentCount > 1) ...[
             Text(
               '${message.segmentsSubmitted}/${message.segmentCount}',
@@ -2383,16 +2418,21 @@ class _MessageMeta extends StatelessWidget {
               opacity: animation,
               child: ScaleTransition(scale: animation, child: child),
             ),
-            child: Tooltip(
+            child: InkResponse(
               key: ValueKey((
-                message.status,
+                delivery.stage,
                 message.segmentsSubmitted,
                 message.segmentCount,
               )),
-              message: value.label,
-              child: Semantics(
-                label: value.label,
-                child: Icon(value.icon, size: 14, color: foreground),
+              onTap: onStatusTap,
+              radius: 16,
+              child: Tooltip(
+                message: delivery.title,
+                child: Semantics(
+                  label: delivery.title,
+                  button: onStatusTap != null,
+                  child: Icon(_tickIcon(delivery), size: 14, color: foreground),
+                ),
               ),
             ),
           ),
@@ -2402,31 +2442,12 @@ class _MessageMeta extends StatelessWidget {
   }
 }
 
-({IconData icon, String label})? _statusPresentation(CarrierMessage message) {
-  return switch (message.status) {
-    MessageStatus.received => null,
-    MessageStatus.queued => (
-      icon: Icons.hourglass_empty_rounded,
-      label: 'Queued',
-    ),
-    MessageStatus.sending => (
-      icon: Icons.send_rounded,
-      label: message.segmentCount > 1
-          ? 'Sending ${message.segmentsSubmitted} of ${message.segmentCount}'
-          : 'Sending',
-    ),
-    MessageStatus.submitted => (icon: Icons.check, label: 'Submitted'),
-    MessageStatus.sent => (icon: Icons.check, label: 'Sent'),
-    MessageStatus.delivered => (icon: Icons.done_all, label: 'Delivered'),
-    MessageStatus.undelivered => (
-      icon: Icons.error_outline,
-      label: 'Undelivered',
-    ),
-    MessageStatus.failed when message.errorCode == 'submission_uncertain' => (
-      icon: Icons.help_outline,
-      label: 'Delivery unconfirmed',
-    ),
-    MessageStatus.failed => (icon: Icons.error_outline, label: 'Failed'),
+IconData _tickIcon(MessageDeliveryInfo delivery) {
+  return switch (delivery.ticks) {
+    0 => Icons.schedule_rounded,
+    1 => Icons.check,
+    2 => Icons.done_all,
+    _ => Icons.error_outline,
   };
 }
 
@@ -2434,4 +2455,4 @@ enum _ThreadAction { addContact, block, unblock }
 
 enum _ContactCardAction { create, addExisting, copy }
 
-enum _MessageAction { reply, copy, selectText, delete }
+enum _MessageAction { reply, copy, selectText, info, delete }

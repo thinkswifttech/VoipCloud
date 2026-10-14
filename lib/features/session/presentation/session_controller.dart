@@ -325,7 +325,9 @@ class SessionController extends AsyncNotifier<AppSession?> {
   Future<Failure?> refreshConfig() async {
     final current = state.value;
     if (current == null) {
-      return const Failure(userMessage: 'No active app session.');
+      return const Failure(
+        userMessage: "This device isn't set up yet. Please activate it first.",
+      );
     }
     if (!current.hasBackendSession) {
       await _syncSip(current);

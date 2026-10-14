@@ -22,7 +22,7 @@ class ApiException extends AppException {
   const ApiException({
     required super.message,
     required this.statusCode,
-    super.userMessage = 'The server could not process the request.',
+    super.userMessage = "We couldn't complete that. Please try again.",
     super.code,
     super.details,
   });
@@ -40,7 +40,8 @@ class ApiException extends AppException {
         statusCode: statusCode,
         message: message ?? 'Bad request',
         userMessage:
-            _userMessageForCode(code) ?? 'Please check the submitted details.',
+            _userMessageForCode(code) ??
+            "Some of your details don't look right. Please check them and try again.",
         code: code,
         details: details,
       );
@@ -58,7 +59,8 @@ class ApiException extends AppException {
       return ApiException(
         statusCode: statusCode,
         message: message ?? 'Forbidden',
-        userMessage: 'You do not have permission to do that.',
+        userMessage:
+            "Your account can't do that. Contact your administrator if you think this is a mistake.",
         code: code,
         details: details,
       );
@@ -67,7 +69,7 @@ class ApiException extends AppException {
       return ApiException(
         statusCode: statusCode,
         message: message ?? 'Not found',
-        userMessage: 'The requested resource was not found.',
+        userMessage: "We couldn't find that. It may have been removed.",
         code: code,
         details: details,
       );
@@ -76,7 +78,8 @@ class ApiException extends AppException {
       return ApiException(
         statusCode: statusCode,
         message: message ?? 'Server error',
-        userMessage: 'The service is temporarily unavailable.',
+        userMessage:
+            'Our service is temporarily unavailable. Please try again in a few minutes.',
         code: code,
         details: details,
       );
@@ -93,15 +96,15 @@ class ApiException extends AppException {
   static String? _userMessageForCode(String? code) {
     return switch (code) {
       'PROVISIONING_TOKEN_INVALID' =>
-        'This provisioning token is invalid. Check the link or scan the QR code again.',
+        "This activation link isn't valid. Check the link or scan the QR code again.",
       'PROVISIONING_TOKEN_EXPIRED' =>
-        'This provisioning token has expired. Please request a new activation link.',
+        'This activation link has expired. Ask your administrator for a new one.',
       'PROVISIONING_TOKEN_USED' =>
-        'This provisioning token has already been used.',
+        'This activation link has already been used.',
       'PROVISIONING_TOKEN_REVOKED' =>
-        'This provisioning token has been revoked.',
+        'This activation link is no longer active.',
       'SERVICE_NOT_ACTIVE' =>
-        'This Softphone service is not active. Please contact support.',
+        "Your phone service isn't active yet. Please contact support.",
       _ => null,
     };
   }
@@ -110,7 +113,8 @@ class ApiException extends AppException {
 class NetworkException extends AppException {
   const NetworkException({
     required super.message,
-    super.userMessage = 'Network connection failed. Please try again.',
+    super.userMessage =
+        "Can't connect right now. Check your internet connection and try again.",
     super.code,
     super.details,
   });
@@ -119,7 +123,7 @@ class NetworkException extends AppException {
 class AuthException extends AppException {
   const AuthException({
     required super.message,
-    super.userMessage = 'Authentication failed. Please sign in again.',
+    super.userMessage = "We couldn't sign you in. Please try again.",
     super.code,
     super.details,
   });
@@ -128,7 +132,8 @@ class AuthException extends AppException {
 class VoipException extends AppException {
   const VoipException({
     required super.message,
-    super.userMessage = 'Calling service is not ready yet.',
+    super.userMessage =
+        "Calling isn't ready yet. Please try again in a moment.",
     super.code,
     super.details,
   });
@@ -137,7 +142,8 @@ class VoipException extends AppException {
 class StorageException extends AppException {
   const StorageException({
     required super.message,
-    super.userMessage = 'Secure storage is unavailable on this device.',
+    super.userMessage =
+        "Couldn't access secure storage on this device. Restart the app and try again.",
     super.code,
     super.details,
   });

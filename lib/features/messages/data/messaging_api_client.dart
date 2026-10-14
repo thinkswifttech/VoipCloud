@@ -82,45 +82,31 @@ class MessagingApiClient {
 String _safeUserMessage(DioException error) {
   final statusCode = error.response?.statusCode;
   if (statusCode == 413) {
-    return 'The attachment is larger than the server upload limit.';
+    return 'That attachment is too large to send. Try a smaller file.';
   }
   if (statusCode == 422) {
-    final validationMessage = _firstValidationMessage(error.response?.data);
-    return validationMessage ?? 'The message or attachment was not accepted.';
+    // The server refuses a text that needs more parts than it allows.
+    if ('${error.response?.data}'.contains('SMS parts')) {
+      return 'This message is too long to send. Please shorten it.';
+    }
+    return "We couldn't send that message. Check the number and attachment, then try again.";
   }
   if (statusCode == 429) {
-    return 'Too many messages were sent recently. Please wait and try again.';
+    return 'You have sent a lot of messages recently. Please wait a minute and try again.';
   }
   if (statusCode == 401) {
-    return 'Your messaging session has expired. Please sign in again.';
+    return "Messaging needs to be set up again on this device. Please contact support.";
   }
   if (statusCode == 403) {
-    return 'Messaging is not currently permitted for this number.';
+    return "Texting isn't turned on for this number. Contact your administrator.";
   }
   if (statusCode != null && statusCode >= 500) {
-    return 'The messaging service is temporarily unavailable.';
+    return 'Messaging is temporarily unavailable. Please try again soon.';
   }
   if (error.type == DioExceptionType.connectionTimeout ||
       error.type == DioExceptionType.sendTimeout ||
       error.type == DioExceptionType.receiveTimeout) {
-    return 'The messaging service did not respond in time.';
+    return "Messages aren't sending right now. Please try again.";
   }
-  return 'The messaging request could not be completed.';
-}
-
-String? _firstValidationMessage(Object? data) {
-  if (data is! Map) return null;
-  final errors = data['errors'];
-  if (errors is Map) {
-    for (final value in errors.values) {
-      if (value is List && value.isNotEmpty) {
-        final message = '${value.first}'.trim();
-        if (message.isNotEmpty) return message;
-      }
-      final message = '$value'.trim();
-      if (message.isNotEmpty) return message;
-    }
-  }
-  final message = '${data['message'] ?? ''}'.trim();
-  return message.isEmpty ? null : message;
+  return "Messages aren't sending right now. Please try again.";
 }

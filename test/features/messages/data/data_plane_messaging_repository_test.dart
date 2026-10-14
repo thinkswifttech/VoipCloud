@@ -77,29 +77,19 @@ void main() {
     });
   });
 
-  test(
-    'rejects text beyond the carrier segment ceiling before transport',
-    () async {
-      final fixture = await _fixture(canSend: true);
-      await fixture.repository.loadInbox(config: config);
+  test('sends long text in full without a client-side length limit', () async {
+    final fixture = await _fixture(canSend: true);
+    await fixture.repository.loadInbox(config: config);
 
-      await expectLater(
-        fixture.repository.sendMessage(
-          config: config,
-          destination: '+14165550123',
-          text: 'a' * (153 * 8 + 1),
-          clientId: 'too-long-message',
-        ),
-        throwsA(
-          isA<MessagingSmsSegmentLimitExceeded>()
-              .having((error) => error.actualSegments, 'actualSegments', 9)
-              .having((error) => error.maximumSegments, 'maximumSegments', 8),
-        ),
-      );
-      expect(fixture.adapter.lastPostPath, isNull);
-    },
-  );
-
+    await fixture.repository.sendMessage(
+      config: config,
+      destination: '+14165550123',
+      text: 'a' * (153 * 8 + 1),
+      clientId: 'long-message',
+    );
+    expect(fixture.adapter.lastPostPath, '/api/v1/messaging/messages');
+    expect((fixture.adapter.lastPostData as Map)['body'], 'a' * (153 * 8 + 1));
+  });
   test(
     'uses the safe logical-message ceiling when the server omits it',
     () async {
@@ -126,20 +116,13 @@ void main() {
     await fixture.repository.loadInbox(config: config);
 
     expect(fixture.repository.outboundSmsUsesIndependentParts, isTrue);
-    await expectLater(
-      fixture.repository.sendMessage(
-        config: config,
-        destination: '+14165550123',
-        text: 'a' * 321,
-        clientId: 'independent-parts-over-limit',
-      ),
-      throwsA(
-        isA<MessagingSmsSegmentLimitExceeded>()
-            .having((error) => error.actualSegments, 'actualSegments', 3)
-            .having((error) => error.maximumSegments, 'maximumSegments', 2),
-      ),
+    await fixture.repository.sendMessage(
+      config: config,
+      destination: '+14165550123',
+      text: 'a' * 321,
+      clientId: 'independent-parts-over-limit',
     );
-    expect(fixture.adapter.lastPostPath, isNull);
+    expect(fixture.adapter.lastPostPath, '/api/v1/messaging/messages');
   });
 
   test('MMS capability uses authenticated multipart upload endpoint', () async {

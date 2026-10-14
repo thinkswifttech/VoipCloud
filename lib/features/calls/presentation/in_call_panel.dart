@@ -624,7 +624,9 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       messenger.showSnackBar(
         SnackBar(
           content: Text(
-            resuming ? 'Unable to resume call.' : 'Unable to hold call.',
+            resuming
+                ? "Couldn't resume the call. Please try again."
+                : "Couldn't put the call on hold. Please try again.",
           ),
         ),
       );
@@ -769,7 +771,9 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to change mute state.')),
+        const SnackBar(
+          content: Text("Couldn't change mute. Please try again."),
+        ),
       );
       await ref.read(sipServiceProvider).syncCurrentCall();
     }
@@ -792,7 +796,9 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to end call. Please try again.')),
+        const SnackBar(
+          content: Text("Couldn't end the call. Please try again."),
+        ),
       );
       await ref.read(sipServiceProvider).syncCurrentCall();
     }
@@ -805,7 +811,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Unable to switch calls. Please try again.'),
+          content: Text("Couldn't switch calls. Please try again."),
         ),
       );
       await ref.read(sipServiceProvider).syncCurrentCall();
@@ -837,7 +843,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       if (!mounted || !context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Unable to hold the caller. Please try again.'),
+          content: Text("Couldn't put the caller on hold. Please try again."),
         ),
       );
     } finally {
@@ -912,7 +918,9 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
       );
     } catch (_) {
       messenger.showSnackBar(
-        const SnackBar(content: Text('Unable to merge these calls.')),
+        const SnackBar(
+          content: Text("Couldn't merge the calls. Please try again."),
+        ),
       );
       await ref.read(sipServiceProvider).syncCurrentCall();
     }

@@ -22,6 +22,7 @@ import '../../calls/domain/audio_output_route.dart';
 import '../../calls/presentation/audio_route_picker.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_registration_state.dart';
+import '../../sip/presentation/calling_status_text.dart';
 import 'liblinphone_attribution.dart';
 import 'settings_controller.dart';
 import 'windows_always_on_top_tile.dart';
@@ -62,7 +63,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             AppCard(
               title: 'Calling',
-              subtitle: 'Call registration and diagnostics',
+              subtitle: 'Connection status and diagnostics',
               child: Column(
                 children: [
                   registration.when(
@@ -70,25 +71,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       icon: AppIcons.initialize,
                       title: sip == null
                           ? 'Calling not configured'
-                          : _registrationTitle(state.status),
+                          : CallingStatusText.title(state.status),
                       subtitle: sip == null
                           ? 'No calling account configured'
-                          : state.message ??
-                                _registrationDescription(state.status),
+                          : CallingStatusText.description(state.status),
                       trailing: StatusPill(
-                        label: state.status.name.toUpperCase(),
+                        label: CallingStatusText.label(
+                          state.status,
+                        ).toUpperCase(),
                         color: _registrationColor(context, state.status),
                       ),
                     ),
                     loading: () => const AppInfoTile(
                       icon: AppIcons.initialize,
-                      title: 'Checking registration',
+                      title: 'Checking calling status',
                       subtitle: 'Waiting for calling status',
                     ),
                     error: (_, _) => const AppInfoTile(
                       icon: AppIcons.warning,
-                      title: 'Registration unavailable',
-                      subtitle: 'Open diagnostics to inspect the SIP service',
+                      title: 'Calling status unavailable',
+                      subtitle: 'Open diagnostics for details',
                     ),
                   ),
                   const Divider(),
@@ -330,28 +332,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       ).colorScheme.primary,
     };
   }
-
-  String _registrationTitle(SipRegistrationStatus status) {
-    return switch (status) {
-      SipRegistrationStatus.registered => 'Registered for calls',
-      SipRegistrationStatus.registering => 'Registering for calls',
-      SipRegistrationStatus.configuring => 'Configuring calls',
-      SipRegistrationStatus.failed => 'Registration failed',
-      SipRegistrationStatus.unregistered => 'Not registered for calls',
-      SipRegistrationStatus.uninitialized => 'Calling service not initialized',
-    };
-  }
-
-  String _registrationDescription(SipRegistrationStatus status) {
-    return switch (status) {
-      SipRegistrationStatus.registered => 'Ready to place and receive calls',
-      SipRegistrationStatus.registering => 'Connecting to the calling service',
-      SipRegistrationStatus.configuring => 'Calling account is configured',
-      SipRegistrationStatus.failed => 'Open diagnostics for details',
-      SipRegistrationStatus.unregistered => 'Open diagnostics to register',
-      SipRegistrationStatus.uninitialized => 'Open diagnostics to initialize',
-    };
-  }
 }
 
 class _AndroidBackgroundPermissionTile extends StatefulWidget {
@@ -576,7 +556,11 @@ class _AboutSectionState extends ConsumerState<_AboutSection> {
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Unable to install update: $error')),
+          SnackBar(
+            content: const Text(
+              "Couldn't install the update. Please try again.",
+            ),
+          ),
         );
       }
     } finally {

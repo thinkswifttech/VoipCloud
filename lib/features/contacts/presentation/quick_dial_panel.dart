@@ -155,17 +155,23 @@ class QuickDialPanel extends ConsumerWidget {
       messenger.showSnackBar(SnackBar(content: Text('Saved to $location')));
     } on FileSaveCancelled {
       return;
-    } on PlatformException catch (error) {
+    } on PlatformException {
       if (!context.mounted) return;
       messenger.showSnackBar(
         SnackBar(
-          content: Text(error.message ?? 'Could not save Quick Dial CSV.'),
+          content: const Text(
+            "Couldn't save your Quick Dial list. Please try again.",
+          ),
         ),
       );
     } catch (_) {
       if (!context.mounted) return;
       messenger.showSnackBar(
-        const SnackBar(content: Text('Could not save Quick Dial CSV.')),
+        const SnackBar(
+          content: Text(
+            "Couldn't save your Quick Dial list. Please try again.",
+          ),
+        ),
       );
     }
   }
@@ -217,17 +223,23 @@ class QuickDialPanel extends ConsumerWidget {
           ),
         ),
       );
-    } on PlatformException catch (error) {
+    } on PlatformException {
       if (!context.mounted) return;
       messenger.showSnackBar(
         SnackBar(
-          content: Text(error.message ?? 'Could not import Quick Dial CSV.'),
+          content: const Text(
+            "Couldn't import that file. Check that it is a Quick Dial export and try again.",
+          ),
         ),
       );
     } catch (_) {
       if (!context.mounted) return;
       messenger.showSnackBar(
-        const SnackBar(content: Text('Could not import Quick Dial CSV.')),
+        const SnackBar(
+          content: Text(
+            "Couldn't import that file. Check that it is a Quick Dial export and try again.",
+          ),
+        ),
       );
     }
   }
@@ -978,7 +990,8 @@ class _PickDirectorySheetState extends ConsumerState<_PickDirectorySheet> {
                     framed: false,
                     icon: AppIcons.navDirectory,
                     title: 'Directory unavailable',
-                    message: 'Could not load directory entries.',
+                    message:
+                        "We couldn't load the directory. Please try again.",
                   ),
                 ),
                 data: (entries) {
@@ -1223,8 +1236,9 @@ class _QuickDialFormSheetState extends ConsumerState<_QuickDialFormSheet> {
               contentPadding: EdgeInsets.zero,
               title: const Text('Show BLF status'),
               subtitle: const Text(
-                'Request status for an extension on your PBX, even if it is not '
-                'in the directory. Unsupported numbers show status unavailable.',
+                "Show the status of a colleague's extension, even if it "
+                "isn't in the directory. Unsupported numbers show status "
+                'unavailable.',
               ),
               value: _showBlf,
               onChanged: _saving

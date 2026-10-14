@@ -190,7 +190,11 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
           .blockNumber(remoteNumber);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('SMS and MMS from this number blocked')),
+        const SnackBar(
+          content: Text(
+            'Texts and picture messages from this number are now blocked',
+          ),
+        ),
       );
     } on AppException catch (error) {
       if (!mounted) return;
@@ -468,7 +472,7 @@ class _ConversationListState extends State<_ConversationList> {
                                   message: allEntries.isNotEmpty
                                       ? 'Try a different search.'
                                       : widget.syncError != null
-                                      ? 'Messages could not be synchronized. Check your connection and try again.'
+                                      ? "Couldn't update your messages. Check your connection and try again."
                                       : widget.canStartConversation
                                       ? 'Choose a contact or enter a mobile number.'
                                       : 'Your message history will appear here. Sending will become available when carrier delivery is enabled.',
@@ -1308,7 +1312,8 @@ class _PickDirectoryForMessageSheetState
                     framed: false,
                     icon: AppIcons.navDirectory,
                     title: 'Directory unavailable',
-                    message: 'Could not load directory entries.',
+                    message:
+                        "We couldn't load the directory. Please try again.",
                   ),
                 ),
                 data: (entries) {

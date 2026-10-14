@@ -10,6 +10,7 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/platform/desktop_platform.dart';
 import '../../../shared/widgets/app_brand_icon.dart';
 import '../../../shared/widgets/responsive.dart';
+import '../domain/provisioning_activation_input.dart';
 import 'provisioning_controller.dart';
 
 class ProvisioningScreen extends ConsumerStatefulWidget {
@@ -797,9 +798,7 @@ class _SetupLinkExpanded extends StatelessWidget {
               prefixIcon: Icon(AppIcons.link),
             ),
             textInputAction: TextInputAction.done,
-            validator: (value) => value == null || value.trim().isEmpty
-                ? 'Activation link is required'
-                : null,
+            validator: (value) => provisioningInputProblem(value ?? ''),
             onFieldSubmitted: (_) => onActivate(),
           ),
           AnimatedSwitcher(

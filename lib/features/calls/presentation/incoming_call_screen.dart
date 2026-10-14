@@ -279,9 +279,19 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
   Future<void> _reject(BuildContext context) async {
     if (_isCompletingAction) return;
     setState(() => _isCompletingAction = true);
-    await ref.read(sipServiceProvider).rejectCall(widget.callId);
-    if (context.mounted) {
-      context.go(RoutePaths.dialer);
+    try {
+      await ref.read(sipServiceProvider).rejectCall(widget.callId);
+      if (context.mounted) {
+        context.go(RoutePaths.dialer);
+      }
+    } catch (_) {
+      if (!context.mounted) return;
+      setState(() => _isCompletingAction = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Couldn't decline the call. Please try again."),
+        ),
+      );
     }
   }
 

@@ -127,7 +127,8 @@ class MessagingSessionManager {
       await _store.clear();
       throw const AppException(
         message: 'Messaging session inbox does not match provisioning.',
-        userMessage: 'Messaging access changed. Reprovision this device.',
+        userMessage:
+            "Messaging needs to be set up again on this device. Please contact support.",
       );
     }
     await _store.write(credentials);
@@ -143,8 +144,8 @@ class MessagingSessionManager {
           ? 'messaging_session_rejected'
           : 'messaging_session_unavailable',
       userMessage: status == 401 || status == 403
-          ? 'Messaging access is unavailable. Reprovision this device.'
-          : 'Messaging is temporarily unavailable.',
+          ? "Messaging needs to be set up again on this device. Please contact support."
+          : 'Messaging is temporarily unavailable. Please try again soon.',
     );
   }
 }

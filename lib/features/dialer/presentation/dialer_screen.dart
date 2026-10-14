@@ -22,6 +22,7 @@ import '../../session/presentation/session_controller.dart';
 import '../../settings/presentation/settings_controller.dart';
 import '../../settings/presentation/dnd_settings_section.dart';
 import '../../sip/domain/sip_registration_state.dart';
+import '../../sip/presentation/calling_status_text.dart';
 import 'dialer_controller.dart';
 import 'dialer_input_platform.dart';
 
@@ -369,7 +370,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
       }
       final message = error is AppException
           ? error.userMessage
-          : 'Call could not start. Check registration diagnostics.';
+          : "Couldn't start the call. Please try again.";
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
@@ -798,14 +799,7 @@ class _AccountDetailSheet extends ConsumerWidget {
     final isRegistering =
         registration.status == SipRegistrationStatus.registering ||
         registration.status == SipRegistrationStatus.configuring;
-    final statusLabel = switch (registration.status) {
-      SipRegistrationStatus.registered => 'Registered',
-      SipRegistrationStatus.registering => 'Registering',
-      SipRegistrationStatus.configuring => 'Configuring',
-      SipRegistrationStatus.failed => 'Failed',
-      SipRegistrationStatus.unregistered => 'Unregistered',
-      SipRegistrationStatus.uninitialized => 'Offline',
-    };
+    final statusLabel = CallingStatusText.label(registration.status);
     final statusColor = switch (registration.status) {
       SipRegistrationStatus.registered => const Color(0xFF22C55E),
       SipRegistrationStatus.registering ||
@@ -813,7 +807,7 @@ class _AccountDetailSheet extends ConsumerWidget {
       _ => const Color(0xFFF87171),
     };
     final displayIdentity = identity.trim().isEmpty ? '—' : identity.trim();
-    final detailMessage = registration.message?.trim();
+    final detailMessage = CallingStatusText.dialerDetail(registration.status);
 
     final identityChip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),

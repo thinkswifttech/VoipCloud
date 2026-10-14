@@ -26,7 +26,8 @@ class DirectoryRepository {
     if (access == null) {
       throw const AppException(
         message: 'Directory access was not provisioned',
-        userMessage: 'Re-register the app to enable the company directory.',
+        userMessage:
+            "The company directory isn't set up on this device. Contact your administrator.",
       );
     }
     try {

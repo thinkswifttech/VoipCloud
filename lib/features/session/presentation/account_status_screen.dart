@@ -7,7 +7,6 @@ import '../../../shared/icons/app_icons.dart';
 import '../../../shared/widgets/app_card.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/section_intro.dart';
-import '../domain/device_status.dart';
 import '../domain/service_account.dart';
 import 'session_controller.dart';
 
@@ -31,7 +30,7 @@ class _AccountStatusScreenState extends ConsumerState<AccountStatusScreen> {
         ? 'Device revoked'
         : service?.serviceStatus.label ?? 'No active service';
     final message = device?.revoked == true
-        ? 'This device session has been revoked. Reset the app and activate it with a new provisioning link.'
+        ? 'This device has been removed from your account. Reset the app and activate it again with a new setup link.'
         : service?.serviceStatus.accountMessage ??
               'Activate this device to continue.';
 
@@ -54,14 +53,6 @@ class _AccountStatusScreenState extends ConsumerState<AccountStatusScreen> {
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              if (device != null) ...[
-                const SizedBox(height: 14),
-                Text(
-                  'Session: ${device.sessionStatus.label} / Provisioning: ${device.provisioningStatus.label}',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ],
               const SizedBox(height: 20),
               OutlinedButton.icon(
                 onPressed: _isResetting ? null : _resetDevice,

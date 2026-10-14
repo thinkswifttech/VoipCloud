@@ -22,11 +22,12 @@ class ApiExceptionMapper {
       ),
       DioExceptionType.cancel => const NetworkException(
         message: 'Request cancelled',
-        userMessage: 'The request was cancelled.',
+        userMessage: 'That was cancelled.',
       ),
       DioExceptionType.badCertificate => const NetworkException(
         message: 'Bad TLS certificate',
-        userMessage: 'Secure connection failed.',
+        userMessage:
+            "Couldn't make a secure connection. Check your network and try again.",
       ),
       DioExceptionType.unknown => NetworkException(
         message: error.message ?? 'Unknown network error',
