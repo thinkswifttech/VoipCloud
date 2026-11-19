@@ -9,16 +9,16 @@ import 'package:url_launcher/url_launcher.dart';
 import '../config/config_providers.dart';
 
 enum DesktopUpdatePlatform {
-  windowsX64('windows-x64'),
-  macosUniversal('macos-universal');
+  windowsX64('windows-x64');
 
   const DesktopUpdatePlatform(this.manifestKey);
 
   final String manifestKey;
 
   static DesktopUpdatePlatform? get current {
+    // Only the Windows installer is distributed through this update channel;
+    // macOS updates come from the App Store.
     if (Platform.isWindows) return DesktopUpdatePlatform.windowsX64;
-    if (Platform.isMacOS) return DesktopUpdatePlatform.macosUniversal;
     return null;
   }
 }

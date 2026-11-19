@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/config/app_config.dart';
 import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/storage_providers.dart';
+import '../../accounts/domain/account_line.dart';
 import '../../sip/presentation/sip_log_providers.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
 import '../application/pbx_dnd_monitor.dart';
@@ -17,17 +20,22 @@ class SettingsState {
     this.dndScope = DndScope.thisDevice,
     this.themeMode = AppThemeMode.system,
     this.pbxDnd = const PbxDndState(),
+    this.secondaryPbxDnd = const PbxDndState(),
+    this.callingNetwork = CallingNetworkPreference.auto,
   }) : localDndEnabled = dndEnabled;
 
   final bool voipDebugLogsEnabled;
   final bool localDndEnabled;
   final PbxDndState pbxDnd;
+  final PbxDndState secondaryPbxDnd;
+  // Call handling only: the second account's PBX DND must not silence the first.
   bool get dndEnabled => localDndEnabled || pbxDnd.enabled == true;
   bool get selectedDndEnabled => dndScope == DndScope.thisDevice
       ? localDndEnabled
       : pbxDnd.enabled == true;
   final DndScope dndScope;
   final AppThemeMode themeMode;
+  final CallingNetworkPreference callingNetwork;
 
   ThemeMode get materialThemeMode {
     return switch (themeMode) {
@@ -43,6 +51,8 @@ class SettingsState {
     DndScope? dndScope,
     AppThemeMode? themeMode,
     PbxDndState? pbxDnd,
+    PbxDndState? secondaryPbxDnd,
+    CallingNetworkPreference? callingNetwork,
   }) {
     return SettingsState(
       voipDebugLogsEnabled: voipDebugLogsEnabled ?? this.voipDebugLogsEnabled,
@@ -50,6 +60,8 @@ class SettingsState {
       dndScope: dndScope ?? this.dndScope,
       themeMode: themeMode ?? this.themeMode,
       pbxDnd: pbxDnd ?? this.pbxDnd,
+      secondaryPbxDnd: secondaryPbxDnd ?? this.secondaryPbxDnd,
+      callingNetwork: callingNetwork ?? this.callingNetwork,
     );
   }
 }
@@ -70,6 +82,25 @@ extension DndScopeDetails on DndScope {
       // that effective state so upgrading cannot strand PBX-wide DND on.
       _ when legacyDndEnabled => DndScope.allDevices,
       _ => DndScope.thisDevice,
+    };
+  }
+}
+
+/// Which connection calling traffic should use. Applies to mobile only.
+enum CallingNetworkPreference { auto, wifi, cellular }
+
+extension CallingNetworkPreferenceDetails on CallingNetworkPreference {
+  String get label => switch (this) {
+    CallingNetworkPreference.auto => 'Automatic',
+    CallingNetworkPreference.wifi => 'Prefer Wi‑Fi',
+    CallingNetworkPreference.cellular => 'Prefer mobile data',
+  };
+
+  static CallingNetworkPreference parse(String? value) {
+    return switch (value) {
+      'wifi' => CallingNetworkPreference.wifi,
+      'cellular' => CallingNetworkPreference.cellular,
+      _ => CallingNetworkPreference.auto,
     };
   }
 }
@@ -107,8 +138,24 @@ class SettingsController extends Notifier<SettingsState> {
     ref.listen(pbxDndStateProvider, (_, next) {
       state = state.copyWith(pbxDnd: next);
     });
+    ref.listen(secondaryPbxDndStateProvider, (_, next) {
+      state = state.copyWith(secondaryPbxDnd: next);
+    });
     unawaited(_restore());
-    return SettingsState(pbxDnd: ref.read(pbxDndStateProvider));
+    return SettingsState(
+      pbxDnd: ref.read(pbxDndStateProvider),
+      secondaryPbxDnd: ref.read(secondaryPbxDndStateProvider),
+    );
+  }
+
+  /// Turns the PBX do-not-disturb of one account on or off (all its devices).
+  void setPbxDndEnabled(AccountLine line, {required bool enabled}) {
+    final monitor = ref.read(
+      line == AccountLine.secondary
+          ? secondaryPbxDndMonitorProvider
+          : pbxDndMonitorProvider,
+    );
+    unawaited(monitor.setEnabled(enabled));
   }
 
   void setVoipDebugLogsEnabled({required bool enabled}) {
@@ -164,6 +211,29 @@ class SettingsController extends Notifier<SettingsState> {
     await storage.delete(StorageKeys.appDndEnabled);
   }
 
+  /// Saves the preference and hands it to the native layer, which applies it
+  /// once no call is in progress. Does nothing in builds without the feature.
+  void setCallingNetworkPreference(CallingNetworkPreference preference) {
+    if (preference == state.callingNetwork) return;
+    state = state.copyWith(callingNetwork: preference);
+    unawaited(
+      ref
+          .read(secureStorageProvider)
+          .write(StorageKeys.appCallingNetwork, preference.name),
+    );
+    unawaited(_syncNativeCallingNetwork(preference));
+  }
+
+  /// Returns this installation to Automatic during an app reset.
+  Future<void> resetCallingNetworkForAppReset() async {
+    final previous = state.callingNetwork;
+    state = state.copyWith(callingNetwork: CallingNetworkPreference.auto);
+    if (callingNetworkAvailable || previous != CallingNetworkPreference.auto) {
+      await _syncNativeCallingNetwork(CallingNetworkPreference.auto);
+    }
+    await ref.read(secureStorageProvider).delete(StorageKeys.appCallingNetwork);
+  }
+
   void setThemeMode(AppThemeMode themeMode) {
     state = state.copyWith(themeMode: themeMode);
     unawaited(
@@ -187,6 +257,9 @@ class SettingsController extends Notifier<SettingsState> {
       final localEnabled = localStored == null
           ? dndEnabled && dndScope == DndScope.thisDevice
           : localStored == 'true';
+      final callingNetwork = CallingNetworkPreferenceDetails.parse(
+        await storage.read(StorageKeys.appCallingNetwork),
+      );
       final voipLogs = await storage.read(StorageKeys.appVoipDebugLogsEnabled);
       final enabledLogs = voipLogs == 'true';
       state = state.copyWith(
@@ -194,13 +267,35 @@ class SettingsController extends Notifier<SettingsState> {
         dndEnabled: _localDndEdited ? state.localDndEnabled : localEnabled,
         dndScope: _scopeEdited ? state.dndScope : dndScope,
         voipDebugLogsEnabled: enabledLogs,
+        callingNetwork: callingNetwork,
       );
+      // Builds without the feature have nothing to apply, unless an earlier
+      // build left a non-automatic choice that must now be switched off.
+      if (callingNetworkAvailable ||
+          callingNetwork != CallingNetworkPreference.auto) {
+        await _syncNativeCallingNetwork(callingNetwork);
+      }
       if (enabledLogs) {
         await ref.read(sipLogStoreProvider).setEnabled(true);
       }
       await _syncNativeDnd(state.localDndEnabled);
     } catch (_) {
       // Keep defaults when secure storage is unavailable.
+    }
+  }
+
+  Future<void> _syncNativeCallingNetwork(
+    CallingNetworkPreference preference,
+  ) async {
+    // Desktop has no native side for this; the iPhone one needs the patched SDK.
+    if (!(Platform.isAndroid || Platform.isIOS)) return;
+    try {
+      await const VoipPlatformChannel().setCallingNetworkPreference(
+        enabled: callingNetworkAvailable,
+        preference: preference.name,
+      );
+    } catch (_) {
+      // Platforms without the native hook keep the OS-managed connection.
     }
   }
 

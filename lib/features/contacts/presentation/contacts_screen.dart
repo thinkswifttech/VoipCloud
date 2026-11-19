@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
-import '../../../app/router/route_names.dart';
+import '../../calls/presentation/add_call_dialog.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../shared/icons/app_icons.dart';
@@ -171,7 +170,7 @@ void _openDialer(BuildContext context, WidgetRef ref, String destination) {
   final dialer = ref.read(dialerControllerProvider.notifier);
   dialer.clear();
   dialer.append(destination);
-  context.go(RoutePaths.dialer);
+  openDialerOrAddCall(context, ref);
 }
 
 class _ContactsPanel extends StatelessWidget {

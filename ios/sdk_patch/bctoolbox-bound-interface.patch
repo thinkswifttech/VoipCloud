@@ -1,0 +1,168 @@
+diff --git a/include/bctoolbox/vconnect.h b/include/bctoolbox/vconnect.h
+index c85f48474c..eb34ecf275 100644
+--- a/include/bctoolbox/vconnect.h
++++ b/include/bctoolbox/vconnect.h
+@@ -191,6 +191,24 @@ BCTBX_PUBLIC bctbx_vsocket_api_t *bctbx_vsocket_api_get_default(void);
+  */
+ BCTBX_PUBLIC bctbx_vsocket_api_t *bctbx_vsocket_api_get_standard(void);
+ 
++/**
++ * Pins every socket created through bctbx_socket() from now on to a network interface
++ * (Apple platforms: IP_BOUND_IF / IPV6_BOUND_IF). Sockets that already exist keep the interface they were
++ * created with, so a caller that changes the interface must make the stack recreate its sockets.
++ * @param interface_index interface index (if_nametoindex()), or 0 to stop pinning
++ */
++BCTBX_PUBLIC void bctbx_set_bound_interface(unsigned int interface_index);
++
++/** @return the interface index set by bctbx_set_bound_interface(), 0 when sockets are not pinned */
++BCTBX_PUBLIC unsigned int bctbx_get_bound_interface(void);
++
++/**
++ * Applies the bound interface to a socket that was just created.
++ * @return 0 on success or when there is nothing to apply, -1 if the operating system refused (the caller must
++ * not use the socket: it would leave through the wrong network)
++ */
++BCTBX_PUBLIC int bctbx_socket_apply_bound_interface(bctbx_socket_t sock, int socket_family);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/utils/port.c b/src/utils/port.c
+index 5d66a5ed1f..8b146ea5d1 100644
+--- a/src/utils/port.c
++++ b/src/utils/port.c
+@@ -1809,7 +1809,7 @@ static int get_local_ip_for_with_connect(int type, const char *dest, int port, c
+ 		bctbx_error("bug: getaddrinfo returned nothing.");
+ 		return -1;
+ 	}
+-	sock = socket(res->ai_family, SOCK_DGRAM, 0);
++	sock = bctbx_socket(res->ai_family, SOCK_DGRAM, 0);
+ 	if (sock == (bctbx_socket_t)-1) {
+ 		bctbx_error("get_local_ip_for_with_connect() could not create [%s] socket: %s",
+ 		            ai_family_to_string(res->ai_family), getSocketError());
+diff --git a/src/vconnect.c b/src/vconnect.c
+index 8855691cca..506b2cac1e 100644
+--- a/src/vconnect.c
++++ b/src/vconnect.c
+@@ -27,6 +27,10 @@
+ #include <errno.h>
+ #include <stdarg.h>
+ #include <sys/types.h>
++#ifdef __APPLE__
++#include <netinet/in.h> /* IP_BOUND_IF, IPV6_BOUND_IF */
++#include <string.h>
++#endif
+ 
+ /**============================================================
+  * Wrappers around default libc calls used to handle windows
+@@ -118,8 +122,46 @@ static bctbx_vsocket_api_t bcvSocket = {
+ /* Pointer to default socket methods initialized to standard libc implementation here.*/
+ static bctbx_vsocket_api_t *pDefaultvSocket = &bcvSocket;
+ 
++static volatile unsigned int bound_interface = 0;
++
++void bctbx_set_bound_interface(unsigned int interface_index) {
++	bound_interface = interface_index;
++}
++
++unsigned int bctbx_get_bound_interface(void) {
++	return bound_interface;
++}
++
++int bctbx_socket_apply_bound_interface(bctbx_socket_t sock, int socket_family) {
++#ifdef __APPLE__
++	unsigned int index = bound_interface;
++	int err;
++	if (index == 0) return 0;
++	if (socket_family == AF_INET6) {
++		err = setsockopt(sock, IPPROTO_IPV6, IPV6_BOUND_IF, &index, sizeof(index));
++	} else if (socket_family == AF_INET) {
++		err = setsockopt(sock, IPPROTO_IP, IP_BOUND_IF, &index, sizeof(index));
++	} else {
++		return 0; /* AF_UNIX and others never leave the device */
++	}
++	if (err != 0) {
++		bctbx_error("bctbx_socket_apply_bound_interface(): cannot bind to interface [%u]: %s", index, strerror(errno));
++		return -1;
++	}
++#else
++	(void)sock;
++	(void)socket_family;
++#endif
++	return 0;
++}
++
+ bctbx_socket_t bctbx_socket(int socket_family, int socket_type, int protocol) {
+-	return pDefaultvSocket->pSocketMethods->pFuncSocket(socket_family, socket_type, protocol);
++	bctbx_socket_t sock = pDefaultvSocket->pSocketMethods->pFuncSocket(socket_family, socket_type, protocol);
++	if (sock != (bctbx_socket_t)-1 && bctbx_socket_apply_bound_interface(sock, socket_family) != 0) {
++		pDefaultvSocket->pSocketMethods->pFuncClose(sock);
++		return (bctbx_socket_t)-1;
++	}
++	return sock;
+ }
+ 
+ int bctbx_socket_close(bctbx_socket_t sock) {
+diff --git a/tester/port.c b/tester/port.c
+index bac635257b..5cf71b4543 100644
+--- a/tester/port.c
++++ b/tester/port.c
+@@ -18,10 +18,16 @@
+  */
+ 
+ #include "bctoolbox/port.h"
++#include "bctoolbox/vconnect.h"
+ #include "bctoolbox/vfs.h"
+ #include "bctoolbox_tester.h"
+ #include <inttypes.h>
+ #include <stdio.h>
++#ifdef __APPLE__
++#include <net/if.h>
++#include <netinet/in.h>
++#include <sys/socket.h>
++#endif
+ 
+ static void bytes_to_from_hexa_strings(void) {
+ 	const uint8_t a55aBytes[2] = {0xa5, 0x5a};
+@@ -255,9 +261,40 @@ static void bctbx_directory_utils_test(void) {
+ 	bctbx_free(filename3);
+ }
+ 
++static void bound_interface_test(void) {
++	BC_ASSERT_EQUAL(bctbx_get_bound_interface(), 0, unsigned, "%u");
++	bctbx_set_bound_interface(7);
++	BC_ASSERT_EQUAL(bctbx_get_bound_interface(), 7, unsigned, "%u");
++	bctbx_set_bound_interface(0);
++	BC_ASSERT_EQUAL(bctbx_get_bound_interface(), 0, unsigned, "%u");
++#ifdef __APPLE__
++	{
++		/* The loopback interface always exists: a new socket must come out pinned to it, and unpinned again after reset. */
++		unsigned int lo = if_nametoindex("lo0");
++		unsigned int value = 0;
++		socklen_t len = sizeof(value);
++		bctbx_socket_t sock;
++		BC_ASSERT_TRUE(lo != 0);
++		bctbx_set_bound_interface(lo);
++		sock = bctbx_socket(AF_INET, SOCK_DGRAM, 0);
++		BC_ASSERT_TRUE((int)sock != -1);
++		BC_ASSERT_EQUAL(getsockopt(sock, IPPROTO_IP, IP_BOUND_IF, &value, &len), 0, int, "%i");
++		BC_ASSERT_EQUAL(value, lo, unsigned, "%u");
++		bctbx_socket_close(sock);
++		bctbx_set_bound_interface(0);
++		sock = bctbx_socket(AF_INET, SOCK_DGRAM, 0);
++		value = 99;
++		BC_ASSERT_EQUAL(getsockopt(sock, IPPROTO_IP, IP_BOUND_IF, &value, &len), 0, int, "%i");
++		BC_ASSERT_EQUAL(value, 0, unsigned, "%u");
++		bctbx_socket_close(sock);
++	}
++#endif
++}
++
+ static test_t utils_tests[] = {
+     TEST_NO_TAG("Bytes to/from Hexa strings", bytes_to_from_hexa_strings), TEST_NO_TAG("Time", time_functions),
+-    TEST_NO_TAG("Addrinfo sort", bctbx_addrinfo_sort_test), TEST_NO_TAG("Directory utils", bctbx_directory_utils_test)};
++    TEST_NO_TAG("Addrinfo sort", bctbx_addrinfo_sort_test), TEST_NO_TAG("Directory utils", bctbx_directory_utils_test),
++    TEST_NO_TAG("Bound interface", bound_interface_test)};
+ 
+ test_suite_t utils_test_suite = {"Utils",     NULL, NULL, NULL, NULL, sizeof(utils_tests) / sizeof(utils_tests[0]),
+                                  utils_tests, 0};

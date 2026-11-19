@@ -79,30 +79,63 @@ class PageContent extends StatelessWidget {
 
         return SafeArea(
           bottom: safeAreaBottom,
-          child: Scrollbar(
-            child: SingleChildScrollView(
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: effectivePadding,
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(maxWidth: effectiveMaxWidth),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (header != null) ...[
-                        header!,
-                        const SizedBox(height: 16),
-                      ],
-                      child,
+          child: _PageScroll(
+            padding: effectivePadding,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: effectiveMaxWidth),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (header != null) ...[
+                      header!,
+                      const SizedBox(height: 16),
                     ],
-                  ),
+                    child,
+                  ],
                 ),
               ),
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// Scrolls the page and draws its scrollbar from one controller. Desktop
+/// platforms do not link a Scrollbar to a scroll view automatically, which
+/// raised "ScrollController has no ScrollPosition attached" on every scroll.
+class _PageScroll extends StatefulWidget {
+  const _PageScroll({required this.padding, required this.child});
+
+  final EdgeInsetsGeometry padding;
+  final Widget child;
+
+  @override
+  State<_PageScroll> createState() => _PageScrollState();
+}
+
+class _PageScrollState extends State<_PageScroll> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scrollbar(
+      controller: _controller,
+      child: SingleChildScrollView(
+        controller: _controller,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: widget.padding,
+        child: widget.child,
+      ),
     );
   }
 }

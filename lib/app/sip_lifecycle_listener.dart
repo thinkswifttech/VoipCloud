@@ -9,6 +9,7 @@ import '../../core/logging/app_logger.dart';
 import '../../core/updates/desktop_update.dart';
 import '../../features/calls/domain/call_status.dart';
 import '../../features/calls/domain/voip_call.dart';
+import '../../features/accounts/presentation/accounts_controller.dart';
 import '../../features/call_history/presentation/call_history_providers.dart';
 import '../../features/directory/presentation/blf_feed_providers.dart';
 import '../../features/directory/presentation/directory_presence_providers.dart';
@@ -120,6 +121,7 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
         _refreshHistoryIfNeeded(force: wasBackgrounded);
         await _platformChannel.enterForeground();
         ref.read(pbxDndMonitorProvider).refresh();
+        ref.read(secondaryPbxDndMonitorProvider).refresh();
         if (ref.read(settingsControllerProvider).voipDebugLogsEnabled) {
           unawaited(ref.read(sipLogStoreProvider).refreshFromNativeFile());
         }
@@ -195,8 +197,8 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
       return;
     }
 
-    final ignored = await _platformChannel.isBatteryOptimizationIgnored();
-    if (!mounted || ignored) {
+    final status = await _platformChannel.getBackgroundStatus();
+    if (!mounted || status.isAllowed) {
       return;
     }
 
@@ -211,6 +213,7 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
   Widget build(BuildContext context) {
     ref.watch(sessionControllerProvider);
     ref.watch(sipRegistrationStateProvider);
+    ref.watch(secondaryRegistrationStateProvider);
     ref.watch(directoryPresenceSessionProvider);
     // Configure after the frame to avoid changing other provider state while
     // widgets are building; reread current values to discard stale frames.
@@ -223,7 +226,12 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
 
   void _configurePbxDnd() {
     if (!mounted) return;
-    final current = ref.read(sipServiceProvider).currentConfig;
+    final sip = ref.read(sipServiceProvider);
+    final current = sip.currentConfig;
+    final canRegister =
+        _hadNetwork != false &&
+        ref.read(sessionControllerProvider).asData?.value?.canRegisterSip ==
+            true;
     ref
         .read(pbxDndMonitorProvider)
         .configure(
@@ -231,15 +239,26 @@ class _SipLifecycleListenerState extends ConsumerState<SipLifecycleListener>
           extension: current?.extension,
           domain: current?.domain,
           registered:
-              _hadNetwork != false &&
-              ref
-                      .read(sessionControllerProvider)
-                      .asData
-                      ?.value
-                      ?.canRegisterSip ==
-                  true &&
+              canRegister &&
               (ref
                       .read(sipRegistrationStateProvider)
+                      .asData
+                      ?.value
+                      .isRegistered ??
+                  false),
+        );
+    final second = sip.secondaryConfig;
+    ref
+        .read(secondaryPbxDndMonitorProvider)
+        .configure(
+          identity: second?.sipIdentity,
+          extension: second?.extension,
+          domain: second?.domain,
+          registered:
+              canRegister &&
+              second != null &&
+              (ref
+                      .read(secondaryRegistrationStateProvider)
                       .asData
                       ?.value
                       .isRegistered ??

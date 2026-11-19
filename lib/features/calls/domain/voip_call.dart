@@ -1,3 +1,4 @@
+import '../../accounts/domain/account_line.dart';
 import 'call_direction.dart';
 import 'call_status.dart';
 import 'audio_output_route.dart';
@@ -17,6 +18,8 @@ class VoipCall {
     this.audioEndpointId,
     this.availableAudioEndpoints = const [],
     this.answeredElsewhere = false,
+    this.networkLossPath,
+    this.line,
   });
 
   final String id;
@@ -33,6 +36,14 @@ class VoipCall {
   final List<AudioOutputRouteOption> availableAudioEndpoints;
   final bool answeredElsewhere;
 
+  /// `wifi` or `cellular` when the app ended this call because that network
+  /// was lost; null otherwise.
+  final String? networkLossPath;
+
+  /// Which of the two accounts this call is on; null when the native side did
+  /// not say (single-account builds).
+  final AccountLine? line;
+
   VoipCall copyWith({
     String? id,
     String? remoteUri,
@@ -47,6 +58,8 @@ class VoipCall {
     String? audioEndpointId,
     List<AudioOutputRouteOption>? availableAudioEndpoints,
     bool? answeredElsewhere,
+    String? networkLossPath,
+    AccountLine? line,
   }) {
     return VoipCall(
       id: id ?? this.id,
@@ -63,6 +76,8 @@ class VoipCall {
       availableAudioEndpoints:
           availableAudioEndpoints ?? this.availableAudioEndpoints,
       answeredElsewhere: answeredElsewhere ?? this.answeredElsewhere,
+      networkLossPath: networkLossPath ?? this.networkLossPath,
+      line: line ?? this.line,
     );
   }
 }

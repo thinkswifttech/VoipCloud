@@ -11,6 +11,9 @@ import '../../features/call_history/presentation/call_history_providers.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/messages/domain/messaging_platform.dart';
 import '../../features/messages/presentation/messages_providers.dart';
+import '../../features/messages/presentation/messaging_lines.dart';
+import '../../features/accounts/domain/account_line.dart';
+import '../../features/accounts/presentation/accounts_controller.dart';
 import '../../shared/icons/app_icons.dart';
 import '../../shared/platform/desktop_platform.dart';
 import '../../shared/widgets/help_support_sheet.dart';
@@ -34,13 +37,21 @@ final appBadgeCountsProvider = Provider<AppBadgeCounts>((ref) {
   // SMS destination visible; gating this watch on the current entitlement
   // creates a deadlock where discovery can never start.
   final messaging = ref.watch(messagesControllerProvider);
-  final appSession = ref.watch(sessionControllerProvider).value;
-  if (!isCarrierMessagingEnabled(appSession?.carrierMessaging)) {
+  // The second account's discovery has to run too, for the same reason.
+  final second = ref.watch(hasSecondaryAccountProvider)
+      ? ref.watch(messagesControllerForLineProvider(AccountLine.secondary))
+      : null;
+  final lines = ref.watch(messagingLinesProvider);
+  if (lines.isEmpty) {
     return (missedCalls: missedCalls, unreadMessages: 0);
   }
-  final unreadMessages = unreadMessageBadgeCount(
-    messaging.unreadByRemoteNumber,
-  );
+  final unreadMessages =
+      (lines.contains(AccountLine.primary)
+          ? unreadMessageBadgeCount(messaging.unreadByRemoteNumber)
+          : 0) +
+      (second != null && lines.contains(AccountLine.secondary)
+          ? unreadMessageBadgeCount(second.unreadByRemoteNumber)
+          : 0);
   return (missedCalls: missedCalls, unreadMessages: unreadMessages);
 });
 
@@ -60,9 +71,7 @@ class HomeShell extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appSession = ref.watch(sessionControllerProvider).value;
     final showDirectory = appSession?.directoryAccess != null;
-    final showCarrierMessaging = isCarrierMessagingEnabled(
-      appSession?.carrierMessaging,
-    );
+    final showCarrierMessaging = ref.watch(messagingLinesProvider).isNotEmpty;
     final navigationPaths = appNavigationPaths(
       showDirectory: showDirectory,
       showCarrierMessaging: showCarrierMessaging,

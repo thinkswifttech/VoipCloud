@@ -3,6 +3,7 @@ class SipRegistrationState {
     required this.status,
     required this.updatedAt,
     this.message,
+    this.reconnecting = false,
   });
 
   factory SipRegistrationState.initial() {
@@ -16,17 +17,23 @@ class SipRegistrationState {
   final DateTime updatedAt;
   final String? message;
 
+  /// True while registering again after having been connected (a network
+  /// change), as opposed to connecting for the first time.
+  final bool reconnecting;
+
   bool get isRegistered => status == SipRegistrationStatus.registered;
 
   SipRegistrationState copyWith({
     SipRegistrationStatus? status,
     DateTime? updatedAt,
     String? message,
+    bool? reconnecting,
   }) {
     return SipRegistrationState(
       status: status ?? this.status,
       updatedAt: updatedAt ?? this.updatedAt,
       message: message ?? this.message,
+      reconnecting: reconnecting ?? this.reconnecting,
     );
   }
 

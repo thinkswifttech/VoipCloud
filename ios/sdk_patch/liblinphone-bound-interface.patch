@@ -1,0 +1,22 @@
+diff --git a/src/nat/stun-client.cpp b/src/nat/stun-client.cpp
+index b6af9217d3..d6627f2fce 100644
+--- a/src/nat/stun-client.cpp
++++ b/src/nat/stun-client.cpp
+@@ -25,6 +25,8 @@
+ #include "c-wrapper/internal/c-tools.h"
+ #include "stun-client.h"
+ 
++#include <bctoolbox/vconnect.h>
++
+ // =============================================================================
+ 
+ using namespace std;
+@@ -165,7 +167,7 @@ void StunClient::updateMediaDescription(std::shared_ptr<SalMediaDescription> &md
+ 
+ ortp_socket_t StunClient::createStunSocket(int localPort) {
+ 	if (localPort < 0) return -1;
+-	ortp_socket_t sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
++	ortp_socket_t sock = bctbx_socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+ 	if (sock < 0) {
+ 		lError() << "Fail to create socket";
+ 		return -1;

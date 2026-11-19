@@ -4,16 +4,19 @@ import '../../../shared/utils/display_name.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
-import '../../../app/router/route_names.dart';
+import '../../calls/presentation/add_call_dialog.dart';
 import '../../../app/theme/app_theme.dart';
+import '../../../features/accounts/domain/account_line.dart';
+import '../../../features/accounts/presentation/accounts_controller.dart';
+import '../../../features/accounts/presentation/line_widgets.dart';
 import '../../../features/calls/presentation/caller_identity.dart';
 import '../../../features/contacts/domain/contact.dart';
 import '../../../features/contacts/domain/quick_dial_entry.dart';
 import '../../../features/contacts/presentation/contacts_providers.dart';
 import '../../../features/contacts/presentation/quick_dial_providers.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
+import '../../../features/dialer/presentation/dialer_line.dart';
 import '../../../features/directory/domain/directory_entry.dart';
 import '../../../features/directory/presentation/directory_providers.dart';
 import '../../../shared/icons/app_icons.dart';
@@ -62,6 +65,18 @@ class CallHistoryScreen extends ConsumerStatefulWidget {
 }
 
 class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
+  /// null shows both accounts; only used once a second account exists.
+  AccountLine? _filter;
+  final _searchController = TextEditingController();
+  String _query = '';
+  bool _showFilters = false;
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -80,6 +95,12 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
         ref.watch(quickDialProvider).value ?? const <QuickDialEntry>[];
     final directory =
         ref.watch(directoryProvider).value ?? const <DirectoryEntry>[];
+    final secondaryDirectory =
+        ref.watch(secondaryDirectoryProvider).value ?? const <DirectoryEntry>[];
+    final hasSecond = ref.watch(hasSecondaryAccountProvider);
+    final lines = ref.watch(accountLinesProvider);
+    // Calls from before there were two accounts were all on the primary one.
+    final activeFilter = hasSecond ? _filter : null;
 
     return PageContent(
       maxWidth: ResponsiveContentWidths.list,
@@ -105,9 +126,102 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
                 ),
               ),
             ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: (value) => setState(() => _query = value.trim()),
+                  textInputAction: TextInputAction.search,
+                  onTapOutside: (_) =>
+                      FocusManager.instance.primaryFocus?.unfocus(),
+                  decoration: InputDecoration(
+                    hintText: 'Search name or number',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _query.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _query = '');
+                            },
+                            icon: const Icon(AppIcons.close),
+                          ),
+                  ),
+                ),
+              ),
+              if (hasSecond) ...[
+                const SizedBox(width: 8),
+                IconButton.outlined(
+                  tooltip: _showFilters ? 'Hide filter' : 'Filter by account',
+                  onPressed: () => setState(() => _showFilters = !_showFilters),
+                  style: IconButton.styleFrom(
+                    foregroundColor: activeFilter == null && !_showFilters
+                        ? null
+                        : Theme.of(context).colorScheme.primary,
+                    side: BorderSide(
+                      color: activeFilter == null && !_showFilters
+                          ? Theme.of(context).colorScheme.outline
+                          : Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                  icon: const Icon(AppIcons.filter),
+                ),
+              ],
+            ],
+          ),
+          AnimatedSize(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: hasSecond && _showFilters
+                ? Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: LineChoiceRow(
+                        title: 'Show calls from',
+                        lines: lines,
+                        allLabel: 'All accounts',
+                        selected: activeFilter,
+                        onSelected: (line) => setState(() => _filter = line),
+                      ),
+                    ),
+                  )
+                : const SizedBox(width: double.infinity),
+          ),
+          const SizedBox(height: 8),
           Expanded(
             child: history.when(
-              data: (items) {
+              data: (allItems) {
+                final needle = _query.toLowerCase();
+                final items = allItems.where((item) {
+                  if (activeFilter != null &&
+                      (item.line ?? AccountLine.primary) != activeFilter) {
+                    return false;
+                  }
+                  if (needle.isEmpty) return true;
+                  final party = _partyForCaller(
+                    item,
+                    contacts,
+                    quickDial,
+                    directory,
+                    secondaryDirectory,
+                  );
+                  return party.title.toLowerCase().contains(needle) ||
+                      party.number.toLowerCase().contains(needle) ||
+                      item.remoteNumber.toLowerCase().contains(needle);
+                }).toList();
+                if (allItems.isNotEmpty && items.isEmpty) {
+                  return Center(
+                    child: Text(
+                      needle.isNotEmpty
+                          ? 'No matching calls.'
+                          : 'No calls on this account yet.',
+                    ),
+                  );
+                }
                 if (items.isEmpty) {
                   return Center(
                     child: ConstrainedBox(
@@ -143,12 +257,31 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
                           contacts,
                           quickDial,
                           directory,
+                          secondaryDirectory,
                         ),
+                        lineInfo: hasSecond
+                            ? lines
+                                  .where(
+                                    (l) =>
+                                        l.line ==
+                                        (item.line ?? AccountLine.primary),
+                                  )
+                                  .firstOrNull
+                            : null,
                         onDial: (destination) {
                           ref
                               .read(dialerControllerProvider.notifier)
                               .setDestination(destination);
-                          context.go(RoutePaths.dialer);
+                          // Return the call on the line it came in on.
+                          if (hasSecond) {
+                            ref
+                                .read(dialerLineHintProvider.notifier)
+                                .set(
+                                  destination,
+                                  item.line ?? AccountLine.primary,
+                                );
+                          }
+                          openDialerOrAddCall(context, ref);
                         },
                       );
                     },
@@ -257,11 +390,15 @@ class _CallHistoryTile extends StatelessWidget {
     required this.item,
     required this.party,
     required this.onDial,
+    this.lineInfo,
   });
 
   final CallHistoryItem item;
   final _HistoryParty party;
   final ValueChanged<String> onDial;
+
+  /// The account this call was on; shown only when two accounts exist.
+  final LineInfo? lineInfo;
 
   @override
   Widget build(BuildContext context) {
@@ -344,6 +481,10 @@ class _CallHistoryTile extends StatelessWidget {
                             ),
                           ),
                         ),
+                        if (lineInfo != null) ...[
+                          const SizedBox(width: 8),
+                          LineTag(info: lineInfo!),
+                        ],
                       ],
                     ),
                   ],
@@ -444,16 +585,20 @@ _HistoryParty _partyForCaller(
   List<Contact> contacts,
   List<QuickDialEntry> quickDial,
   List<DirectoryEntry> directory,
+  List<DirectoryEntry> secondaryDirectory,
 ) {
   // Resolve the stored SIP display name as well as the dialable identity. Queue
   // labels are commonly carried only as display text (for example
   // "SUP: Abdul"), including for callers not saved anywhere in the app.
+  // Quick Dial and the directory belong to the primary phone system, so a call
+  // on the second account is matched against device contacts only.
+  final onSecondLine = item.line == AccountLine.secondary;
   final identity = resolveRemoteIdentity(
     remoteUri: item.remoteNumber,
     remoteDisplayName: item.remoteDisplayName,
     contacts: contacts,
-    quickDial: quickDial,
-    directory: directory,
+    quickDial: onSecondLine ? const [] : quickDial,
+    directory: onSecondLine ? secondaryDirectory : directory,
   );
   return _HistoryParty(
     number: identity.number,

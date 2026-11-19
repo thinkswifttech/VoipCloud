@@ -30,6 +30,8 @@ class ReturnToCallBar extends ConsumerWidget {
       call: call,
       contacts: contacts,
       directory: directory,
+      secondaryDirectory:
+          ref.watch(secondaryDirectoryProvider).value ?? const [],
     );
     return _ReturnToCallBarBody(
       call: call!,

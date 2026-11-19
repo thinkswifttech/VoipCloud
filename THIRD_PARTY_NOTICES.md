@@ -16,7 +16,7 @@ SDK references in this source tree:
 - Android no-video SDK: `5.4.124`
 - macOS Swift package: `5.5.16`
 - Windows SDK documentation: `5.5.16`
-- iOS Swift package: revision `1084b9f1051c94d1997d93fc7f9c89e7ef89e9ef` from the `novideo/stable` line
+- iOS: linphone-sdk `5.5.19` (commit `8e1ec723a2091854e3f6c19790fd64cbb7667539`) with VoIPCloud's modifications (five patches in `ios/sdk_patch`, published as tag `5.5.19-voipcloud1` of <https://github.com/thinkswifttech/linphone-sdk>; the changes are listed in `VOIPCLOUD-CHANGES.md` there)
 
 The Linphone SDK bundles additional open-source components with their own
 licenses and notice requirements. Belledonne publishes the component inventory

@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 
 import 'app_environment.dart';
@@ -8,6 +10,39 @@ const bool blfFeedEnabled = bool.fromEnvironment(
   'BLF_FEED_ENABLED',
   defaultValue: false,
 );
+
+/// Build-time gate for the mobile calling-network preference (Auto, Wi-Fi,
+/// mobile data). Off until the routing has been verified on real devices.
+const bool callingNetworkEnabled = bool.fromEnvironment(
+  'CALLING_NETWORK_ENABLED',
+  defaultValue: false,
+);
+
+/// iPhone needs the patched Linphone SDK (ios/sdk_patch). Only a build made
+/// with it passes this flag; with the stock SDK the iPhone has no such setting.
+const bool callingNetworkIosEnabled = bool.fromEnvironment(
+  'CALLING_NETWORK_IOS_ENABLED',
+  defaultValue: false,
+);
+
+/// Android always; iPhone only in a patched-SDK build; never on desktop, even
+/// when the build flag is on.
+final bool callingNetworkAvailable =
+    callingNetworkEnabled &&
+    (Platform.isAndroid || (Platform.isIOS && callingNetworkIosEnabled));
+
+/// Build-time gate for a second SIP account (see
+/// `Project Documents/Softphone_App_Multi_Account_Plan.md`). Off in store
+/// builds until accepted.
+const bool multiAccountEnabled = bool.fromEnvironment(
+  'MULTI_ACCOUNT_ENABLED',
+  defaultValue: false,
+);
+
+/// The second account runs on Android and iPhone; desktop has no native
+/// support for it yet, even when the build flag is on.
+final bool multiAccountAvailable =
+    multiAccountEnabled && (Platform.isAndroid || Platform.isIOS);
 
 /// Optional origin of the BLF service; defaults to the directory origin.
 const String blfFeedBaseUrl = String.fromEnvironment('BLF_FEED_BASE_URL');

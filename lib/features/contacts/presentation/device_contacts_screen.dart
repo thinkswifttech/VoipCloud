@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../app/router/route_names.dart';
+import '../../calls/presentation/add_call_dialog.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
 import '../../../features/messages/domain/messaging_platform.dart';
@@ -268,7 +269,7 @@ class _DeviceContactsScreenState extends ConsumerState<DeviceContactsScreen> {
     ref.read(dialerControllerProvider.notifier)
       ..clear()
       ..append(destination);
-    context.go(RoutePaths.dialer);
+    openDialerOrAddCall(context, ref);
   }
 
   Future<void> _messageContact(Contact contact) async {

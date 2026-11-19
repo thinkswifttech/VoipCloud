@@ -7,6 +7,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/logging/app_logger.dart';
 import '../../features/calls/domain/call_direction.dart';
+import '../../features/calls/presentation/call_notice_provider.dart';
+import '../../features/calls/domain/calling_network_loss.dart';
 import '../../features/calls/domain/call_status.dart';
 import '../../features/calls/domain/voip_call.dart';
 import '../../features/calls/presentation/call_session_providers.dart';
@@ -120,6 +122,12 @@ class CallRouteListener extends ConsumerWidget {
             );
             return;
           }
+          final lostWhileAway = call.networkLossPath;
+          if (lostWhileAway != null && _appIsInBackground()) {
+            ref
+                .read(pendingCallNoticeProvider.notifier)
+                .set(callingNetworkLossMessage(lostWhileAway));
+          }
           if (_appIsInBackground()) {
             // A call that ended while the app was away (answered on another
             // device, picked up by a queue colleague) must not queue a
@@ -133,11 +141,15 @@ class CallRouteListener extends ConsumerWidget {
             }
             return;
           }
+          final lostPath = call.networkLossPath;
           final target = RoutePaths.callEndedPath(
-            status: call.answeredElsewhere
+            status: lostPath != null
+                ? 'Call disconnected'
+                : call.answeredElsewhere
                 ? 'Answered elsewhere'
                 : _statusLabel(call.status),
             caller: call.remoteDisplayName ?? call.remoteUri,
+            note: lostPath == null ? null : callingNetworkLossMessage(lostPath),
           );
           AppLogger.info(
             'Call route decision => call finished id=${call.id}, current=$path, target=$target',

@@ -12,10 +12,10 @@ The current mobile baseline is:
 - JDK 17 and Android SDK 36
 - Xcode with an iOS SDK supported by the selected Flutter release
 - Liblinphone Android no-video SDK 5.4.124
-- Liblinphone iOS Swift package from the `novideo/stable` line
+- Liblinphone iOS SDK 5.5.19 built from source with the bound-interface patches in `ios/sdk_patch` (source also published at <https://github.com/thinkswifttech/linphone-sdk>, tag `5.5.19-voipcloud1`)
 
-A source release must record the exact Flutter version and the exact resolved
-iOS Swift-package revision used for its store binary.
+A source release must record the exact Flutter version and the exact iOS SDK
+source revision used for its store binary.
 
 ## Configure a development build
 
@@ -60,15 +60,21 @@ with the same `--dart-define` values required by the target deployment.
 
 ## Build iOS
 
-Use an Apple signing identity and provisioning profile you control. Resolve the
-Swift packages in Xcode, commit the generated `Package.resolved`, and verify
-that it records the exact Liblinphone revision used by the build. Then run
-`flutter build ipa --release` with the target deployment's
-`--dart-define` values.
+Use an Apple signing identity and provisioning profile you control.
 
-The current iOS project follows a moving `novideo/stable` package branch.
-Do not publish an iOS binary until its resolved revision is committed and
-identified in the matching source release.
+1. Build the patched Liblinphone SDK as described in `ios/sdk_patch/README.md`
+   (`build_patched_sdk.sh fetch`, `verify`, `patched`, `package`). The Xcode project
+   references the result as a local Swift package; every framework in its
+   `Package.swift` is a local `binaryTarget`. Record the SHA-256 of the framework
+   zips (see `ios/sdk_patch/SHIPPED-SDK-CHECKSUMS.txt`).
+2. Resolve the remaining Swift packages in Xcode and commit the generated
+   `Package.resolved`.
+3. Run `flutter build ipa --release` with the target deployment's
+   `--dart-define` values. The iPhone "Calling network" setting appears only when
+   both `CALLING_NETWORK_ENABLED` and `CALLING_NETWORK_IOS_ENABLED` are true.
+
+Do not publish an iOS binary until the SDK source revision (the
+`5.5.19-voipcloud1` tag or a later one) is identified in the matching source release.
 
 ## Credentials and services
 

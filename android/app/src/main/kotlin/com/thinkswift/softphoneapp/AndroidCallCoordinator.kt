@@ -99,6 +99,8 @@ internal object AndroidCallCoordinator {
         var control: CallControlScope? = null,
         var rawEndpoints: List<CallEndpointCompat> = emptyList(),
         var pendingAnswer: Boolean = false,
+        /** Set before the SIP call is ended so the SDK's own end callback reports this reason. */
+        var forcedTerminalReason: String? = null,
         var pendingReject: Boolean = false,
         var pendingSystemActive: Boolean? = null,
         var sipMatched: Boolean = false,
@@ -274,6 +276,10 @@ internal object AndroidCallCoordinator {
         val target = findSession(callId) ?: return false
         val matches = target.snapshot.sessionId == callId || target.snapshot.sipCallId == callId
         if (!matches || target.snapshot.isTerminal) return false
+        // Once the SIP INVITE has arrived, SIP (including its answered-elsewhere
+        // reason) is authoritative; the push only clears a placeholder whose
+        // INVITE was cancelled before it reached this device.
+        if (target.sipMatched) return false
         finish(context, DisconnectCause.REMOTE, "remote_cancel_push", State.ENDED, target)
         Log.i(TAG, "Applied remote cancel push correlation=${correlation(callId)}")
         return true
@@ -673,7 +679,9 @@ internal object AndroidCallCoordinator {
                     // terminal reason sent to Flutter, but use one of the four
                     // disconnect causes accepted by CallControl.
                     DisconnectCause.REMOTE,
-                    if (answeredElsewhere) {
+                    if (target.forcedTerminalReason != null) {
+                        target.forcedTerminalReason!!
+                    } else if (answeredElsewhere) {
                         "Call completed elsewhere"
                     } else if (state == State.ENDED) {
                         "sip_ended"
@@ -752,10 +760,18 @@ internal object AndroidCallCoordinator {
         finish(context, DisconnectCause.REJECTED, "local_reject", State.ENDED, target)
     }
 
-    fun endFromApp(context: Context, callId: String? = null) {
+    /**
+     * Ends the call from the app. [terminalReason] is what the Flutter UI sees
+     * as the end reason; the network manager passes `calling_network_lost:<path>`
+     * so the user is told why the call ended.
+     */
+    fun endFromApp(context: Context, callId: String? = null, terminalReason: String = "local_end") {
         val target = findSession(callId) ?: preferredSession() ?: return
+        // Ending the SIP call can report "ended" synchronously, which would
+        // finish the session first; record the reason before that happens.
+        if (terminalReason != "local_end") target.forcedTerminalReason = terminalReason
         LinphoneBridgeAccessor.end(context, target.snapshot.sipCallId)
-        finish(context, DisconnectCause.LOCAL, "local_end", State.ENDED, target)
+        finish(context, DisconnectCause.LOCAL, terminalReason, State.ENDED, target)
     }
 
     fun setMuted(context: Context, muted: Boolean) {

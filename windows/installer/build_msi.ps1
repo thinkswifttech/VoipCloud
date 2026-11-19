@@ -300,6 +300,40 @@ try {
     $msi = Get-Item -LiteralPath $releaseMsiPath
   }
 
+  # A package without these cannot start calls on a clean PC ("calling engine
+  # could not be loaded"). Fail here instead of shipping it.
+  $requiredFiles = @(
+    "liblinphone.dll", "bctoolbox.dll", "belle-sip.dll", "mediastreamer2.dll",
+    "ortp.dll", "lime.dll", "belr.dll", "belcard.dll", "xml2.dll",
+    "xerces-c.dll", "zlib1.dll", "soci_core_4_0.dll", "sqlite3.dll",
+    "ZXing.dll", "hidapi.dll", "jsoncpp.dll", "turbojpeg.dll",
+    "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"
+  )
+  $installer = New-Object -ComObject WindowsInstaller.Installer
+  $database = $installer.GetType().InvokeMember(
+    "OpenDatabase", "InvokeMethod", $null, $installer, @($msi.FullName, 0))
+  $view = $database.GetType().InvokeMember(
+    "OpenView", "InvokeMethod", $null, $database,
+    @("SELECT FileName FROM File"))
+  $view.GetType().InvokeMember("Execute", "InvokeMethod", $null, $view, $null) |
+    Out-Null
+  $packaged = @()
+  while ($true) {
+    $record = $view.GetType().InvokeMember(
+      "Fetch", "InvokeMethod", $null, $view, $null)
+    if ($null -eq $record) { break }
+    $name = $record.GetType().InvokeMember(
+      "StringData", "GetProperty", $null, $record, @(1))
+    $packaged += (($name -split '\|')[-1]).ToLowerInvariant()
+  }
+  $view.GetType().InvokeMember("Close", "InvokeMethod", $null, $view, $null) |
+    Out-Null
+  $absent = $requiredFiles | Where-Object { $packaged -notcontains $_.ToLowerInvariant() }
+  if ($absent) {
+    throw "The MSI is missing required files: $($absent -join ', '). Check windows/third_party/linphone and the Visual C++ runtime, then rebuild."
+  }
+  Write-Host "MSI contains all $($requiredFiles.Count) required calling-engine and runtime files."
+
   if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
     if ([string]::IsNullOrWhiteSpace($signTool)) {
       throw "signtool is required when a signing thumbprint is supplied."

@@ -5,6 +5,7 @@ import '../../../core/logging/app_logger.dart';
 import '../../../core/storage/secure_storage_service.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
+import '../../accounts/domain/account_line.dart';
 import '../domain/call_history_item.dart';
 import '../domain/call_history_reconciliation.dart';
 import '../domain/call_history_repository.dart';
@@ -72,6 +73,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) {
     final operation = _writeSerial.then(
       (_) => _syncCallLog(
@@ -84,6 +86,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
         endedAt: endedAt,
         sipCallId: sipCallId,
         serverFinalized: serverFinalized,
+        line: line,
       ),
     );
     _writeSerial = operation.then<void>((_) {}, onError: (_, _) {});
@@ -100,6 +103,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) async {
     final id = sipCallId?.trim().isNotEmpty == true
         ? sipCallId!.trim()
@@ -114,6 +118,7 @@ class LocalCallHistoryRepository implements CallHistoryRepository {
       startedAt: startedAt,
       endedAt: endedAt,
       serverFinalized: serverFinalized,
+      line: line,
     );
     final current = await _safeCallHistoryForSync();
     final deduped = [

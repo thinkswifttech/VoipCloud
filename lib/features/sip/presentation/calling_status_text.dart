@@ -6,10 +6,14 @@ class CallingStatusText {
   const CallingStatusText._();
 
   /// Short label, e.g. for a status pill.
-  static String label(SipRegistrationStatus status) {
+  static String label(
+    SipRegistrationStatus status, {
+    bool reconnecting = false,
+  }) {
     return switch (status) {
       SipRegistrationStatus.registered => 'Connected',
-      SipRegistrationStatus.registering => 'Connecting',
+      SipRegistrationStatus.registering =>
+        reconnecting ? 'Reconnecting' : 'Connecting',
       SipRegistrationStatus.configuring => 'Setting up',
       SipRegistrationStatus.failed => 'Not connected',
       SipRegistrationStatus.unregistered => 'Not connected',
@@ -18,10 +22,14 @@ class CallingStatusText {
   }
 
   /// Headline for the calling status row.
-  static String title(SipRegistrationStatus status) {
+  static String title(
+    SipRegistrationStatus status, {
+    bool reconnecting = false,
+  }) {
     return switch (status) {
       SipRegistrationStatus.registered => 'Calling is ready',
-      SipRegistrationStatus.registering => 'Connecting to calling',
+      SipRegistrationStatus.registering =>
+        reconnecting ? 'Reconnecting to calling' : 'Connecting to calling',
       SipRegistrationStatus.configuring => 'Setting up calling',
       SipRegistrationStatus.failed => "Calling isn't connected",
       SipRegistrationStatus.unregistered => "Calling isn't connected",
@@ -30,10 +38,16 @@ class CallingStatusText {
   }
 
   /// One friendly sentence about what is happening and what to do.
-  static String description(SipRegistrationStatus status) {
+  static String description(
+    SipRegistrationStatus status, {
+    bool reconnecting = false,
+  }) {
     return switch (status) {
       SipRegistrationStatus.registered => 'You can make and receive calls.',
-      SipRegistrationStatus.registering => 'This usually takes a few seconds.',
+      SipRegistrationStatus.registering =>
+        reconnecting
+            ? 'Your connection changed. This usually takes a few seconds.'
+            : 'This usually takes a few seconds.',
       SipRegistrationStatus.configuring => 'Almost ready.',
       SipRegistrationStatus.failed =>
         "Check your internet connection. We'll keep trying. If it doesn't "

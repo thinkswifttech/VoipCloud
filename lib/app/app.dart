@@ -7,8 +7,10 @@ import '../core/updates/desktop_update.dart';
 import '../features/settings/presentation/settings_controller.dart';
 import '../shared/platform/windows_taskbar_pin_offer.dart';
 import 'router/app_router.dart';
+import 'router/call_notice_listener.dart';
 import 'router/call_route_listener.dart';
 import 'router/external_communication_intent_listener.dart';
+import 'router/share_intent_listener.dart';
 import 'router/messaging_notification_listener.dart';
 import 'sip_lifecycle_listener.dart';
 import 'theme/app_theme.dart';
@@ -59,9 +61,14 @@ class _SoftphoneAppState extends ConsumerState<SoftphoneApp> {
           child: SipLifecycleListener(
             child: ExternalCommunicationIntentListener(
               router: router,
-              child: CallRouteListener(
+              child: ShareIntentListener(
                 router: router,
-                child: child ?? const SizedBox.shrink(),
+                child: CallNoticeListener(
+                  child: CallRouteListener(
+                    router: router,
+                    child: child ?? const SizedBox.shrink(),
+                  ),
+                ),
               ),
             ),
           ),

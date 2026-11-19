@@ -1,3 +1,4 @@
+import '../../accounts/domain/account_line.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 
@@ -8,6 +9,8 @@ enum CallHistoryDisposition {
   missed,
   declined,
 }
+
+const _maxRingDuration = Duration(minutes: 10);
 
 class CallHistoryItem {
   const CallHistoryItem({
@@ -20,6 +23,7 @@ class CallHistoryItem {
     this.remoteDisplayName,
     this.endedAt,
     this.serverFinalized = false,
+    this.line,
   });
 
   final String id;
@@ -31,6 +35,10 @@ class CallHistoryItem {
   final DateTime? endedAt;
   final bool serverFinalized;
   final CallHistoryDisposition? disposition;
+
+  /// Which of the two accounts the call was on; null for calls from before a
+  /// second account existed (those were all on the primary account).
+  final AccountLine? line;
 
   CallHistoryDisposition get effectiveDisposition {
     final saved = disposition;
@@ -52,7 +60,15 @@ class CallHistoryItem {
     if (ended == null) {
       return null;
     }
-    return ended.difference(startedAt);
+    final length = ended.difference(startedAt);
+    // Older builds could stamp a replay time as the end of an unanswered call,
+    // giving hours of "ringing". No ring lasts this long, so show it as unknown.
+    if (length > _maxRingDuration &&
+        effectiveDisposition != CallHistoryDisposition.answered &&
+        effectiveDisposition != CallHistoryDisposition.outgoing) {
+      return null;
+    }
+    return length;
   }
 
   Map<String, dynamic> toJson() {
@@ -66,6 +82,7 @@ class CallHistoryItem {
       'endedAt': endedAt?.toIso8601String(),
       'disposition': disposition?.name,
       'serverFinalized': serverFinalized,
+      'line': line?.name,
     };
   }
 
@@ -84,6 +101,7 @@ class CallHistoryItem {
       endedAt: DateTime.tryParse(_string(json['endedAt'])),
       disposition: _callDisposition(json['disposition']),
       serverFinalized: json['serverFinalized'] == true,
+      line: AccountLine.tryParse(json['line']),
     );
   }
 }

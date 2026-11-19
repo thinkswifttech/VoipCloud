@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/errors/failure.dart';
 import '../../../core/config/config_providers.dart';
 import '../../../core/network/dio_provider.dart';
+import '../../accounts/presentation/accounts_controller.dart';
 import '../../session/presentation/session_controller.dart';
 import '../data/provisioning_repository.dart';
 import '../domain/provisioning_activation_input.dart';
@@ -30,7 +31,11 @@ class ProvisioningController extends Notifier<ProvisioningState> {
   @override
   ProvisioningState build() => const ProvisioningState();
 
-  Future<bool> activate(String input) async {
+  /// Activates [input] as the second account. The primary session is left
+  /// alone and no terms screen is shown (they were accepted for this app).
+  Future<bool> activateSecond(String input) => activate(input, second: true);
+
+  Future<bool> activate(String input, {bool second = false}) async {
     final provisioningInput = parseProvisioningInput(input);
     final problem = provisioningInputProblem(input);
     if (provisioningInput == null || problem != null) {
@@ -52,9 +57,15 @@ class ProvisioningController extends Notifier<ProvisioningState> {
       final session = await ref
           .read(provisioningRepositoryProvider)
           .activate(input: provisioningInput, device: device);
-      await ref
-          .read(sessionControllerProvider.notifier)
-          .stageProvisionedSession(session);
+      if (second) {
+        await ref
+            .read(accountsControllerProvider.notifier)
+            .addSecondary(session);
+      } else {
+        await ref
+            .read(sessionControllerProvider.notifier)
+            .stageProvisionedSession(session);
+      }
       return session;
     });
 

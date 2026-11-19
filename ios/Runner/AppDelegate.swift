@@ -176,6 +176,39 @@ import linphonesw
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
+  override func application(
+    _ application: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+  ) {
+    // The ordinary notification token (not the VoIP one). It is published in the SIP registration so
+    // the server can send a silent push shortly before the registration expires.
+    if IOSNotificationToken.store(deviceToken) {
+      NotificationCenter.default.post(name: .softphoneApnsTokenUpdated, object: nil)
+    }
+    super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+    fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+  ) {
+    guard IOSNotificationToken.isRegistrationRefresh(userInfo) else {
+      super.application(
+        application,
+        didReceiveRemoteNotification: userInfo,
+        fetchCompletionHandler: completionHandler
+      )
+      return
+    }
+    // The server found this phone's registration close to expiring. Registering again moves the
+    // expiry a full lifetime ahead; a phone that is not renewed can no longer be woken for calls.
+    NSLog("Softphone/APNs registration refresh requested by the server")
+    LinphoneFlutterBridge.wakeFromPushPayload(userInfo)
+    // wakeFromPush sends the REGISTER; give it a few seconds before telling iOS we are done.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 8) { completionHandler(.newData) }
+  }
+
   override func applicationWillResignActive(_ application: UIApplication) {
     LinphoneFlutterBridge.shared?.handleWillResignActive()
     super.applicationWillResignActive(application)
@@ -207,6 +240,7 @@ import linphonesw
     downloadsFileBridge = DownloadsFileBridge(binaryMessenger: messenger)
     externalCommunicationBridge = ExternalCommunicationIntentBridge.shared
     externalCommunicationBridge?.attach(binaryMessenger: messenger)
+    ShareIntentBridge.shared.attach(binaryMessenger: messenger)
     engineBridge.pluginRegistry
       .registrar(forPlugin: "VoipCloudAudioRoutePicker")?
       .register(
@@ -599,6 +633,7 @@ final class LinphoneFlutterBridge {
   private let messageEventsName = "voipcloud/linphone/messages"
   private let sipLogEventsName = "voipcloud/linphone/logs"
   private let presenceEventsName = "voipcloud/linphone/presence"
+  private let callingNetworkEventsName = "voipcloud/linphone/calling_network"
 
   private let controller: LinphoneController
 
@@ -670,6 +705,10 @@ final class LinphoneFlutterBridge {
       name: presenceEventsName,
       binaryMessenger: binaryMessenger
     ).setStreamHandler(Self.presenceEvents)
+    FlutterEventChannel(
+      name: callingNetworkEventsName,
+      binaryMessenger: binaryMessenger
+    ).setStreamHandler(callingNetworkEventsHandler)
 
     Self.sharedInstance = self
   }
@@ -1146,7 +1185,10 @@ private enum SipCredentialStore {
     return generated
   }
 
-  static func save(_ args: [String: Any]) {
+  // The second account lives in its own slot so the primary one is untouched.
+  private static let secondaryPayloadKey = "account_payload_secondary"
+
+  private static func savePayload(_ args: [String: Any], forKey key: String) {
     var payload: [String: String] = [:]
     for (key, value) in args {
       if let string = value as? String {
@@ -1158,11 +1200,11 @@ private enum SipCredentialStore {
     else {
       return
     }
-    UserDefaults.standard.set(data, forKey: payloadKey)
+    UserDefaults.standard.set(data, forKey: key)
   }
 
-  static func load() -> [String: Any]? {
-    guard let data = UserDefaults.standard.data(forKey: payloadKey),
+  private static func loadPayload(forKey key: String) -> [String: Any]? {
+    guard let data = UserDefaults.standard.data(forKey: key),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           !json.isEmpty
     else {
@@ -1171,8 +1213,29 @@ private enum SipCredentialStore {
     return json
   }
 
+  static func save(_ args: [String: Any]) {
+    savePayload(args, forKey: payloadKey)
+  }
+
+  static func load() -> [String: Any]? {
+    loadPayload(forKey: payloadKey)
+  }
+
+  static func saveSecondary(_ args: [String: Any]) {
+    savePayload(args, forKey: secondaryPayloadKey)
+  }
+
+  static func loadSecondary() -> [String: Any]? {
+    loadPayload(forKey: secondaryPayloadKey)
+  }
+
+  static func clearSecondary() {
+    UserDefaults.standard.removeObject(forKey: secondaryPayloadKey)
+  }
+
   static func clear() {
     UserDefaults.standard.removeObject(forKey: payloadKey)
+    UserDefaults.standard.removeObject(forKey: secondaryPayloadKey)
     UserDefaults.standard.removeObject(forKey: dndEnabledKey)
   }
 
@@ -1185,23 +1248,26 @@ private enum SipCredentialStore {
   }
 
   static func mergePushToken(_ payload: [String: String]) {
-    guard var saved = load() else { return }
-    if let token = payload["token"], !token.isEmpty {
-      saved["pushToken"] = token
+    // Both accounts register with the same device push token.
+    for key in [payloadKey, secondaryPayloadKey] {
+      guard var saved = loadPayload(forKey: key) else { continue }
+      if let token = payload["token"], !token.isEmpty {
+        saved["pushToken"] = token
+      }
+      if let provider = payload["provider"], !provider.isEmpty {
+        saved["pushProvider"] = provider
+      }
+      if let param = payload["param"], !param.isEmpty {
+        saved["pushParam"] = param
+      }
+      if let bundleId = payload["bundleId"], !bundleId.isEmpty {
+        saved["pushBundleId"] = bundleId
+      }
+      if let teamId = payload["teamId"], !teamId.isEmpty {
+        saved["pushTeamId"] = teamId
+      }
+      savePayload(saved, forKey: key)
     }
-    if let provider = payload["provider"], !provider.isEmpty {
-      saved["pushProvider"] = provider
-    }
-    if let param = payload["param"], !param.isEmpty {
-      saved["pushParam"] = param
-    }
-    if let bundleId = payload["bundleId"], !bundleId.isEmpty {
-      saved["pushBundleId"] = bundleId
-    }
-    if let teamId = payload["teamId"], !teamId.isEmpty {
-      saved["pushTeamId"] = teamId
-    }
-    save(saved)
   }
 }
 
@@ -1244,6 +1310,9 @@ private final class IOSCallHistoryOutbox {
     let eventId = UUID().uuidString.lowercased()
     event["historyEventId"] = eventId
     event["historyReplay"] = false
+    // Dart ends a call at this time when there is no endedAt; a replay hours
+    // later must not use the replay time.
+    event["historyPersistedAtEpochMs"] = Int64(Date().timeIntervalSince1970 * 1000)
 
     var records = loadLocked()
     let callId = event["id"] as? String
@@ -3035,6 +3104,9 @@ private final class SoftphoneCallKitController: NSObject, CXProviderDelegate {
   }
 }
 
+/// Pushes the calling-network routing status to Flutter (once on listen, then on every change).
+private let callingNetworkEventsHandler = LinphoneEventStreamHandler(name: "calling_network")
+
 private final class NativeLinphoneController: LinphoneController {
   private static let mobileRegistrationExpiresSeconds = 604_800
 
@@ -3048,7 +3120,100 @@ private final class NativeLinphoneController: LinphoneController {
   private var waitingAlertTimer: Timer?
   private var waitingPreviewPlayer: AVAudioPlayer?
   private var account: Account?
+  // The second line is tagged with this idkey; `account` always stays primary.
+  private static let secondaryAccountId = "secondary"
   private var isReplacingAccount = false
+
+  // MARK: Calling network (Auto / Wi-Fi / Mobile data) - DRAFT, never compiled.
+  // Needs the patched SDK (ios/sdk_patch); with the stock SDK the binder reports "unsupported" and
+  // routing stays with the system. The manager runs on its own queue, so its hooks read a small cache
+  // that is updated on the main thread (never block the manager queue on the main thread).
+  private static let pinnedDnsServers = ["1.1.1.1", "8.8.8.8"]
+  private let callingNetworkLock = NSLock()
+  private var cachedLiveCall = false
+  private var cachedRegistered = false
+  private var cachedEndpoint: (host: String, port: UInt16)?
+  private var callingNetworkEndReasons: [String: String] = [:]
+
+  private lazy var callingNetwork = CallingNetworkManager(
+    hooks: CallingNetworkManager.Hooks(
+      endpoint: { [weak self] in self?.callingNetworkSnapshot().endpoint },
+      hasLiveCall: { [weak self] in self?.callingNetworkSnapshot().live ?? false },
+      isRegistered: { [weak self] in self?.callingNetworkSnapshot().registered ?? false },
+      setSdkOffline: { [weak self] offline in
+        DispatchQueue.main.async { self?.core?.networkReachable = !offline }
+      },
+      endCalls: { [weak self] path, reason in
+        DispatchQueue.main.async { self?.endCallsForNetworkLoss(path: path, reason: reason) }
+      },
+      onStatusChanged: { [weak self] in
+        DispatchQueue.main.async { self?.emitCallingNetworkStatus() }
+      }
+    ),
+    binder: BoundInterfaceBinder { [weak self] pinned in
+      // While sockets are pinned, resolve names through the SDK's own resolver (Apple's DNS service
+      // would go out on the default network and ignore the pin).
+      DispatchQueue.main.async { self?.core?.dnsServersApp = pinned ? Self.pinnedDnsServers : [] }
+    }
+  )
+
+  private func callingNetworkSnapshot() -> (endpoint: (host: String, port: UInt16)?, live: Bool, registered: Bool) {
+    callingNetworkLock.lock()
+    defer { callingNetworkLock.unlock() }
+    return (cachedEndpoint, cachedLiveCall, cachedRegistered)
+  }
+
+  private func updateCallingNetworkCache(
+    endpoint: (host: String, port: UInt16)? = nil,
+    live: Bool? = nil,
+    registered: Bool? = nil
+  ) {
+    callingNetworkLock.lock()
+    if let endpoint { cachedEndpoint = endpoint }
+    if let live { cachedLiveCall = live }
+    if let registered { cachedRegistered = registered }
+    callingNetworkLock.unlock()
+  }
+
+  private func emitCallingNetworkStatus() {
+    callingNetworkEventsHandler.send(callingNetwork.status().mapValues { Optional($0) })
+  }
+
+  /// The bound network is gone: end every live call with a reason Flutter turns into the
+  /// "Call disconnected" screen (callingNetworkLossPathFrom).
+  private func endCallsForNetworkLoss(path: CallingNetworkPath, reason: String) {
+    for liveCall in Array(calls.values) where isLiveCall(liveCall) {
+      callingNetworkEndReasons[callId(liveCall)] = reason
+      if liveCall.dir == .Incoming && (liveCall.state == .IncomingReceived || liveCall.state == .PushIncomingReceived) {
+        try? liveCall.decline(reason: .Busy)
+      } else if !SoftphoneCallKitController.shared.requestEndFromApp(call: liveCall, completion: { _ in }) {
+        try? liveCall.terminate()
+      }
+    }
+  }
+
+  private func isSecondary(_ candidate: Account) -> Bool {
+    candidate.params?.idkey == Self.secondaryAccountId
+  }
+
+  private func secondaryAccount() -> Account? {
+    core?.accountList.first(where: { isSecondary($0) })
+  }
+
+  private func primaryFromList() -> Account? {
+    if let current = core?.defaultAccount, !isSecondary(current) { return current }
+    return core?.accountList.first(where: { !isSecondary($0) })
+  }
+
+  /// Which line a call is on: the second one when it used that identity.
+  private func accountIdForCall(_ call: Call) -> String {
+    guard let second = secondaryAccount()?.params?.identityAddress?.asStringUriOnly()
+      .lowercased() else { return "primary" }
+    let local = call.callLog?.localAddress
+      ?? (call.dir == .Incoming ? call.callLog?.toAddress : call.callLog?.fromAddress)
+    return local?.asStringUriOnly().lowercased() == second
+      ? Self.secondaryAccountId : "primary"
+  }
   private var explicitUnregisterRequested = false
   private var delegate: CoreDelegateStub?
   private var calls: [String: Call] = [:]
@@ -3058,7 +3223,11 @@ private final class NativeLinphoneController: LinphoneController {
   private var desiredPresenceGeneration = -1
   private var presenceSubscriptionIndex = Set<String>()
 
+  // DND watchers that were sent from the second line (all others are primary).
+  private var secondaryPresenceKeys = Set<ObjectIdentifier>()
+
   private func removePresenceSubscription(_ key: ObjectIdentifier) -> (Event, String, String, String, Int)? {
+    secondaryPresenceKeys.remove(key)
     guard let value = presenceSubscriptions.removeValue(forKey: key) else { return nil }
     presenceSubscriptionIndex.remove("\(value.1)|\(value.2)|\(value.3)")
     return value
@@ -3070,6 +3239,7 @@ private final class NativeLinphoneController: LinphoneController {
   private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
   private var isAppInBackground = false
   private var pushTokenObserver: NSObjectProtocol?
+  private var apnsTokenObserver: NSObjectProtocol?
   private var audioSessionRouteObserver: NSObjectProtocol?
   private var audioRouteCallId: String?
   private var requestedAudioRoute = "earpiece"
@@ -3107,6 +3277,14 @@ private final class NativeLinphoneController: LinphoneController {
         payload: notification.userInfo ?? [:]
       )
     }
+    apnsTokenObserver = NotificationCenter.default.addObserver(
+      forName: .softphoneApnsTokenUpdated,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      // Add the new notification token to this phone's registration contact.
+      self?.publishDeviceCallPolicy()
+    }
     audioSessionRouteObserver = NotificationCenter.default.addObserver(
       forName: AVAudioSession.routeChangeNotification,
       object: nil,
@@ -3128,6 +3306,9 @@ private final class NativeLinphoneController: LinphoneController {
   deinit {
     if let pushTokenObserver {
       NotificationCenter.default.removeObserver(pushTokenObserver)
+    }
+    if let apnsTokenObserver {
+      NotificationCenter.default.removeObserver(apnsTokenObserver)
     }
     if let audioSessionRouteObserver {
       NotificationCenter.default.removeObserver(audioSessionRouteObserver)
@@ -3174,6 +3355,13 @@ private final class NativeLinphoneController: LinphoneController {
     if let currentAccount = account ?? core?.defaultAccount {
       emitRegistration(state: currentAccount.state, message: "SIP account state synchronized")
     }
+    if let second = secondaryAccount() {
+      emitRegistration(
+        state: second.state,
+        message: "SIP account state synchronized",
+        accountId: Self.secondaryAccountId
+      )
+    }
     syncCurrentCall(reason: "enter-foreground")
   }
 
@@ -3207,12 +3395,39 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   private func refreshRegistration(reason: String) {
+    secondaryAccount()?.refreshRegister()
     guard let currentAccount = account ?? core?.defaultAccount else { return }
     currentAccount.refreshRegister()
     NSLog("Softphone/Linphone refreshed registration reason=%@", reason)
   }
 
+  /// The second line shares the device push token with the primary account.
+  private func refreshSecondaryAfterPushTokenUpdate(payload: [AnyHashable: Any]) {
+    guard let second = secondaryAccount(),
+          let params = second.params,
+          let token = (payload["token"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty,
+          let provider = (payload["provider"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !provider.isEmpty,
+          let pushParameters = pushContactUriParameters(
+            provider: provider,
+            token: token,
+            param: (payload["param"] as? String)?
+              .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+          )
+    else { return }
+    let contactParameters = deviceDndContactParameters(pushParameters)
+    guard params.contactUriParameters != contactParameters,
+          let updatedParams = params.clone() else { return }
+    updatedParams.pushNotificationAllowed = false
+    updatedParams.remotePushNotificationAllowed = false
+    updatedParams.contactUriParameters = contactParameters
+    second.params = updatedParams
+    second.refreshRegister()
+  }
+
   private func refreshRegistrationAfterPushTokenUpdate(payload: [AnyHashable: Any]) {
+    refreshSecondaryAfterPushTokenUpdate(payload: payload)
     guard let currentCore = core,
           let currentAccount = account ?? currentCore.defaultAccount,
           let params = currentAccount.params
@@ -3310,7 +3525,10 @@ private final class NativeLinphoneController: LinphoneController {
         result(nil)
       case "register":
         restoreSavedAccountIfNeeded()
-        account = account ?? core?.defaultAccount
+        account = account ?? primaryFromList()
+        if let second = secondaryAccount(), second.state != .Progress {
+          second.refreshRegister()
+        }
         if let currentAccount = account,
            currentAccount.params?.registerEnabled == true,
            currentAccount.state == .Progress {
@@ -3358,6 +3576,15 @@ private final class NativeLinphoneController: LinphoneController {
           arguments: call.arguments as? [String: Any] ?? [:]
         )
         result(nil)
+      case "setCallingNetworkPreference":
+        let arguments = call.arguments as? [String: Any]
+        callingNetwork.configure(
+          enabled: arguments?["enabled"] as? Bool ?? false,
+          preference: CallingNetworkPreference(wire: arguments?["preference"] as? String)
+        )
+        result(nil)
+      case "getCallingNetworkStatus":
+        result(callingNetwork.status())
       case "setNativeDnd":
         let arguments = call.arguments as? [String: Any]
         SipCredentialStore.setDndEnabled(arguments?["enabled"] as? Bool ?? false)
@@ -3367,7 +3594,7 @@ private final class NativeLinphoneController: LinphoneController {
         cancelRegistrationRecovery()
         stopPresenceSubscriptions()
         explicitUnregisterRequested = true
-        account = account ?? core?.defaultAccount
+        account = account ?? primaryFromList()
         guard account != nil else {
           explicitUnregisterRequested = false
           registrationEvents.send(["status": "unregistered", "message": nil])
@@ -3382,13 +3609,18 @@ private final class NativeLinphoneController: LinphoneController {
         }
         try updateRegistration(enabled: false)
         account?.refreshRegister()
+        secondaryAccount()?.refreshRegister()
         result(nil)
       case "purgeAccount":
         purgeAccount()
         result(nil)
+      case "removeSecondaryAccount":
+        removeSecondaryAccount()
+        result(nil)
       case "makeCall":
         try makeCall(
           destination: argument(call, "destination"),
+          accountId: (call.arguments as? [String: Any])?["accountId"] as? String,
           completion: { error in
             if let error {
               result(FlutterError(
@@ -3402,7 +3634,10 @@ private final class NativeLinphoneController: LinphoneController {
           }
         )
       case "dialFeatureCode":
-        result(try dialFeatureCode(code: argument(call, "code")))
+        result(try dialFeatureCode(
+          code: argument(call, "code"),
+          accountId: (call.arguments as? [String: Any])?["accountId"] as? String
+        ))
       case "acceptCall":
         guard let incomingCall = findCall(id: argument(call, "callId")),
               isIncomingRinging(incomingCall)
@@ -3725,12 +3960,16 @@ private final class NativeLinphoneController: LinphoneController {
           diagnostic: args["diagnostic"] as? Bool ?? false,
           subscriptionId: args["subscriptionId"] as? String ?? "",
           generation: (args["generation"] as? NSNumber)?.intValue ?? 0,
-          additions: args["additions"] as? [String]
+          additions: args["additions"] as? [String],
+          accountId: args["accountId"] as? String
         )
         result(nil)
       case "stopPresenceSubscriptions":
         let args = call.arguments as? [String: Any] ?? [:]
-        stopPresenceSubscriptions(diagnostic: args["diagnostic"] as? Bool ?? false)
+        stopPresenceSubscriptions(
+          diagnostic: args["diagnostic"] as? Bool ?? false,
+          accountId: args["accountId"] as? String
+        )
         result(nil)
       case "setSipLoggingEnabled":
         setSipLoggingEnabled(boolArgument(call, "enabled"))
@@ -3811,6 +4050,9 @@ private final class NativeLinphoneController: LinphoneController {
     // Keep mobile registrations identifiable across platforms so Flexisip can
     // distinguish app traffic from the server-side B2BUA anchor.
     newCore.setUserAgent(name: "VoIPCloud-Mobile", version: appVersion)
+    // The SDK declines unanswered calls after 30 s by default; queue calls
+    // must keep ringing until the server stops them.
+    newCore.incTimeout = 120
     newCore.ipv6Enabled = true
     // PushKit is managed by VoipPushRegistry; avoid a second registry in the SDK.
     newCore.pushNotificationEnabled = false
@@ -3921,6 +4163,19 @@ private final class NativeLinphoneController: LinphoneController {
               NSLog("Softphone/Linphone ignored registration callback during account replacement")
               return
             }
+            if self.isSecondary(changedAccount) {
+              guard let second = self.secondaryAccount(),
+                    ObjectIdentifier(second) == ObjectIdentifier(changedAccount) else {
+                NSLog("Softphone/Linphone ignored registration callback from stale second line")
+                return
+              }
+              self.emitRegistration(
+                state: state,
+                message: message,
+                accountId: Self.secondaryAccountId
+              )
+              return
+            }
             guard let activeAccount = self.account ?? self.core?.defaultAccount,
                   ObjectIdentifier(activeAccount) == ObjectIdentifier(changedAccount) else {
               NSLog("Softphone/Linphone ignored registration callback from stale account")
@@ -3942,6 +4197,7 @@ private final class NativeLinphoneController: LinphoneController {
 
     newCore.addDelegate(delegate: newDelegate)
     try newCore.start()
+    callingNetwork.start()
     core = newCore
     delegate = newDelegate
     SoftphoneCallKitController.shared.attach(
@@ -4172,6 +4428,10 @@ private final class NativeLinphoneController: LinphoneController {
     }
     try initialize()
     guard let currentCore = core else { return }
+    if stringArg(args, "accountSlot") == Self.secondaryAccountId {
+      try configureSecondaryAccount(args: args, core: currentCore)
+      return
+    }
 
     var mergedArgs = args
     // Flutter can restore its session before PushKit has repeated the current
@@ -4303,8 +4563,15 @@ private final class NativeLinphoneController: LinphoneController {
     lastStalledRegistrationRefresh = nil
 
     account = nil
-    currentCore.clearAccounts()
-    currentCore.clearAllAuthInfo()
+    // Replace only the primary account; the second line keeps its own login.
+    let savedSecondary = SipCredentialStore.loadSecondary()
+    for existing in currentCore.accountList where !isSecondary(existing) {
+      currentCore.removeAccount(account: existing)
+    }
+    for info in currentCore.authInfoList
+    where savedSecondary == nil || !authInfoMatches(info, savedSecondary!) {
+      currentCore.removeAuthInfo(info: info)
+    }
     try configureNatPolicy(core: currentCore, stunServer: stunServer, turnServer: turnServer)
 
     let passwordValue: String? = password.isEmpty ? nil : password
@@ -4349,6 +4616,13 @@ private final class NativeLinphoneController: LinphoneController {
     let params = try currentCore.createAccountParams()
     try params.setIdentityaddress(newValue: identity)
     try params.setServeraddress(newValue: serverAddress)
+    // The calling-network manager probes each network against this registrar.
+    if let host = serverAddress.domain, !host.isEmpty {
+      updateCallingNetworkCache(endpoint: (
+        host: host,
+        port: serverAddress.port > 0 ? UInt16(clamping: serverAddress.port) : 5061
+      ))
+    }
     // Keep the PushKit contact available while iOS suspends the process. This
     // matches the Flexisip registrar's seven-day max-expires policy.
     params.expires = Self.mobileRegistrationExpiresSeconds
@@ -4391,11 +4665,153 @@ private final class NativeLinphoneController: LinphoneController {
     registrationEvents.send(["status": "configuring", "message": "SIP account configured"])
   }
 
+  private func authInfoMatches(_ info: AuthInfo, _ saved: [String: Any]) -> Bool {
+    let username = stringArg(saved, "authUsername").isEmpty
+      ? stringArg(saved, "sipUsername") : stringArg(saved, "authUsername")
+    let realm = stringArg(saved, "realm").isEmpty
+      ? stringArg(saved, "domain") : stringArg(saved, "realm")
+    return info.username == username && info.realm == realm
+  }
+
+  private func removeAuthInfos(for saved: [String: Any], core currentCore: Core) {
+    for info in currentCore.authInfoList where authInfoMatches(info, saved) {
+      currentCore.removeAuthInfo(info: info)
+    }
+  }
+
+  /// Adds (or replaces) only the second line; the primary stays registered.
+  private func configureSecondaryAccount(args: [String: Any], core currentCore: Core) throws {
+    var mergedArgs = args
+    if stringArg(mergedArgs, "pushToken").isEmpty,
+       let tokenPayload = VoipPushRegistry.shared.currentPushPayload() {
+      for (key, value) in tokenPayload {
+        mergedArgs[key] = value
+      }
+    }
+    let saved = SipCredentialStore.loadSecondary()
+    if let existing = secondaryAccount(),
+       let saved,
+       isSameSipConfiguration(saved, mergedArgs) {
+      // Restored at launch with identical settings: leave the live REGISTER alone.
+      SipCredentialStore.saveSecondary(mergedArgs)
+      emitRegistration(
+        state: existing.state,
+        message: "Using restored SIP account",
+        accountId: Self.secondaryAccountId
+      )
+      return
+    }
+
+    let username = stringArg(mergedArgs, "sipUsername")
+    let authUsername = stringArg(mergedArgs, "authUsername").isEmpty
+      ? username : stringArg(mergedArgs, "authUsername")
+    let password = stringArg(mergedArgs, "password")
+    let ha1 = stringArg(mergedArgs, "ha1")
+    let algorithm = stringArg(mergedArgs, "algorithm")
+    let domain = stringArg(mergedArgs, "domain")
+    let registrar = stringArg(mergedArgs, "registrar").isEmpty ? domain : stringArg(mergedArgs, "registrar")
+    let realm = stringArg(mergedArgs, "realm").isEmpty ? domain : stringArg(mergedArgs, "realm")
+    let authDomain = stringArg(mergedArgs, "authDomain").isEmpty ? realm : stringArg(mergedArgs, "authDomain")
+    let outboundProxy = stringArg(mergedArgs, "outboundProxy")
+
+    isReplacingAccount = true
+    defer { isReplacingAccount = false }
+    for existing in currentCore.accountList where isSecondary(existing) {
+      currentCore.removeAccount(account: existing)
+    }
+    if let saved { removeAuthInfos(for: saved, core: currentCore) }
+    removeAuthInfos(for: mergedArgs, core: currentCore)
+
+    let authInfo = try Factory.Instance.createAuthInfo(
+      username: authUsername,
+      userid: username,
+      passwd: password.isEmpty ? nil : password,
+      ha1: ha1.isEmpty ? nil : ha1,
+      realm: realm,
+      domain: authDomain,
+      algorithm: algorithm.isEmpty ? nil : algorithm
+    )
+    currentCore.addAuthInfo(info: authInfo)
+
+    let identity = try Factory.Instance.createAddress(addr: "sip:\(username)@\(domain)")
+    let displayName = stringArg(mergedArgs, "displayName")
+    if !displayName.isEmpty {
+      try identity.setDisplayname(newValue: displayName)
+    }
+    let serverAddress = try Factory.Instance.createAddress(
+      addr: normalizeSipAddress(outboundProxy.isEmpty ? registrar : outboundProxy)
+    )
+    try serverAddress.setTransport(newValue: transportType(stringArg(mergedArgs, "transport")))
+
+    let params = try currentCore.createAccountParams()
+    try params.setIdentityaddress(newValue: identity)
+    try params.setServeraddress(newValue: serverAddress)
+    params.expires = Self.mobileRegistrationExpiresSeconds
+    params.outboundProxyEnabled = !outboundProxy.isEmpty
+    params.registerEnabled = true
+    params.idkey = Self.secondaryAccountId
+    configurePushNotifications(
+      params: params,
+      core: currentCore,
+      provider: stringArg(mergedArgs, "pushProvider"),
+      token: stringArg(mergedArgs, "pushToken"),
+      param: stringArg(mergedArgs, "pushParam"),
+      bundleId: stringArg(mergedArgs, "pushBundleId"),
+      teamId: stringArg(mergedArgs, "pushTeamId")
+    )
+
+    let created = try currentCore.createAccount(params: params)
+    // addAccount without touching defaultAccount: the primary stays the default.
+    try currentCore.addAccount(account: created)
+    SipCredentialStore.saveSecondary(mergedArgs)
+    NSLog("VoIPCloud/Linphone Second line configured server=%@", serverAddress.asStringUriOnly())
+    registrationEvents.send([
+      "status": "configuring",
+      "message": "SIP account configured",
+      "accountId": Self.secondaryAccountId
+    ])
+  }
+
+  private func restoreSecondaryAccountIfNeeded() {
+    guard secondaryAccount() == nil,
+          account != nil,
+          var saved = SipCredentialStore.loadSecondary() else { return }
+    saved["accountSlot"] = Self.secondaryAccountId
+    NSLog("Softphone/Linphone restoring saved second SIP account")
+    do {
+      try configureAccount(args: saved)
+    } catch {
+      NSLog(
+        "Softphone/Linphone failed to restore second SIP account: %@",
+        error.localizedDescription
+      )
+    }
+  }
+
+  /// Removes only the second line and its saved credentials.
+  private func removeSecondaryAccount() {
+    let saved = SipCredentialStore.loadSecondary()
+    if let currentCore = core {
+      for existing in currentCore.accountList where isSecondary(existing) {
+        currentCore.removeAccount(account: existing)
+      }
+      if let saved { removeAuthInfos(for: saved, core: currentCore) }
+    }
+    SipCredentialStore.clearSecondary()
+    registrationEvents.send([
+      "status": "unregistered",
+      "message": nil,
+      "accountId": Self.secondaryAccountId
+    ])
+    NSLog("Softphone/Linphone removed the second SIP account")
+  }
+
   private func restoreSavedAccountIfNeeded() {
     guard let currentCore = core else { return }
     if !currentCore.accountList.isEmpty {
-      account = currentCore.defaultAccount ?? currentCore.accountList.first
+      account = primaryFromList() ?? currentCore.accountList.first
       enforceMobileRegistrationExpiry()
+      restoreSecondaryAccountIfNeeded()
       return
     }
     guard let saved = SipCredentialStore.load() else { return }
@@ -4408,6 +4824,7 @@ private final class NativeLinphoneController: LinphoneController {
         error.localizedDescription
       )
     }
+    restoreSecondaryAccountIfNeeded()
   }
 
   private func isSameSipConfiguration(
@@ -4509,23 +4926,31 @@ private final class NativeLinphoneController: LinphoneController {
 
   private func deviceDndContactParameters(_ original: String?) -> String {
     var parameters = (original ?? "").split(separator: ";").map(String.init)
-    parameters.removeAll {
-      $0.split(separator: "=", maxSplits: 1).first?.lowercased() == "x-voipcloud-dnd"
+    parameters.removeAll { (parameter: String) -> Bool in
+      let name = parameter.split(separator: "=", maxSplits: 1).first?.lowercased()
+      return name == "x-voipcloud-dnd" || name == "x-voipcloud-apns"
     }
     parameters.append("x-voipcloud-dnd=\(SipCredentialStore.isDndEnabled() ? 1 : 0)")
+    // The ordinary APNs token lets the server send the silent registration-refresh push.
+    if let token = IOSNotificationToken.current() {
+      parameters.append("x-voipcloud-apns=\(token)")
+    }
     return parameters.joined(separator: ";")
   }
 
   private func publishDeviceCallPolicy() {
-    guard let currentAccount = account ?? core?.defaultAccount,
-          let currentParams = currentAccount.params,
-          let params = currentParams.clone() else { return }
-    let updated = deviceDndContactParameters(params.contactUriParameters)
-    guard params.contactUriParameters != updated else { return }
-    params.contactUriParameters = updated
-    // Do not unregister or remove push parameters: only this contact changes.
-    currentAccount.params = params
-    currentAccount.refreshRegister()
+    // This phone's DND covers both accounts.
+    let accounts = [account ?? core?.defaultAccount, secondaryAccount()].compactMap { $0 }
+    for currentAccount in accounts {
+      guard let currentParams = currentAccount.params,
+            let params = currentParams.clone() else { continue }
+      let updated = deviceDndContactParameters(params.contactUriParameters)
+      guard params.contactUriParameters != updated else { continue }
+      params.contactUriParameters = updated
+      // Do not unregister or remove push parameters: only this contact changes.
+      currentAccount.params = params
+      currentAccount.refreshRegister()
+    }
   }
 
   private func configurePushNotifications(
@@ -4637,7 +5062,7 @@ private final class NativeLinphoneController: LinphoneController {
       params.registerEnabled = enabled
       currentAccount.params = params
     }
-    account = currentCore.defaultAccount ?? accounts.first
+    account = primaryFromList() ?? accounts.first
   }
 
   private func purgeAccount() {
@@ -4656,6 +5081,7 @@ private final class NativeLinphoneController: LinphoneController {
 
   private func makeCall(
     destination: String,
+    accountId: String? = nil,
     completion: @escaping (Error?) -> Void
   ) throws {
     guard core != nil else {
@@ -4683,9 +5109,12 @@ private final class NativeLinphoneController: LinphoneController {
             userInfo: [NSLocalizedDescriptionKey: "The SIP engine is unavailable."]
           )
         }
-        let address = try self.normalizeDestination(trimmed)
+        // Without this the call would leave from the default (primary) account.
+        let line = try self.secondaryLine(for: accountId)
+        let address = try self.normalizeDestination(trimmed, forAccount: line)
         let params = try currentCore.createCallParams(call: nil)
         params.videoEnabled = false
+        if let line { params.account = line }
         guard let outgoingCall = currentCore.inviteAddressWithParams(
           addr: address,
           params: params
@@ -4711,7 +5140,20 @@ private final class NativeLinphoneController: LinphoneController {
     )
   }
 
-  private func dialFeatureCode(code: String) throws -> String {
+  /// The second line when [accountId] names it; nil means the default account.
+  private func secondaryLine(for accountId: String?) throws -> Account? {
+    guard accountId == Self.secondaryAccountId else { return nil }
+    guard let second = secondaryAccount() else {
+      throw NSError(
+        domain: "SoftphoneLinphone",
+        code: 1013,
+        userInfo: [NSLocalizedDescriptionKey: "The second line is not set up."]
+      )
+    }
+    return second
+  }
+
+  private func dialFeatureCode(code: String, accountId: String? = nil) throws -> String {
     let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
       throw NSError(
@@ -4727,10 +5169,13 @@ private final class NativeLinphoneController: LinphoneController {
         userInfo: [NSLocalizedDescriptionKey: "The SIP engine is unavailable."]
       )
     }
+    // A feature code belongs to the phone system of the account that dials it.
+    let line = try secondaryLine(for: accountId)
     SoftphoneCallKitController.shared.ensureAudioSessionActiveForOutgoingCall()
-    let address = try normalizeDestination(trimmed)
+    let address = try normalizeDestination(trimmed, forAccount: line)
     let params = try currentCore.createCallParams(call: nil)
     params.videoEnabled = false
+    if let line { params.account = line }
     if featureCodePreviousMicEnabled == nil {
       featureCodePreviousMicEnabled = currentCore.micEnabled
       currentCore.micEnabled = false
@@ -5328,9 +5773,13 @@ private final class NativeLinphoneController: LinphoneController {
     !isTerminalCallState(call.state)
   }
 
-  private func normalizeDestination(_ destination: String) throws -> Address {
+  /// A bare extension is completed with the domain of the account that uses it.
+  private func normalizeDestination(
+    _ destination: String,
+    forAccount line: Account? = nil
+  ) throws -> Address {
     let trimmed = destination.trimmingCharacters(in: .whitespacesAndNewlines)
-    let domain = account?.params?.identityAddress?.domain ?? ""
+    let domain = (line ?? account)?.params?.identityAddress?.domain ?? ""
     let uri: String
     if trimmed.hasPrefix("sip:") {
       uri = trimmed
@@ -5342,13 +5791,27 @@ private final class NativeLinphoneController: LinphoneController {
     return try Factory.Instance.createAddress(addr: uri)
   }
 
-  private func startPresenceSubscriptions(extensions: [String], diagnostic: Bool = false, subscriptionId: String = "", generation: Int = 0, additions: [String]? = nil, reconcileSet: Bool = true) throws {
+  private func startPresenceSubscriptions(extensions: [String], diagnostic: Bool = false, subscriptionId: String = "", generation: Int = 0, additions: [String]? = nil, reconcileSet: Bool = true, accountId: String? = nil) throws {
     guard let currentCore = core else {
       throw NSError(
         domain: "SoftphoneLinphone",
         code: 1010,
         userInfo: [NSLocalizedDescriptionKey: "Linphone core is not initialized."]
       )
+    }
+    // Only the DND hint is ever watched for the second line; BLF stays primary.
+    let line: Account?
+    if diagnostic && accountId == Self.secondaryAccountId {
+      guard let second = secondaryAccount() else {
+        throw NSError(
+          domain: "SoftphoneLinphone",
+          code: 1013,
+          userInfo: [NSLocalizedDescriptionKey: "The second line is not set up."]
+        )
+      }
+      line = second
+    } else {
+      line = nil
     }
     var seen = Set<String>()
     let uniqueExtensions = reconcileSet ? Array(extensions.map {
@@ -5364,7 +5827,7 @@ private final class NativeLinphoneController: LinphoneController {
       .filter { desired.contains($0) && seenAdditions.insert($0).inserted }
 
     if diagnostic {
-      stopPresenceSubscriptions(diagnostic: true)
+      stopPresenceSubscriptions(diagnostic: true, accountId: accountId ?? "primary")
     } else if reconcileSet {
       desiredPresenceTargets = uniqueExtensions
       desiredPresenceSet = desired
@@ -5401,8 +5864,15 @@ private final class NativeLinphoneController: LinphoneController {
         ])
         continue
       }
+      // A subscription is sent from the core's default account, so make the
+      // second line the default just long enough to create it for that line.
+      let previousDefault = currentCore.defaultAccount
+      if let line { currentCore.defaultAccount = line }
+      defer {
+        if line != nil, let previousDefault { currentCore.defaultAccount = previousDefault }
+      }
       let event = try currentCore.createSubscribe(
-        resource: normalizeDestination(extensionNumber),
+        resource: normalizeDestination(extensionNumber, forAccount: line),
         event: eventPackage,
         expires: diagnostic && subscriptionId.isEmpty ? 120 : 300
       )
@@ -5410,6 +5880,7 @@ private final class NativeLinphoneController: LinphoneController {
         name: "Accept",
         value: accept
       )
+      if line != nil { secondaryPresenceKeys.insert(ObjectIdentifier(event)) }
       presenceSubscriptions[ObjectIdentifier(event)] = (
         event,
         extensionNumber,
@@ -5443,14 +5914,16 @@ private final class NativeLinphoneController: LinphoneController {
     ) }
   }
 
-  private func stopPresenceSubscriptions(diagnostic: Bool? = nil) {
+  private func stopPresenceSubscriptions(diagnostic: Bool? = nil, accountId: String? = nil) {
     if diagnostic != true {
       desiredPresenceTargets = []
       desiredPresenceSet = []
       desiredPresenceGeneration = -1
     }
     let keys = presenceSubscriptions.filter {
-      diagnostic == nil || $0.value.1.hasPrefix("*76") == diagnostic!
+      (diagnostic == nil || $0.value.1.hasPrefix("*76") == diagnostic!)
+        && (accountId == nil
+          || secondaryPresenceKeys.contains($0.key) == (accountId == Self.secondaryAccountId))
     }.map { $0.key }
     let subscriptions = keys.compactMap { removePresenceSubscription($0)?.0 }
     subscriptions.forEach { try? $0.terminate() }
@@ -5507,8 +5980,15 @@ private final class NativeLinphoneController: LinphoneController {
     }
   }
 
-  private func emitRegistration(state: RegistrationState, message: String) {
+  private func emitRegistration(
+    state: RegistrationState,
+    message: String,
+    accountId: String? = nil
+  ) {
     let status = registrationState(state, inBackground: isAppInBackground)
+    if accountId == nil || accountId == "primary" {
+      updateCallingNetworkCache(registered: state == .Ok)
+    }
     NSLog(
       "VoIPCloud/Linphone Registration state=%@ message=%@",
       status,
@@ -5525,14 +6005,16 @@ private final class NativeLinphoneController: LinphoneController {
         message: "Registration => \(status)\(message.isEmpty ? "" : " · \(message)")"
       )
     }
-    registrationEvents.send([
+    var event: [String: Any?] = [
       "status": status,
       "message": registrationMessage(
         status: status,
         originalMessage: message,
         inBackground: isAppInBackground
       )
-    ])
+    ]
+    if let accountId { event["accountId"] = accountId }
+    registrationEvents.send(event)
   }
 
   private func emitCall(
@@ -5559,6 +6041,8 @@ private final class NativeLinphoneController: LinphoneController {
     } else {
       calls[id] = call
     }
+    updateCallingNetworkCache(live: !calls.isEmpty)
+    callingNetwork.liveCallsChanged()
     let status = callStatus(state)
     let baseDiagnosticMessage = SoftphoneCallKitController.callTerminationMessage(
       call: call,
@@ -5566,9 +6050,12 @@ private final class NativeLinphoneController: LinphoneController {
     )
     let localDecline = terminal &&
       SoftphoneCallKitController.shared.wasLocallyDeclined(linphoneId: id)
-    let diagnosticMessage = localDecline
+    let declineAwareMessage = localDecline
       ? [baseDiagnosticMessage, "Locally declined"].filter { !$0.isEmpty }.joined(separator: " | ")
       : baseDiagnosticMessage
+    let networkLossReason = terminal ? callingNetworkEndReasons.removeValue(forKey: id) : nil
+    let diagnosticMessage = [declineAwareMessage, networkLossReason ?? ""]
+      .filter { !$0.isEmpty }.joined(separator: " | ")
     let answeredElsewhere = call.dir == .Incoming
       && SoftphoneCallKitController.isAnsweredElsewhereReason(diagnosticMessage)
     nativeCallTrace(
@@ -5631,6 +6118,7 @@ private final class NativeLinphoneController: LinphoneController {
     }
     callEvents.send([
       "id": id,
+      "accountId": accountIdForCall(call),
       "remoteUri": call.remoteAddress?.asStringUriOnly() ?? "",
       "remoteDisplayName": remoteDisplayName,
       "direction": call.dir == .Incoming ? "incoming" : "outgoing",
@@ -6035,4 +6523,86 @@ private extension Date {
 
 private extension Notification.Name {
   static let softphoneVoipPushTokenUpdated = Notification.Name("SoftphoneVoipPushTokenUpdated")
+  static let softphoneApnsTokenUpdated = Notification.Name("SoftphoneApnsTokenUpdated")
+}
+
+/// The phone's ordinary APNs token, kept so it can be added to the SIP registration, and the check for the
+/// server's silent "refresh registration" push.
+enum IOSNotificationToken {
+  private static let key = "voipcloud.apns_device_token"
+
+  /// Stores the token; true when it changed.
+  @discardableResult
+  static func store(_ data: Data) -> Bool {
+    let hex = data.map { String(format: "%02x", $0) }.joined()
+    guard !hex.isEmpty, hex != UserDefaults.standard.string(forKey: key) else { return false }
+    UserDefaults.standard.set(hex, forKey: key)
+    return true
+  }
+
+  static func current() -> String? {
+    let value = UserDefaults.standard.string(forKey: key)
+    return value?.isEmpty == false ? value : nil
+  }
+
+  static func isRegistrationRefresh(_ userInfo: [AnyHashable: Any]) -> Bool {
+    let payload = userInfo["voipcloud"] as? [String: Any]
+    return payload?["event"] as? String == "refresh_registration"
+  }
+}
+
+/// Hands what the Share extension saved (link, text, photos) to Flutter. The
+/// extension writes share.json into the App Group folder and opens
+/// voipcloudshare://open; the Dart side then asks who to send it to.
+final class ShareIntentBridge {
+  static let shared = ShareIntentBridge()
+
+  private let appGroup = "group.com.thinkswift.softphoneapp"
+  private var channel: FlutterMethodChannel?
+  private var pending: [String: Any]?
+
+  private init() {}
+
+  func attach(binaryMessenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(
+      name: "voipcloud/share_intents",
+      binaryMessenger: binaryMessenger
+    )
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "consumePendingShare", let self else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let payload = self.pending
+      self.pending = nil
+      result(payload)
+    }
+    self.channel = channel
+  }
+
+  @discardableResult
+  func handle(url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "voipcloudshare" else { return false }
+    publishSharedContent()
+    return true
+  }
+
+  /// Also called when the app comes to the foreground, so a share still
+  /// arrives if iOS did not let the extension open the app by itself.
+  func publishSharedContent() {
+    guard let payload = readSharedContent() else { return }
+    pending = payload
+    channel?.invokeMethod("shareReceived", arguments: payload)
+  }
+
+  private func readSharedContent() -> [String: Any]? {
+    guard let manifest = FileManager.default
+      .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+      .appendingPathComponent("share/share.json"),
+      let data = try? Data(contentsOf: manifest)
+    else { return nil }
+    // Read once: an old manifest must never be replayed on a later launch.
+    try? FileManager.default.removeItem(at: manifest)
+    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+  }
 }

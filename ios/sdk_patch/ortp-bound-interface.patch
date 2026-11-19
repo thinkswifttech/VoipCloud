@@ -1,0 +1,21 @@
+diff --git a/src/rtpsession_inet.c b/src/rtpsession_inet.c
+index 56aca25ce9..e280b3a1a0 100644
+--- a/src/rtpsession_inet.c
++++ b/src/rtpsession_inet.c
+@@ -35,6 +35,7 @@
+ #include "utils.h"
+ #include <bctoolbox/defs.h>
+ #include <bctoolbox/port.h>
++#include <bctoolbox/vconnect.h>
+ 
+ #if (_WIN32_WINNT >= 0x0600)
+ #include <delayimp.h>
+@@ -230,7 +231,7 @@ static ortp_socket_t create_and_bind(const char *addr,
+ 		bool_t isMulticast = bctbx_is_multicast_addr(res->ai_addr);
+ 		struct addrinfo *any = NULL;
+ 
+-		sock = socket(res->ai_family, res->ai_socktype, 0);
++		sock = bctbx_socket(res->ai_family, res->ai_socktype, 0);
+ 		if (sock == -1) {
+ 			ortp_error("Cannot create a socket with family=[%i] and socktype=[%i]: %s", res->ai_family,
+ 			           res->ai_socktype, getSocketError());

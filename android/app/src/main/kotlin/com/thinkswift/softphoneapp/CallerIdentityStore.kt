@@ -22,6 +22,7 @@ internal object CallerIdentityStore {
     private const val TAG = "VoIPCloud/Identity"
     private const val PREFS = "voipcloud_native_call_state"
     private const val KEY_DIRECTORY = "directory_v1"
+    private const val KEY_DIRECTORY_SECONDARY = "directory_v1_secondary"
     private const val KEY_DND = "dnd"
     private const val KEY_ALIAS = "voipcloud_directory_cache_v1"
     private const val MAX_ENTRIES = 2_000
@@ -36,13 +37,36 @@ internal object CallerIdentityStore {
         return Uri.decode(withoutScheme.substringBefore('@').substringBefore(';')).trim()
     }
 
-    fun resolve(context: Context, number: String, trustedName: String?): String {
+    /**
+     * [line] is `primary` or `secondary` when the account is known. When it is
+     * not (a push arrives before the call does) a number that has different
+     * names in the two directories is not guessed: the SIP display name or the
+     * number is shown instead of possibly the wrong person.
+     */
+    fun resolve(
+        context: Context,
+        number: String,
+        trustedName: String?,
+        line: String? = null
+    ): String {
         val cleanNumber = number.trim()
         contactName(context, cleanNumber)?.let {
             return displayNameWithQueuePrefix(cleanNumber, it, trustedName)
         }
-        val cached = directory(context)
-        identityKeys(cleanNumber).firstNotNullOfOrNull { cached[it] }?.let {
+        val keys = identityKeys(cleanNumber)
+        val primaryName = keys.firstNotNullOfOrNull { directory(context, KEY_DIRECTORY)[it] }
+        val secondaryName =
+            keys.firstNotNullOfOrNull { directory(context, KEY_DIRECTORY_SECONDARY)[it] }
+        val cachedName = when (line) {
+            "primary" -> primaryName
+            "secondary" -> secondaryName
+            else -> when {
+                primaryName != null && secondaryName != null ->
+                    if (primaryName == secondaryName) primaryName else null
+                else -> primaryName ?: secondaryName
+            }
+        }
+        cachedName?.let {
             return displayNameWithQueuePrefix(cleanNumber, it, trustedName)
         }
         val trusted = trustedName?.trim().orEmpty()
@@ -53,7 +77,12 @@ internal object CallerIdentityStore {
         )
     }
 
-    fun updateDirectory(context: Context, tenantKey: String, entries: List<Map<*, *>>) {
+    fun updateDirectory(
+        context: Context,
+        tenantKey: String,
+        entries: List<Map<*, *>>,
+        line: String = "primary"
+    ) {
         val values = LinkedHashMap<String, String>()
         entries.take(MAX_ENTRIES).forEach { entry ->
             val name = (entry["name"] ?: entry["displayName"])?.toString()?.trim().orEmpty()
@@ -72,12 +101,14 @@ internal object CallerIdentityStore {
             put("values", JSONObject(values as Map<*, *>))
         }.toString()
         runCatching {
-            prefs(context).edit().putString(KEY_DIRECTORY, encrypt(payload)).apply()
+            val key = if (line == "secondary") KEY_DIRECTORY_SECONDARY else KEY_DIRECTORY
+            prefs(context).edit().putString(key, encrypt(payload)).apply()
         }.onFailure { Log.w(TAG, "Unable to persist encrypted directory cache", it) }
     }
 
     fun clear(context: Context) {
-        prefs(context).edit().remove(KEY_DIRECTORY).remove(KEY_DND).apply()
+        prefs(context).edit()
+            .remove(KEY_DIRECTORY).remove(KEY_DIRECTORY_SECONDARY).remove(KEY_DND).apply()
     }
 
     fun setDnd(context: Context, enabled: Boolean) {
@@ -86,8 +117,13 @@ internal object CallerIdentityStore {
 
     fun isDnd(context: Context): Boolean = prefs(context).getBoolean(KEY_DND, false)
 
-    private fun directory(context: Context): Map<String, String> {
-        val encrypted = prefs(context).getString(KEY_DIRECTORY, null) ?: return emptyMap()
+    /** Removes only the second account's cached names (the account was removed). */
+    fun clearSecondaryDirectory(context: Context) {
+        prefs(context).edit().remove(KEY_DIRECTORY_SECONDARY).apply()
+    }
+
+    private fun directory(context: Context, key: String = KEY_DIRECTORY): Map<String, String> {
+        val encrypted = prefs(context).getString(key, null) ?: return emptyMap()
         return runCatching {
             val values = JSONObject(decrypt(encrypted)).getJSONObject("values")
             buildMap {
@@ -99,7 +135,7 @@ internal object CallerIdentityStore {
             }
         }.onFailure {
             Log.w(TAG, "Encrypted directory cache was unreadable; clearing it")
-            prefs(context).edit().remove(KEY_DIRECTORY).apply()
+            prefs(context).edit().remove(key).apply()
         }.getOrDefault(emptyMap())
     }
 

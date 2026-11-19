@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phone_app/features/accounts/domain/account_line.dart';
 import 'package:phone_app/core/storage/secure_storage_service.dart';
 import 'package:phone_app/features/call_history/domain/call_history_item.dart';
 import 'package:phone_app/features/call_history/domain/call_history_repository.dart';
@@ -43,6 +44,7 @@ class _Repository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) {
     throw UnsupportedError('not used');
   }

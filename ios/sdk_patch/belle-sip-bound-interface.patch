@@ -1,0 +1,21 @@
+diff --git a/src/dns/dns.c b/src/dns/dns.c
+index 315101fa8f..8866c4ae6f 100644
+--- a/src/dns/dns.c
++++ b/src/dns/dns.c
+@@ -123,6 +123,7 @@
+ 
+ #include <bctoolbox/defs.h>
+ #include <bctoolbox/port.h>
++#include <bctoolbox/vconnect.h>
+ #include <belle-sip/utils.h>
+ 
+ /*
+@@ -5854,7 +5855,7 @@ static int dns_socket(struct sockaddr *local, int type, int *error_) {
+ #if HAVE_SOCK_NONBLOCK
+ 	flags |= SOCK_NONBLOCK;
+ #endif
+-	if (-1 == (fd = socket(local->sa_family, type | flags, 0))) goto soerr;
++	if (-1 == (fd = bctbx_socket(local->sa_family, type | flags, 0))) goto soerr;
+ 
+ 	if (local->sa_family == AF_INET6) {
+ 		int value = 0;

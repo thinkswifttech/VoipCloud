@@ -1,3 +1,4 @@
+import '../../accounts/presentation/line_widgets.dart';
 import 'dart:async';
 import 'dart:io' show Platform;
 
@@ -19,6 +20,7 @@ import '../domain/audio_output_route.dart';
 import '../domain/call_quality_info.dart';
 import '../domain/call_status.dart';
 import '../domain/voip_call.dart';
+import 'add_call_dialog.dart';
 import 'audio_route_picker.dart';
 import 'call_duration.dart';
 import 'call_quality_sheet.dart';
@@ -159,10 +161,13 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
         break;
       }
     }
+    final secondaryDirectory =
+        ref.watch(secondaryDirectoryProvider).value ?? const [];
     final identity = resolveCallerIdentity(
       call: call,
       contacts: contacts,
       directory: directory,
+      secondaryDirectory: secondaryDirectory,
     );
     final displayName = identity.label;
     final heldIdentity = heldCall == null
@@ -171,6 +176,7 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             call: heldCall,
             contacts: contacts,
             directory: directory,
+            secondaryDirectory: secondaryDirectory,
           );
 
     if (attendedSession != null) {
@@ -276,6 +282,8 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
             call: waiting,
             contacts: ref.watch(contactsProvider).value ?? const [],
             directory: ref.watch(directoryProvider).value ?? const [],
+            secondaryDirectory:
+                ref.watch(secondaryDirectoryProvider).value ?? const [],
           );
 
     return LayoutBuilder(
@@ -348,6 +356,20 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
               _setProximity(false);
             }),
           ),
+          if (attendedSession == null &&
+              transferSession == null &&
+              heldCall == null &&
+              calls.length <= 1 &&
+              (call.status == CallStatus.active ||
+                  call.status == CallStatus.held) &&
+              !conferenceActive)
+            _CallAction(
+              icon: AppIcons.add,
+              label: 'Add call',
+              compact: compactActions,
+              prominent: prominentMobileActions,
+              onPressed: () => unawaited(showAddCallDialog(context, ref)),
+            ),
           if (transferAvailable &&
               attendedSession == null &&
               heldCall == null &&
@@ -508,6 +530,10 @@ class _InCallPanelState extends ConsumerState<InCallPanel> {
                                 ),
                               ),
                             ),
+                          ],
+                          if (call.line != null) ...[
+                            const SizedBox(height: 6),
+                            CallLineBadge(line: call.line, prefix: 'On'),
                           ],
                           const SizedBox(height: 6),
                           Text(

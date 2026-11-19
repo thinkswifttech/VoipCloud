@@ -40,8 +40,10 @@ license path until that licensing/source issue is resolved.
    hostnames, IP addresses, logs, and infrastructure details.
 3. Run the checks in [BUILDING.md](BUILDING.md).
 4. Commit every dependency lock file. In particular, record the exact iOS
-   Liblinphone Swift-package revision; a moving branch name alone is not enough
-   for a production source release.
+   Liblinphone SDK source revision (the tag of the published SDK source, now
+   `5.5.19-voipcloud1`) and the SHA-256 of the framework zips used by the build
+   (`ios/sdk_patch/SHIPPED-SDK-CHECKSUMS.txt`); a moving branch name alone is not
+   enough for a production source release.
 5. Verify that the exact corresponding source for every packaged Liblinphone
    binary is downloadable at no charge. Record its revision, URL, and checksum
    in the GitHub Release; preserve a source archive if the upstream URL is not

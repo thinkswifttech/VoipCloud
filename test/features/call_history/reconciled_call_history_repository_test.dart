@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phone_app/features/accounts/domain/account_line.dart';
 import 'package:phone_app/core/storage/secure_storage_service.dart';
 import 'package:phone_app/core/constants/storage_keys.dart';
 import 'package:phone_app/features/call_history/data/reconciled_call_history_repository.dart';
@@ -442,6 +443,7 @@ class _FakeRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) async {
     final item = CallHistoryItem(
       id: sipCallId ?? 'generated-${synced.length}',

@@ -12,6 +12,9 @@ void main() {
         CallingStatusText.title(status),
         CallingStatusText.description(status),
         CallingStatusText.dialerDetail(status) ?? '',
+        CallingStatusText.label(status, reconnecting: true),
+        CallingStatusText.title(status, reconnecting: true),
+        CallingStatusText.description(status, reconnecting: true),
       ].join(' ').toLowerCase();
       for (final word in jargon) {
         expect(text.contains(word), isFalse, reason: '$status mentions $word');
@@ -31,6 +34,27 @@ void main() {
     expect(
       CallingStatusText.dialerDetail(SipRegistrationStatus.failed),
       isNotNull,
+    );
+  });
+
+  test('reconnecting only changes the wording while registering', () {
+    expect(
+      CallingStatusText.label(
+        SipRegistrationStatus.registering,
+        reconnecting: true,
+      ),
+      'Reconnecting',
+    );
+    expect(
+      CallingStatusText.label(SipRegistrationStatus.registering),
+      'Connecting',
+    );
+    expect(
+      CallingStatusText.label(
+        SipRegistrationStatus.registered,
+        reconnecting: true,
+      ),
+      'Connected',
     );
   });
 }

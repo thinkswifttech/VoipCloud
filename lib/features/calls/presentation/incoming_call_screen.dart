@@ -1,3 +1,4 @@
+import '../../accounts/presentation/line_widgets.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -71,6 +72,8 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
       call: call,
       contacts: contacts,
       directory: directory,
+      secondaryDirectory:
+          ref.watch(secondaryDirectoryProvider).value ?? const [],
     );
     final caller = identity.label;
 
@@ -112,6 +115,10 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
                               letterSpacing: 0,
                             ),
                           ),
+                          if (call?.line != null) ...[
+                            const SizedBox(height: 10),
+                            CallLineBadge(line: call?.line),
+                          ],
                           const Spacer(flex: 2),
                           CallerAvatar(identity: identity, radius: 62),
                           const SizedBox(height: 28),

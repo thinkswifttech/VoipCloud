@@ -44,17 +44,27 @@
 				<string>im</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.thinkswift.softphoneapp.share</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>voipcloudshare</string>
+			</array>
+		</dict>
 	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>VoipCloud needs camera access to scan activation QR codes.</string>
+	<string>VoipCloud uses the camera only to scan the activation QR code from your phone system administrator. For example, point it at the QR code to sign in; no photos or video are saved.</string>
 	<key>NSContactsUsageDescription</key>
-	<string>VoipCloud uses your phone contacts so you can quickly call and message people you know.</string>
+	<string>VoipCloud reads your contacts on this phone so it can show the name of the person calling you and let you pick a contact to call or text. For example, an incoming call from a saved number shows the contact name. Contacts stay on your phone and are not uploaded.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>VoipCloud needs microphone access for calls.</string>
+	<string>VoipCloud uses the microphone so the person you are calling can hear you. For example, when you place or answer a call, your voice is sent to the other person; audio is never recorded or stored.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>VoipCloud uses your photo library when you choose a contact photo or an activation QR code.</string>
+	<string>VoipCloud opens your photo library only when you choose a picture, such as a photo to send in a message or a saved activation QR code. For example, choose a QR image from your photos to sign in. Only the picture you select is used.</string>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INStartCallIntent</string>
@@ -64,6 +74,7 @@
 	<array>
 		<string>audio</string>
 		<string>voip</string>
+		<string>remote-notification</string>
 	</array>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>

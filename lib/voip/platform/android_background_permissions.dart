@@ -12,8 +12,8 @@ Future<void> showAndroidBackgroundPermissionDialog(
     return;
   }
 
-  final ignored = await platformChannel.isBatteryOptimizationIgnored();
-  if (!context.mounted || ignored) {
+  final status = await platformChannel.getBackgroundStatus();
+  if (!context.mounted || status.isAllowed) {
     return;
   }
 
@@ -23,10 +23,14 @@ Future<void> showAndroidBackgroundPermissionDialog(
     builder: (context) {
       return AlertDialog(
         title: const Text('Allow background activity'),
-        content: const Text(
-          'To receive calls reliably when the app is in the background, '
-          'Android needs permission to run without battery restrictions. '
-          'On some devices you may also need to allow autostart in system settings.',
+        content: Text(
+          status.isRestricted
+              ? 'Android is blocking VoipCloud from running in the background, '
+                    'so calls may not ring after a while. Open the app settings, '
+                    'choose Battery, and allow background activity (Unrestricted).'
+              : 'To receive calls reliably when the app is in the background, '
+                    'Android needs permission to run without battery restrictions. '
+                    'On some devices you may also need to allow autostart in system settings.',
         ),
         actions: [
           TextButton(
@@ -53,5 +57,12 @@ Future<void> openAndroidBackgroundPermissionSettings({
   if (!Platform.isAndroid) {
     return;
   }
-  await platformChannel.openBatteryOptimizationSettings();
+  // The all-apps list only holds the Doze exemption. Once that is granted the
+  // remaining switch (background usage) lives on the app's own settings page.
+  final status = await platformChannel.getBackgroundStatus();
+  if (status.exempt) {
+    await platformChannel.openAppBatterySettings();
+  } else {
+    await platformChannel.openBatteryOptimizationSettings();
+  }
 }

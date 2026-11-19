@@ -1,3 +1,7 @@
+import '../../accounts/domain/account_line.dart';
+import '../../accounts/presentation/accounts_controller.dart';
+import '../../accounts/presentation/line_widgets.dart';
+import '../../dialer/presentation/dialer_line.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -7,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../app/router/route_names.dart';
+import '../../calls/presentation/add_call_dialog.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/errors/app_exception.dart';
 import '../../../features/calls/presentation/call_session_providers.dart';
@@ -79,8 +84,13 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final directory = ref.watch(directoryProvider);
-    final transferMode = ref.watch(callTransferModeProvider) != null;
+    final hasSecond = ref.watch(hasSecondaryAccountProvider);
+    final transferRequest = ref.watch(callTransferModeProvider);
+    final transferMode = transferRequest != null;
+    // A transfer can only go to someone on the call's own phone system, so the
+    // directory follows the call; otherwise it follows the switch above.
+    final line = _lineToShow(hasSecond, transferRequest);
+    final directory = ref.watch(directoryForLineProvider(line));
 
     ref.listen<CallTransferRequest?>(callTransferModeProvider, (
       previous,
@@ -102,79 +112,130 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
       scrollable: false,
       safeAreaBottom: false,
       padding: const EdgeInsets.fromLTRB(20, 12, 8, 0),
-      child: directory.when(
-        data: (items) {
-          final displayedItems = items;
-          final hasExternalContacts = displayedItems.any(
-            (entry) => entry.isExternal,
-          );
-          final effectiveTab = transferMode || !hasExternalContacts
-              ? _DirectoryTab.company
-              : _tab;
-          if (!transferMode &&
-              !hasExternalContacts &&
-              _tab != _DirectoryTab.company) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (!mounted || _tab == _DirectoryTab.company) return;
-              setState(() {
-                _tab = _DirectoryTab.company;
-                if (!_sortOptionsFor(_tab).contains(_sort)) {
-                  _sort = _DirectorySort.displayName;
-                }
-              });
+      child: Column(
+        children: [
+          Expanded(child: _directoryBody(directory, line, transferMode)),
+        ],
+      ),
+    );
+  }
+
+  AccountLine _lineToShow(bool hasSecond, CallTransferRequest? request) {
+    if (!hasSecond) return AccountLine.primary;
+    if (request != null) {
+      final calls = ref.watch(liveCallsProvider).value ?? const [];
+      for (final call in calls) {
+        if (call.id == request.originalCallId) {
+          return call.line ?? AccountLine.primary;
+        }
+      }
+      return AccountLine.primary;
+    }
+    return ref.watch(selectedDirectoryLineProvider);
+  }
+
+  Future<void> _refreshDirectory(AccountLine line) =>
+      line == AccountLine.secondary
+      ? ref.read(secondaryDirectoryProvider.notifier).refresh()
+      : ref.read(directoryProvider.notifier).refresh();
+
+  Widget _directoryBody(
+    AsyncValue<List<DirectoryEntry>> directory,
+    AccountLine line,
+    bool transferMode,
+  ) {
+    final hasSecond = ref.watch(hasSecondaryAccountProvider);
+    return directory.when(
+      data: (items) {
+        final displayedItems = items;
+        final hasExternalContacts = displayedItems.any(
+          (entry) => entry.isExternal,
+        );
+        final effectiveTab = transferMode || !hasExternalContacts
+            ? _DirectoryTab.company
+            : _tab;
+        if (!transferMode &&
+            !hasExternalContacts &&
+            _tab != _DirectoryTab.company) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || _tab == _DirectoryTab.company) return;
+            setState(() {
+              _tab = _DirectoryTab.company;
+              if (!_sortOptionsFor(_tab).contains(_sort)) {
+                _sort = _DirectorySort.displayName;
+              }
             });
-          }
-          return _DirectoryPanel(
-            onVisibleTargets: ref
-                .read(directoryPresenceMonitorProvider)
-                .prioritizeVisibleTargets,
-            onScrolling: ref
-                .read(directoryPresenceMonitorProvider)
-                .setScrolling,
-            entries: _visibleEntries(displayedItems, forcedTab: effectiveTab),
-            totalInTab: _tabEntries(
-              displayedItems,
-              forcedTab: effectiveTab,
-            ).length,
-            tab: effectiveTab,
-            showExternalTab: hasExternalContacts && !transferMode,
-            transferMode: transferMode,
-            searchController: _searchController,
-            query: _query,
-            sort: _sort,
-            ascending: _ascending,
-            onTabChanged: transferMode || !hasExternalContacts
-                ? null
-                : (tab) => setState(() {
-                    _tab = tab;
-                    if (!_sortOptionsFor(tab).contains(_sort)) {
-                      _sort = _DirectorySort.displayName;
+          });
+        }
+        return _DirectoryPanel(
+          // Busy lamps follow the primary phone system for now.
+          onVisibleTargets: line == AccountLine.primary
+              ? ref
+                    .read(directoryPresenceMonitorProvider)
+                    .prioritizeVisibleTargets
+              : (_) {},
+          onScrolling: line == AccountLine.primary
+              ? ref.read(directoryPresenceMonitorProvider).setScrolling
+              : (_) {},
+          entries: _visibleEntries(displayedItems, forcedTab: effectiveTab),
+          totalInTab: _tabEntries(
+            displayedItems,
+            forcedTab: effectiveTab,
+          ).length,
+          tab: effectiveTab,
+          showExternalTab: hasExternalContacts && !transferMode,
+          transferMode: transferMode,
+          accountChoice: hasSecond && !transferMode
+              ? LineChoiceRow(
+                  title: 'Phone system',
+                  lines: ref.watch(accountLinesProvider),
+                  selected: line,
+                  onSelected: (value) {
+                    if (value != null) {
+                      ref
+                          .read(selectedDirectoryLineProvider.notifier)
+                          .select(value);
                     }
-                  }),
-            onQueryChanged: (value) => setState(() => _query = value.trim()),
-            onSortChanged: (value) => setState(() => _sort = value),
-            onToggleDirection: () => setState(() => _ascending = !_ascending),
-            onRefresh: () => ref.read(directoryProvider.notifier).refresh(),
-            onOpen: _openEntry,
-            onCall: _callEntry,
-            onTransfer: _transferEntry,
-            onTransferNumber: _transferToNumber,
-          );
-        },
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) => Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 360),
-            child: EmptyState(
-              framed: false,
-              icon: AppIcons.navDirectory,
-              title: 'Directory unavailable',
-              message: 'We could not load company extensions right now.',
-              action: OutlinedButton.icon(
-                onPressed: () => ref.read(directoryProvider.notifier).refresh(),
-                icon: const Icon(AppIcons.refresh, size: AppIconSize.sm),
-                label: const Text('Try again'),
-              ),
+                  },
+                )
+              : null,
+          accountActive:
+              hasSecond && !transferMode && line != AccountLine.primary,
+          searchController: _searchController,
+          query: _query,
+          sort: _sort,
+          ascending: _ascending,
+          onTabChanged: transferMode || !hasExternalContacts
+              ? null
+              : (tab) => setState(() {
+                  _tab = tab;
+                  if (!_sortOptionsFor(tab).contains(_sort)) {
+                    _sort = _DirectorySort.displayName;
+                  }
+                }),
+          onQueryChanged: (value) => setState(() => _query = value.trim()),
+          onSortChanged: (value) => setState(() => _sort = value),
+          onToggleDirection: () => setState(() => _ascending = !_ascending),
+          onRefresh: () => _refreshDirectory(line),
+          onOpen: _openEntry,
+          onCall: _callEntry,
+          onTransfer: _transferEntry,
+          onTransferNumber: _transferToNumber,
+        );
+      },
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (error, _) => Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: EmptyState(
+            framed: false,
+            icon: AppIcons.navDirectory,
+            title: 'Directory unavailable',
+            message: 'We could not load company extensions right now.',
+            action: OutlinedButton.icon(
+              onPressed: () => _refreshDirectory(line),
+              icon: const Icon(AppIcons.refresh, size: AppIconSize.sm),
+              label: const Text('Try again'),
             ),
           ),
         ),
@@ -313,7 +374,13 @@ class _DirectoryScreenState extends ConsumerState<DirectoryScreen> {
     ref.read(dialerControllerProvider.notifier)
       ..clear()
       ..append(destination);
-    context.go(RoutePaths.dialer);
+    if (ref.read(hasSecondaryAccountProvider)) {
+      // A short extension only exists on this entry's phone system.
+      ref
+          .read(dialerLineHintProvider.notifier)
+          .set(destination, ref.read(selectedDirectoryLineProvider));
+    }
+    openDialerOrAddCall(context, ref);
   }
 
   /// Transfers to a number typed in the search box, whether or not it is in
@@ -637,8 +704,13 @@ class _DirectoryPanel extends StatefulWidget {
     required this.onCall,
     required this.onTransfer,
     required this.onTransferNumber,
+    this.accountChoice,
+    this.accountActive = false,
   });
 
+  /// Which phone system's directory to show; only with two accounts.
+  final Widget? accountChoice;
+  final bool accountActive;
   final List<DirectoryEntry> entries;
   final ValueChanged<Iterable<String>> onVisibleTargets;
   final ValueChanged<bool> onScrolling;
@@ -1023,16 +1095,24 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
                 const SizedBox(width: 8),
                 IconButton.outlined(
                   tooltip: _showSortFilters
-                      ? 'Hide sort options'
+                      ? 'Hide options'
+                      : widget.accountChoice != null
+                      ? 'Sort and account options'
                       : 'Sort options',
                   onPressed: () =>
                       setState(() => _showSortFilters = !_showSortFilters),
                   style: IconButton.styleFrom(
-                    foregroundColor: _isDefaultSort && !_showSortFilters
+                    foregroundColor:
+                        _isDefaultSort &&
+                            !widget.accountActive &&
+                            !_showSortFilters
                         ? null
                         : Theme.of(context).colorScheme.primary,
                     side: BorderSide(
-                      color: _isDefaultSort && !_showSortFilters
+                      color:
+                          _isDefaultSort &&
+                              !widget.accountActive &&
+                              !_showSortFilters
                           ? Theme.of(context).colorScheme.outline
                           : Theme.of(context).colorScheme.primary,
                     ),
@@ -1057,45 +1137,54 @@ class _DirectoryPanelState extends State<_DirectoryPanel> {
             child: _showSortFilters
                 ? Padding(
                     padding: const EdgeInsets.only(top: 10, right: 12),
-                    child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(
-                          child: DropdownButtonFormField<_DirectorySort>(
-                            key: ValueKey('${widget.tab}-${widget.sort}'),
-                            initialValue: widget.sort,
-                            isExpanded: true,
-                            decoration: const InputDecoration(
-                              labelText: 'Sort by',
+                        if (widget.accountChoice != null) ...[
+                          widget.accountChoice!,
+                          const SizedBox(height: 12),
+                        ],
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButtonFormField<_DirectorySort>(
+                                key: ValueKey('${widget.tab}-${widget.sort}'),
+                                initialValue: widget.sort,
+                                isExpanded: true,
+                                decoration: const InputDecoration(
+                                  labelText: 'Sort by',
+                                ),
+                                items: _sortOptionsFor(widget.tab)
+                                    .map(
+                                      (option) => DropdownMenuItem(
+                                        value: option,
+                                        child: Text(
+                                          option.labelFor(widget.tab),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    )
+                                    .toList(),
+                                onChanged: (value) {
+                                  if (value != null) {
+                                    widget.onSortChanged(value);
+                                  }
+                                },
+                              ),
                             ),
-                            items: _sortOptionsFor(widget.tab)
-                                .map(
-                                  (option) => DropdownMenuItem(
-                                    value: option,
-                                    child: Text(
-                                      option.labelFor(widget.tab),
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              if (value != null) {
-                                widget.onSortChanged(value);
-                              }
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        IconButton(
-                          tooltip: widget.ascending
-                              ? 'Sort descending'
-                              : 'Sort ascending',
-                          onPressed: widget.onToggleDirection,
-                          icon: Icon(
-                            widget.ascending
-                                ? Icons.arrow_upward
-                                : Icons.arrow_downward,
-                          ),
+                            const SizedBox(width: 4),
+                            IconButton(
+                              tooltip: widget.ascending
+                                  ? 'Sort descending'
+                                  : 'Sort ascending',
+                              onPressed: widget.onToggleDirection,
+                              icon: Icon(
+                                widget.ascending
+                                    ? Icons.arrow_upward
+                                    : Icons.arrow_downward,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),

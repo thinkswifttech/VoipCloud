@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../shared/utils/display_name.dart';
 
-import '../../../app/router/route_names.dart';
+import '../../calls/presentation/add_call_dialog.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/files/downloads_saver.dart';
 import '../../../features/dialer/presentation/dialer_controller.dart';
@@ -282,7 +281,7 @@ class QuickDialPanel extends ConsumerWidget {
     ref.read(dialerControllerProvider.notifier)
       ..clear()
       ..append(destination);
-    context.go(RoutePaths.dialer);
+    openDialerOrAddCall(context, ref);
   }
 
   Future<void> _showAddSheet(

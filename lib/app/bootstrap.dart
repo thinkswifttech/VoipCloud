@@ -25,6 +25,10 @@ Future<void> bootstrap(FutureOr<Widget> Function() builder) async {
   }
 
   FlutterError.onError = (details) {
+    // Flutter's debug-only keyboard assertion fires when Caps Lock is toggled on
+    // macOS. It is a framework bug, not an app problem, and release builds do
+    // not run the assertion.
+    if (kDebugMode && _isMacCapsLockAssertion(details.exception)) return;
     FlutterError.presentError(details);
     AppLogger.error(
       'Flutter framework error',
@@ -56,10 +60,22 @@ Future<void> _initializeFirebaseIfSupported() async {
   try {
     await Firebase.initializeApp();
   } catch (error, stackTrace) {
+    if (defaultTargetPlatform == TargetPlatform.macOS) {
+      // macOS has no Firebase configuration file yet, so push is simply off.
+      AppLogger.info('Firebase is not configured on macOS; push is off');
+      return;
+    }
     AppLogger.error(
       'Firebase initialization skipped',
       error: error,
       stackTrace: stackTrace,
     );
   }
+}
+
+bool _isMacCapsLockAssertion(Object exception) {
+  return defaultTargetPlatform == TargetPlatform.macOS &&
+      exception.toString().contains(
+        'Attempted to send a key down event when no keys are in keysPressed',
+      );
 }

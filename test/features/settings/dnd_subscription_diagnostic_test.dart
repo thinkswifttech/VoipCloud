@@ -20,7 +20,7 @@ class _Platform extends VoipPlatformChannel {
   }
 
   @override
-  Future<void> stopDndDiagnostic() async {
+  Future<void> stopDndDiagnostic({String accountId = 'primary'}) async {
     operations.add('stop');
   }
 }
@@ -49,7 +49,7 @@ void main() {
       'extensions': ['*76210'],
       'diagnostic': true,
     });
-    expect(calls.last.arguments, {'diagnostic': true});
+    expect(calls.last.arguments, {'diagnostic': true, 'accountId': 'primary'});
     expect(() => platform.startDndDiagnostic('210@other'), throwsArgumentError);
   });
 
@@ -77,6 +77,7 @@ void main() {
       'extensions': ['*76210'],
       'diagnostic': true,
       'subscriptionId': 'epoch-1',
+      'accountId': 'primary',
     });
     expect(calls.last.arguments, {
       'extensions': ['211'],

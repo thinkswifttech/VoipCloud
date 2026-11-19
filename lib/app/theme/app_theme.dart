@@ -11,6 +11,27 @@ class AppTheme {
   static const Color accentBlue = Color(0xFF3970C2);
   static const Color accentMagenta = Color(0xFF632776);
 
+  /// Red-when-selected look shared by every segmented selector in settings.
+  static ButtonStyle segmentedButtonStyle(ThemeData theme) => ButtonStyle(
+    backgroundColor: WidgetStateProperty.resolveWith((states) {
+      if (states.contains(WidgetState.selected)) return swiftRed;
+      return theme.brightness == Brightness.dark
+          ? theme.colorScheme.surface
+          : Colors.white;
+    }),
+    foregroundColor: WidgetStateProperty.resolveWith(
+      (states) =>
+          states.contains(WidgetState.selected) ? Colors.white : swiftRed,
+    ),
+    side: WidgetStatePropertyAll(
+      BorderSide(color: swiftRed.withValues(alpha: 0.45)),
+    ),
+    iconColor: WidgetStateProperty.resolveWith(
+      (states) =>
+          states.contains(WidgetState.selected) ? Colors.white : swiftRed,
+    ),
+  );
+
   static const String headingFontFamily = 'Raleway';
   static const String bodyFontFamily = 'OpenSans';
   static const String numberFontFamily = bodyFontFamily;
@@ -28,6 +49,12 @@ class AppTheme {
       color: color,
     );
   }
+
+  /// Same size and weight, drawn in Open Sans. Raleway's digits are old-style
+  /// (uneven heights), so any text that contains numbers (an extension, an
+  /// account label such as "210 · swift") uses this.
+  static TextStyle digits(TextStyle? base) =>
+      (base ?? const TextStyle()).copyWith(fontFamily: numberFontFamily);
 
   static const Color ink = Color(0xFF191B1F);
   static const Color mutedInk = Color(0xFF60646B);

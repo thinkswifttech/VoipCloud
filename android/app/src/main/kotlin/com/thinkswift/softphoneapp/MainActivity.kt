@@ -30,6 +30,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import org.linphone.core.Account
+import org.linphone.core.AuthInfo
 import org.linphone.core.AccountParams
 import org.linphone.core.AudioDevice
 import org.linphone.core.AVPFMode
@@ -73,6 +74,7 @@ class MainActivity : FlutterActivity() {
     private val messageEventsName = "voipcloud/linphone/messages"
     private val sipLogEventsName = "voipcloud/linphone/logs"
     private val presenceEventsName = "voipcloud/linphone/presence"
+    private val callingNetworkEventsName = "voipcloud/linphone/calling_network"
     private val proximityChannelName = "voipcloud/proximity"
     private val messagingNotificationsChannelName = "voipcloud/messaging_notifications"
     private val externalCommunicationChannelName =
@@ -86,6 +88,8 @@ class MainActivity : FlutterActivity() {
     private var pendingMessagingNotification: Map<String, String>? = null
     private var externalCommunicationChannel: MethodChannel? = null
     private var pendingExternalCommunicationIntent: Map<String, String>? = null
+    private var shareChannel: MethodChannel? = null
+    private var pendingShare: Map<String, Any>? = null
     private var launchedForIncomingCall = false
     private var incomingCallSessionId: String? = null
     private val lockScreenCallListener: (AndroidCallCoordinator.Snapshot?) -> Unit = { snapshot ->
@@ -109,6 +113,7 @@ class MainActivity : FlutterActivity() {
         requestAudioPermissions()
         handleNotificationIntent(intent)
         handleExternalCommunicationIntent(intent)
+        handleShareIntent(intent)
     }
 
     override fun getInitialRoute(): String? {
@@ -135,6 +140,7 @@ class MainActivity : FlutterActivity() {
         configureIncomingCallWindow(intent)
         handleNotificationIntent(intent)
         handleExternalCommunicationIntent(intent)
+        handleShareIntent(intent)
         bridge?.syncCurrentCall("new-intent")
     }
 
@@ -303,6 +309,21 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        shareChannel = MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "voipcloud/share_intents"
+        ).apply {
+            setMethodCallHandler { call, result ->
+                if (call.method == "consumePendingShare") {
+                    val pending = pendingShare
+                    pendingShare = null
+                    result.success(pending)
+                } else {
+                    result.notImplemented()
+                }
+            }
+        }
+
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             methodChannelName
@@ -447,6 +468,13 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             presenceEventsName
         ).setStreamHandler(ForwardingStreamHandler { bridge?.presenceSink = it })
+        EventChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            callingNetworkEventsName
+        ).setStreamHandler(ForwardingStreamHandler {
+            bridge?.callingNetworkSink = it
+            if (it != null) bridge?.pushCallingNetworkStatus(force = true)
+        })
 
         bridge?.prepareForAppStart()
     }
@@ -613,6 +641,21 @@ class MainActivity : FlutterActivity() {
         Log.i("VoIPCloud/ExternalIntent", "Accepted external $action action")
     }
 
+    /** Something shared from another app's share sheet; copied off the main thread. */
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent == null || !ShareIntentReader.isShare(intent)) return
+        val copy = Intent(intent)
+        // Prevent an activity recreation from replaying the same share.
+        intent.action = null
+        Thread {
+            val payload = ShareIntentReader.read(applicationContext, copy) ?: return@Thread
+            runOnUiThread {
+                pendingShare = payload
+                shareChannel?.invokeMethod("shareReceived", payload)
+            }
+        }.start()
+    }
+
     private fun isSafeExternalDestination(destination: String): Boolean {
         if (destination.isBlank() || destination.length > 128) return false
         return destination.all { character ->
@@ -737,11 +780,14 @@ private class ForwardingStreamHandler(
     override fun onCancel(arguments: Any?) = update(null)
 }
 
+private const val NETWORK_LOSS_WAIT_MS = 3_000L
+
 private class LinphoneBridge private constructor(private val context: android.content.Context) {
     var registrationSink: EventChannel.EventSink? = null
     var messageSink: EventChannel.EventSink? = null
     var sipLogSink: EventChannel.EventSink? = null
     var presenceSink: EventChannel.EventSink? = null
+    var callingNetworkSink: EventChannel.EventSink? = null
     private val callEventLock = Any()
     private var callSink: EventChannel.EventSink? = null
     private val detachedCallEvents = java.util.ArrayDeque<Map<String, Any?>>()
@@ -758,7 +804,12 @@ private class LinphoneBridge private constructor(private val context: android.co
 
     companion object {
         private const val DETACHED_CALL_EVENT_CAPACITY = 64
+        /** Ids of the two lines on the channel; the primary one is the original account. */
+        private const val PRIMARY_ID = "primary"
+        private const val SECONDARY_ID = "secondary"
         private const val FEATURE_CODE_HANGUP_DELAY_MS = 1500L
+        // Seven days, the registrar's max-expires. The server's renewal push asks a phone to
+        // register again before this runs out (see Project Documents/Softphone_App_Registration_Renewal.md).
         private const val MOBILE_REGISTRATION_EXPIRES_SECONDS = 604_800
         private const val PUSH_CALL_RECONCILE_INTERVAL_MS = 150L
         private const val PUSH_CALL_RECONCILE_TIMEOUT_MS = 20_000L
@@ -775,17 +826,49 @@ private class LinphoneBridge private constructor(private val context: android.co
         hostActivity = activity
     }
 
+    private fun isSecondary(candidate: Account): Boolean =
+        candidate.params.idkey == SECONDARY_ID
+
+    private fun secondaryAccount(): Account? =
+        core?.accountList?.firstOrNull { isSecondary(it) }
+
+    /** The original account: never the second line, even if it is listed first. */
+    private fun primaryFromList(): Account? =
+        core?.defaultAccount?.takeIf { !isSecondary(it) }
+            ?: core?.accountList?.firstOrNull { !isSecondary(it) }
+
+    private fun accountIdFor(candidate: Account?): String =
+        if (candidate != null && isSecondary(candidate)) SECONDARY_ID else PRIMARY_ID
+
+    /** Which line a call is on: the second one when it was addressed to / sent from its identity. */
+    private fun accountIdForCall(call: Call): String {
+        val second = secondaryAccount()?.params?.identityAddress ?: return PRIMARY_ID
+        val local = call.callLog?.localAddress
+            ?: if (call.dir == Call.Dir.Incoming) call.callLog?.toAddress else call.callLog?.fromAddress
+        if (local != null &&
+            local.username.equals(second.username, ignoreCase = true) &&
+            local.domain.equals(second.domain, ignoreCase = true)
+        ) {
+            return SECONDARY_ID
+        }
+        return PRIMARY_ID
+    }
+
+    private fun accountsForPolicy(): List<Account> =
+        listOfNotNull(account ?: core?.defaultAccount, secondaryAccount()).distinct()
+
     private fun publishDeviceCallPolicy() {
-        val currentAccount = account ?: core?.defaultAccount ?: return
-        val params = currentAccount.params.clone()
-        val updated = DeviceCallPolicy.contactParameters(
-            params.contactUriParameters, CallerIdentityStore.isDnd(context)
-        )
-        if (params.contactUriParameters == updated) return
-        params.contactUriParameters = updated
-        // Refresh this contact, retaining registration and messaging push tokens.
-        currentAccount.params = params
-        currentAccount.refreshRegister()
+        for (currentAccount in accountsForPolicy()) {
+            val params = currentAccount.params.clone()
+            val updated = DeviceCallPolicy.contactParameters(
+                params.contactUriParameters, CallerIdentityStore.isDnd(context)
+            )
+            if (params.contactUriParameters == updated) continue
+            params.contactUriParameters = updated
+            // Refresh this contact, retaining registration and messaging push tokens.
+            currentAccount.params = params
+            currentAccount.refreshRegister()
+        }
     }
 
     private var core: Core? = null
@@ -796,7 +879,8 @@ private class LinphoneBridge private constructor(private val context: android.co
         val extension: String,
         val eventPackage: String,
         val subscriptionId: String = "",
-        val generation: Int = 0
+        val generation: Int = 0,
+        val accountId: String = PRIMARY_ID
     )
 
     private val presenceSubscriptions =
@@ -843,6 +927,126 @@ private class LinphoneBridge private constructor(private val context: android.co
         context.getSharedPreferences("voipcloud_audio_levels", Context.MODE_PRIVATE)
     }
 
+    private var callingNetwork: CallingNetworkManager? = null
+
+    private fun ensureCallingNetwork(): CallingNetworkManager {
+        callingNetwork?.let { return it }
+        return CallingNetworkManager(
+            context = context,
+            core = { core },
+            endpoint = { callingNetworkEndpoint() },
+            hasLiveCall = { hasActiveCall() },
+            endCallsForNetworkLoss = { path -> endCallsForNetworkLoss(path) },
+            onStatusChanged = { pushCallingNetworkStatus() }
+        ).also { callingNetwork = it }
+    }
+
+    private var lastCallingNetworkStatus: Map<String, Any?>? = null
+
+    /** Sends the routing status to Flutter, only when it changed (the manager re-evaluates every few seconds). */
+    fun pushCallingNetworkStatus(force: Boolean = false) {
+        val sink = callingNetworkSink ?: return
+        val status = callingNetwork?.status() ?: return
+        if (!force && status == lastCallingNetworkStatus) return
+        lastCallingNetworkStatus = status
+        sink.success(status)
+    }
+
+    /** Calls ended because their network was lost, by call id, with the network's name. */
+    private val networkLossEndedCalls = mutableMapOf<String, String>()
+
+    private class NetworkLossPending(val path: CallingNetworkPolicy.Path, val startedMs: Long) {
+        var sawDown = false
+    }
+
+    private var networkLossPending: NetworkLossPending? = null
+    private val networkLossHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val networkLossChecker = Runnable { checkNetworkLossEnd() }
+
+    /**
+     * The network every live call runs on is gone, and their sockets cannot
+     * move. All of them (including held, waiting and ringing calls) must end.
+     * The hang-up is held back, for at most [NETWORK_LOSS_WAIT_MS], until the SDK
+     * has a working connection again, so the BYE can reach the server and the
+     * other party is released at once instead of after the PBX's media timeout.
+     * The reason is remembered so the app can say why the call ended.
+     */
+    private fun endCallsForNetworkLoss(path: CallingNetworkPolicy.Path) {
+        val live = core?.calls?.toList().orEmpty().filter { isLiveCall(it) }
+        Log.i("VoIPCloud/Linphone", "Network lost (${path.wire}); ${live.size} call(s) to end")
+        for (call in live) networkLossEndedCalls[callId(call)] = path.wire
+        if (networkLossPending != null) return
+        networkLossPending = NetworkLossPending(path, System.currentTimeMillis())
+        networkLossHandler.post(networkLossChecker)
+    }
+
+    private fun checkNetworkLossEnd() {
+        val pending = networkLossPending ?: return
+        val state = (account ?: core?.defaultAccount)?.state
+        if (state != org.linphone.core.RegistrationState.Ok) pending.sawDown = true
+        val elapsed = System.currentTimeMillis() - pending.startedMs
+        val connected = pending.sawDown && state == org.linphone.core.RegistrationState.Ok &&
+            elapsed >= 300
+        if (connected || elapsed >= NETWORK_LOSS_WAIT_MS) {
+            networkLossPending = null
+            Log.i(
+                "VoIPCloud/Linphone",
+                "Ending calls after network loss (connected=$connected, waited ${elapsed}ms)"
+            )
+            performEndCallsForNetworkLoss(pending.path)
+            return
+        }
+        networkLossHandler.postDelayed(networkLossChecker, 100)
+    }
+
+    private fun performEndCallsForNetworkLoss(path: CallingNetworkPolicy.Path) {
+        val live = core?.calls?.toList().orEmpty().filter { isLiveCall(it) }
+        for (call in live) {
+            val id = callId(call)
+            networkLossEndedCalls[id] = path.wire
+            try {
+                if (call.dir == Call.Dir.Incoming &&
+                    (call.state == Call.State.IncomingReceived ||
+                        call.state == Call.State.IncomingEarlyMedia)
+                ) {
+                    // Device-scoped decline: other devices keep ringing.
+                    call.decline(Reason.Busy)
+                } else {
+                    AndroidCallCoordinator.endFromApp(
+                        context,
+                        id,
+                        "calling_network_lost:${path.wire}"
+                    )
+                }
+            } catch (error: Throwable) {
+                Log.w("VoIPCloud/Linphone", "Could not end call $id after network loss", error)
+                networkLossEndedCalls.remove(id)
+            }
+        }
+    }
+
+    /** Runs [block] once a route change in progress has settled (bounded wait). */
+    private fun whenRouteSettled(attempt: Int = 0, block: () -> Unit) {
+        val network = callingNetwork
+        if (network == null || !network.isTransitioning() || attempt >= 10) {
+            block()
+            return
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+            { whenRouteSettled(attempt + 1, block) },
+            150
+        )
+    }
+
+    /** Registrar the calling-network validation probes connect to. */
+    private fun callingNetworkEndpoint(): Pair<String, Int>? {
+        val server = (account ?: core?.defaultAccount)?.params?.serverAddress ?: return null
+        val host = server.domain?.takeIf { it.isNotBlank() } ?: return null
+        val port = server.port.takeIf { it > 0 }
+            ?: if (server.transport == org.linphone.core.TransportType.Tls) 5061 else 5060
+        return host to port
+    }
+
     private val listener = object : CoreListenerStub() {
         override fun onAccountRegistrationStateChanged(
             core: Core,
@@ -850,11 +1054,12 @@ private class LinphoneBridge private constructor(private val context: android.co
             state: RegistrationState?,
             message: String
         ) {
+            val line = accountIdFor(account)
             Log.i(
                 "VoIPCloud/Linphone",
-                "Registration state=${registrationState(state)} message=${message.ifBlank { "none" }}"
+                "Registration line=$line state=${registrationState(state)} message=${message.ifBlank { "none" }}"
             )
-            emitRegistration(registrationState(state), message)
+            emitRegistration(registrationState(state), message, line)
         }
 
         override fun onCallStateChanged(
@@ -864,6 +1069,7 @@ private class LinphoneBridge private constructor(private val context: android.co
             message: String
         ) {
             val currentState = state ?: call.state
+            callingNetwork?.liveCallsChanged()
             waitingPreviewPlayer?.release()
             waitingPreviewPlayer = null
             updateCallToneLevel(core, call, currentState)
@@ -1006,6 +1212,17 @@ private class LinphoneBridge private constructor(private val context: android.co
                         SoftphoneBackgroundPermissions.isIgnoringBatteryOptimizations(context)
                     )
                 }
+                "getBackgroundStatus" -> {
+                    result.success(SoftphoneBackgroundPermissions.backgroundStatus(context))
+                }
+                "openAppBatterySettings" -> {
+                    try {
+                        SoftphoneBackgroundPermissions.openAppSettings(hostActivity ?: context)
+                    } catch (error: Throwable) {
+                        Log.e("Softphone/Background", "Failed to open app settings", error)
+                    }
+                    result.success(null)
+                }
                 "requestIgnoreBatteryOptimizations" -> {
                     val activity = hostActivity
                     if (activity == null) {
@@ -1049,7 +1266,8 @@ private class LinphoneBridge private constructor(private val context: android.co
                     CallerIdentityStore.updateDirectory(
                         context,
                         call.argument<String>("tenantKey") ?: "default",
-                        entries
+                        entries,
+                        call.argument<String>("line") ?: "primary"
                     )
                     result.success(null)
                 }
@@ -1060,6 +1278,16 @@ private class LinphoneBridge private constructor(private val context: android.co
                     )
                     publishDeviceCallPolicy()
                     result.success(null)
+                }
+                "setCallingNetworkPreference" -> {
+                    ensureCallingNetwork().configure(
+                        call.argument<Boolean>("enabled") ?: false,
+                        CallingNetworkPolicy.Preference.parse(call.argument<String>("preference"))
+                    )
+                    result.success(null)
+                }
+                "getCallingNetworkStatus" -> {
+                    result.success(ensureCallingNetwork().status())
                 }
                 "clearNativeCallState" -> {
                     CallerIdentityStore.clear(context)
@@ -1120,25 +1348,35 @@ private class LinphoneBridge private constructor(private val context: android.co
                     purgeAccount()
                     result.success(null)
                 }
+                "removeSecondaryAccount" -> {
+                    removeSecondaryAccount()
+                    result.success(null)
+                }
                 "makeCall" -> {
                     val destination = call.argument<String>("destination") ?: ""
+                    val lineId = call.argument<String>("accountId")
                     AndroidCallCoordinator.beginOutgoing(context, destination) { outcome ->
                         outcome.fold(
                             onSuccess = {
-                                runCatching { makeCall(destination) }.fold(
-                                    onSuccess = { result.success(null) },
-                                    onFailure = { error ->
-                                        AndroidCallCoordinator.endFromApp(context)
-                                        result.error("CALL_FAILED", error.message, null)
-                                    }
-                                )
+                                whenRouteSettled {
+                                    runCatching { makeCall(destination, lineId) }.fold(
+                                        onSuccess = { result.success(null) },
+                                        onFailure = { error ->
+                                            AndroidCallCoordinator.endFromApp(context)
+                                            result.error("CALL_FAILED", error.message, null)
+                                        }
+                                    )
+                                }
                             },
                             onFailure = { error -> result.error("TELECOM_UNAVAILABLE", error.message, null) }
                         )
                     }
                 }
                 "dialFeatureCode" -> {
-                    val id = dialFeatureCode(call.argument<String>("code") ?: "")
+                    val id = dialFeatureCode(
+                        call.argument<String>("code") ?: "",
+                        call.argument<String>("accountId")
+                    )
                     result.success(id)
                 }
                 "getAudioVolumeLevels" -> {
@@ -1287,12 +1525,16 @@ private class LinphoneBridge private constructor(private val context: android.co
                         call.argument<Boolean>("diagnostic") ?: false,
                         call.argument<String>("subscriptionId") ?: "",
                         call.argument<Int>("generation") ?: 0,
-                        call.argument<List<*>>("additions") ?: extensions
+                        call.argument<List<*>>("additions") ?: extensions,
+                        accountId = accountIdArg(call.argument<String>("accountId"))
                     )
                     result.success(null)
                 }
                 "stopPresenceSubscriptions" -> {
-                    stopPresenceSubscriptions(call.argument<Boolean>("diagnostic") ?: false)
+                    stopPresenceSubscriptions(
+                        call.argument<Boolean>("diagnostic") ?: false,
+                        call.argument<String>("accountId")?.let(::accountIdArg)
+                    )
                     result.success(null)
                 }
                 "setSipLoggingEnabled" -> {
@@ -1350,6 +1592,9 @@ private class LinphoneBridge private constructor(private val context: android.co
             // Identify VoIPCloud mobile registrations so Flexisip can route
             // app and server-side anchor traffic without per-extension rules.
             it.setUserAgent("VoIPCloud-Mobile", BuildConfig.VERSION_NAME)
+            // Liblinphone declines unanswered calls after 30 s by default; queue
+            // calls must keep ringing until the server stops them.
+            it.incTimeout = 120
             // Ensure liblinphone creates its PushNotificationConfig before
             // account setup. configurePushNotifications() then replaces the
             // generated values with the FCM token supplied by Flutter.
@@ -1386,13 +1631,14 @@ private class LinphoneBridge private constructor(private val context: android.co
         core?.calls?.toList()?.forEach { existingCall ->
             reportCallToCoordinator(existingCall, existingCall.state, "core_start")
         }
-        account = core?.defaultAccount ?: core?.accountList?.firstOrNull()
+        account = core?.defaultAccount ?: primaryFromList()
         val loadedState = account?.state
         if (loadedState != null) {
             emitRegistration(registrationState(loadedState), null)
         } else {
             emitRegistration("unregistered", null)
         }
+        ensureCallingNetwork().start()
     }
 
     private fun updateCallToneLevel(core: Core, call: Call, state: Call.State) {
@@ -1741,12 +1987,12 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     fun isRegistered(): Boolean {
-        val currentAccount = account ?: core?.defaultAccount ?: core?.accountList?.firstOrNull()
+        val currentAccount = account ?: core?.defaultAccount ?: primaryFromList()
         return currentAccount?.state == RegistrationState.Ok
     }
 
     fun sipExtension(): String? {
-        val currentAccount = account ?: core?.defaultAccount ?: core?.accountList?.firstOrNull()
+        val currentAccount = account ?: core?.defaultAccount ?: primaryFromList()
         val username = currentAccount?.params?.identityAddress?.username?.trim()
         if (!username.isNullOrEmpty()) return username
         val saved = SipCredentialStore.load(context) ?: return null
@@ -1754,7 +2000,7 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     fun syncRegistrationState(reason: String) {
-        val currentAccount = account ?: core?.defaultAccount ?: core?.accountList?.firstOrNull()
+        val currentAccount = account ?: core?.defaultAccount ?: primaryFromList()
         val currentState = currentAccount?.state
         val status = registrationState(currentState)
         Log.i(
@@ -1762,13 +2008,16 @@ private class LinphoneBridge private constructor(private val context: android.co
             "Replaying registration state reason=$reason status=$status accounts=${core?.accountList?.size ?: 0}"
         )
         emitRegistration(status, null)
+        secondaryAccount()?.let {
+            emitRegistration(registrationState(it.state), null, SECONDARY_ID)
+        }
     }
 
     fun prepareForAppStart() {
         try {
             initialize()
             restoreSavedAccountIfNeeded()
-            account = core?.defaultAccount ?: core?.accountList?.firstOrNull() ?: account
+            account = core?.defaultAccount ?: primaryFromList() ?: account
             core?.refreshRegisters()
             syncCurrentCall("app-start")
             Log.i(
@@ -1784,7 +2033,7 @@ private class LinphoneBridge private constructor(private val context: android.co
         try {
             initialize()
             restoreSavedAccountIfNeeded()
-            account = core?.defaultAccount ?: core?.accountList?.firstOrNull() ?: account
+            account = core?.defaultAccount ?: primaryFromList() ?: account
             core?.refreshRegisters()
             syncCurrentCall(reason)
             schedulePushCallReconciliation(reason)
@@ -1799,16 +2048,24 @@ private class LinphoneBridge private constructor(private val context: android.co
 
     private fun restoreSavedAccountIfNeeded() {
         val currentCore = core ?: return
-        if (currentCore.accountList.isNotEmpty()) {
-            account = currentCore.defaultAccount ?: currentCore.accountList.firstOrNull()
+        if (primaryFromList() != null) {
+            account = primaryFromList()
             enforceMobileRegistrationExpiry()
-            return
+        } else {
+            val saved = SipCredentialStore.load(context)
+            if (saved != null) {
+                if (BuildConfig.DEBUG) {
+                    Log.d("VoIPCloud/Linphone", "Restoring saved SIP account after process restart")
+                }
+                configureAccount(saved)
+            }
         }
-        val saved = SipCredentialStore.load(context) ?: return
-        if (BuildConfig.DEBUG) {
-            Log.d("VoIPCloud/Linphone", "Restoring saved SIP account after process restart")
+        if (account != null && secondaryAccount() == null) {
+            SipCredentialStore.loadSecondary(context)?.let {
+                Log.i("VoIPCloud/Linphone", "Restoring saved second SIP account")
+                configureAccount(it)
+            }
         }
-        configureAccount(saved)
     }
 
     private fun enforceMobileRegistrationExpiry() {
@@ -1857,8 +2114,21 @@ private class LinphoneBridge private constructor(private val context: android.co
         val pushBundleId = stringArg(args, "pushBundleId")
         val pushTeamId = stringArg(args, "pushTeamId")
 
-        currentCore.accountList.forEach { currentCore.removeAccount(it) }
-        currentCore.authInfoList.forEach { currentCore.removeAuthInfo(it) }
+        val secondarySlot = stringArg(args, "accountSlot") == SECONDARY_ID
+        val savedSecondary = SipCredentialStore.loadSecondary(context)
+        if (secondarySlot) {
+            // Replace only the second line; the primary account stays registered.
+            currentCore.accountList.toList().filter { isSecondary(it) }
+                .forEach { currentCore.removeAccount(it) }
+            savedSecondary?.let { removeAuthInfosFor(currentCore, it) }
+            removeAuthInfosFor(currentCore, args)
+        } else {
+            currentCore.accountList.toList().filter { !isSecondary(it) }
+                .forEach { currentCore.removeAccount(it) }
+            currentCore.authInfoList.toList()
+                .filter { savedSecondary == null || !authInfoMatches(it, savedSecondary) }
+                .forEach { currentCore.removeAuthInfo(it) }
+        }
         configureNatPolicy(currentCore, stunServer, turnServer)
 
         val authInfo = Factory.instance().createAuthInfo(
@@ -1907,11 +2177,18 @@ private class LinphoneBridge private constructor(private val context: android.co
             params.contactUriParameters, CallerIdentityStore.isDnd(context)
         )
         params.setRegisterEnabled(true)
+        if (secondarySlot) params.idkey = SECONDARY_ID
 
-        account = currentCore.createAccount(params)
-        currentCore.addAccount(account!!)
-        currentCore.defaultAccount = account
-        SipCredentialStore.save(context, args)
+        val created = currentCore.createAccount(params)
+        currentCore.addAccount(created)
+        if (secondarySlot) {
+            // The primary account stays the default and `account` keeps pointing at it.
+            SipCredentialStore.saveSecondary(context, args)
+        } else {
+            account = created
+            currentCore.defaultAccount = created
+            SipCredentialStore.save(context, args)
+        }
         Log.i(
             "VoIPCloud/Linphone",
             "Account signaling configuredRegistrar=${normalizeSipAddress(registrar)} server=${server.asStringUriOnly()} edgeProxy=${outboundProxy.isNotEmpty()} outboundProxyMode=${params.isOutboundProxyEnabled}"
@@ -1922,7 +2199,37 @@ private class LinphoneBridge private constructor(private val context: android.co
                 "Configured SIP account identity=${identity.asStringUriOnly()} registrar=${normalizeSipAddress(registrar)} server=${server.asStringUriOnly()} edge=${outboundProxy.ifEmpty { "none" }} routingMode=${if (outboundProxy.isEmpty()) "registrar-direct" else "edge-proxy"} stun=${stunServer.ifEmpty { "none" }} turn=${turnServer.ifEmpty { "none" }}"
             )
         }
-        emitRegistration("configuring", "SIP account configured")
+        emitRegistration(
+            "configuring",
+            "SIP account configured",
+            if (secondarySlot) SECONDARY_ID else PRIMARY_ID
+        )
+    }
+
+    private fun authInfoMatches(info: AuthInfo, saved: Map<*, *>): Boolean {
+        val username = stringArg(saved, "authUsername").ifEmpty { stringArg(saved, "sipUsername") }
+        val domain = stringArg(saved, "domain")
+        val realm = stringArg(saved, "realm").ifEmpty { domain }
+        return info.username == username && info.realm == realm
+    }
+
+    private fun removeAuthInfosFor(currentCore: Core, saved: Map<*, *>) {
+        currentCore.authInfoList.toList()
+            .filter { authInfoMatches(it, saved) }
+            .forEach { currentCore.removeAuthInfo(it) }
+    }
+
+    /** Removes only the second line and its saved credentials. */
+    private fun removeSecondaryAccount() {
+        val currentCore = core
+        val saved = SipCredentialStore.loadSecondary(context)
+        currentCore?.accountList?.toList()?.filter { isSecondary(it) }
+            ?.forEach { currentCore.removeAccount(it) }
+        if (currentCore != null && saved != null) removeAuthInfosFor(currentCore, saved)
+        SipCredentialStore.clearSecondary(context)
+        CallerIdentityStore.clearSecondaryDirectory(context)
+        emitRegistration("unregistered", null, SECONDARY_ID)
+        Log.i("VoIPCloud/Linphone", "Removed the second SIP account")
     }
 
     private fun configurePushNotifications(
@@ -2002,12 +2309,20 @@ private class LinphoneBridge private constructor(private val context: android.co
         }
     }
 
-    private fun makeCall(destination: String) {
+    private fun makeCall(destination: String, accountId: String? = null) {
         val currentCore = requireNotNull(core)
         synchronizeTelecomAudioRoute()
-        val address = normalizeDestination(destination)
+        val line = if (accountId == SECONDARY_ID) {
+            secondaryAccount() ?: throw IllegalStateException("The second line is not set up.")
+        } else {
+            null
+        }
+        // A bare extension must be completed with the calling account's domain.
+        val address = normalizeDestination(destination, line)
         val params = currentCore.createCallParams(null)
         params?.isVideoEnabled = false
+        // Without this the call would leave from the default (primary) account.
+        if (line != null) params?.account = line
         if (!AndroidCallCoordinator.isManagingCall()) {
             params?.outputAudioDevice = preferredOutputDevice(currentCore)
         }
@@ -2019,15 +2334,25 @@ private class LinphoneBridge private constructor(private val context: android.co
         }
     }
 
-    private fun dialFeatureCode(code: String): String? {
+    private fun accountIdArg(value: String?): String =
+        if (value == SECONDARY_ID) SECONDARY_ID else PRIMARY_ID
+
+    private fun dialFeatureCode(code: String, accountId: String? = null): String? {
         val trimmed = code.trim()
         if (trimmed.isEmpty()) {
             throw IllegalArgumentException("Feature code is required.")
         }
         val currentCore = requireNotNull(core)
-        val address = normalizeDestination(trimmed)
+        // A feature code belongs to the phone system of the account that dials it.
+        val line = if (accountId == SECONDARY_ID) {
+            secondaryAccount() ?: throw IllegalStateException("The second line is not set up.")
+        } else {
+            null
+        }
+        val address = normalizeDestination(trimmed, line)
         val params = currentCore.createCallParams(null)
         params?.isVideoEnabled = false
+        if (line != null) params?.account = line
         params?.outputAudioDevice = preferredOutputDevice(currentCore)
         if (featureCodePreviousMicEnabled == null) {
             featureCodePreviousMicEnabled = currentCore.isMicEnabled
@@ -2675,9 +3000,17 @@ private class LinphoneBridge private constructor(private val context: android.co
         }
     }
 
-    private fun normalizeDestination(destination: String): org.linphone.core.Address {
+    /**
+     * A bare extension belongs to the phone system of the account that places
+     * the call, so [forAccount] (the second line) decides the domain; without
+     * it the primary account's domain is used as before.
+     */
+    private fun normalizeDestination(
+        destination: String,
+        forAccount: Account? = null
+    ): org.linphone.core.Address {
         val trimmed = destination.trim()
-        val currentAccount = account
+        val currentAccount = forAccount ?: account
         val domain = currentAccount?.params?.identityAddress?.domain ?: ""
         val uri = if (trimmed.startsWith("sip:") || trimmed.contains("@")) {
             if (trimmed.startsWith("sip:")) trimmed else "sip:$trimmed"
@@ -2693,9 +3026,16 @@ private class LinphoneBridge private constructor(private val context: android.co
         subscriptionId: String = "",
         generation: Int = 0,
         rawAdditions: List<*> = rawExtensions,
-        reconcileSet: Boolean = true
+        reconcileSet: Boolean = true,
+        accountId: String = PRIMARY_ID
     ) {
         val currentCore = requireNotNull(core) { "Linphone core is not initialized" }
+        // Only the DND hint is ever watched for the second line; BLF stays primary.
+        val line = if (diagnostic && accountId == SECONDARY_ID) {
+            secondaryAccount() ?: throw IllegalStateException("The second line is not set up.")
+        } else {
+            null
+        }
         val extensions = if (!reconcileSet) desiredPresenceTargets else rawExtensions
             .mapNotNull { (it as? String)?.trim() }
             .filter { it.matches(if (diagnostic) dndDiagnosticTargetPattern else blfTargetPattern) }
@@ -2710,7 +3050,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                 .distinct()
         }
         if (diagnostic) {
-            stopPresenceSubscriptions(true)
+            stopPresenceSubscriptions(true, accountId)
         } else if (reconcileSet) {
             desiredPresenceTargets = extensions
             desiredPresenceSet = extensions.toSet()
@@ -2751,17 +3091,29 @@ private class LinphoneBridge private constructor(private val context: android.co
                     )
                     return@packageLoop
                 }
-                val event = currentCore.createSubscribe(
-                    normalizeDestination(extension),
-                    eventPackage,
-                    if (diagnostic && subscriptionId.isEmpty()) 120 else 300
-                )
+                val expires = if (diagnostic && subscriptionId.isEmpty()) 120 else 300
+                val event = if (line != null) {
+                    // createSubscribe only accepts a ProxyConfig to pick the sending line.
+                    val identity = line.params.identityAddress
+                    val proxy = currentCore.proxyConfigList.firstOrNull {
+                        identity != null && it.identityAddress?.weakEqual(identity) == true
+                    } ?: throw IllegalStateException("The second line is not ready.")
+                    currentCore.createSubscribe(
+                        normalizeDestination(extension, line),
+                        proxy,
+                        eventPackage,
+                        expires
+                    )
+                } else {
+                    currentCore.createSubscribe(normalizeDestination(extension), eventPackage, expires)
+                }
                 event.addCustomHeader("Accept", accept)
                 presenceSubscriptions[event] = PresenceSubscription(
                     extension,
                     eventPackage,
                     subscriptionId,
-                    generation
+                    generation,
+                    accountId
                 )
                 presenceSubscriptionIndex[indexKey] = event
                 if (event.sendSubscribe(null) != 0) {
@@ -2787,14 +3139,15 @@ private class LinphoneBridge private constructor(private val context: android.co
         )
     }
 
-    private fun stopPresenceSubscriptions(diagnostic: Boolean? = null) {
+    private fun stopPresenceSubscriptions(diagnostic: Boolean? = null, accountId: String? = null) {
         if (diagnostic != true) {
             desiredPresenceTargets = emptyList()
             desiredPresenceSet = emptySet()
             desiredPresenceGeneration = -1
         }
         val events = presenceSubscriptions.filter {
-            diagnostic == null || it.value.extension.startsWith("*76") == diagnostic
+            (diagnostic == null || it.value.extension.startsWith("*76") == diagnostic) &&
+                (accountId == null || it.value.accountId == accountId)
         }.keys.toList()
         events.forEach { event ->
             removePresenceSubscription(event)
@@ -2817,8 +3170,10 @@ private class LinphoneBridge private constructor(private val context: android.co
         else -> "unknown"
     }
 
-    private fun emitRegistration(status: String, message: String?) {
-        registrationSink?.success(mapOf("status" to status, "message" to message))
+    private fun emitRegistration(status: String, message: String?, accountId: String = PRIMARY_ID) {
+        registrationSink?.success(
+            mapOf("status" to status, "message" to message, "accountId" to accountId)
+        )
     }
 
     private fun emitCall(
@@ -2838,6 +3193,7 @@ private class LinphoneBridge private constructor(private val context: android.co
         emitCallEvent(
             mapOf(
                 "id" to id,
+                "accountId" to accountIdForCall(call),
                 "remoteUri" to (call.remoteAddress?.asStringUriOnly() ?: ""),
                 "remoteDisplayName" to callerDisplayLabel(call),
                 "direction" to if (call.dir == Call.Dir.Incoming) "incoming" else "outgoing",
@@ -2856,7 +3212,10 @@ private class LinphoneBridge private constructor(private val context: android.co
                 }.orEmpty()
             )
         )
-        if (isTerminalCallState(state)) locallyDeclinedCallIds.remove(id)
+        if (isTerminalCallState(state)) {
+            locallyDeclinedCallIds.remove(id)
+            networkLossEndedCalls.remove(id)
+        }
     }
 
     private fun findCallStrict(id: String?): Call? {
@@ -2992,7 +3351,8 @@ private class LinphoneBridge private constructor(private val context: android.co
             stateMessage?.takeIf { it.isNotBlank() },
             call.errorInfo?.phrase?.takeIf { it.isNotBlank() },
             call.errorInfo?.subErrorInfo?.phrase?.takeIf { it.isNotBlank() },
-            "Locally declined".takeIf { callId(call) in locallyDeclinedCallIds }
+            "Locally declined".takeIf { callId(call) in locallyDeclinedCallIds },
+            networkLossEndedCalls[callId(call)]?.let { "calling_network_lost:$it" }
         ).distinct().joinToString(" | ")
 
     private fun recoverLiveCall(): Call? {
@@ -3116,7 +3476,7 @@ private class LinphoneBridge private constructor(private val context: android.co
             restoreSavedAccountIfNeeded()
             val currentCore = core ?: return
             val currentAccount = account ?: currentCore.defaultAccount
-                ?: currentCore.accountList.firstOrNull()
+                ?: primaryFromList()
                 ?: return
             val params = currentAccount.params.clone()
             configurePushNotifications(
@@ -3131,6 +3491,27 @@ private class LinphoneBridge private constructor(private val context: android.co
             currentAccount.params = params
             account = currentAccount
             currentAccount.refreshRegister()
+            // The second line registers with the same device token.
+            secondaryAccount()?.let { second ->
+                val savedSecond = SipCredentialStore.loadSecondary(context)?.toMutableMap()
+                if (savedSecond != null) {
+                    savedSecond["pushProvider"] = "fcm"
+                    savedSecond["pushToken"] = token
+                    SipCredentialStore.saveSecondary(context, savedSecond)
+                }
+                val secondParams = second.params.clone()
+                configurePushNotifications(
+                    currentCore = currentCore,
+                    params = secondParams,
+                    provider = "fcm",
+                    token = token,
+                    param = stringArg(saved, "pushParam"),
+                    bundleId = stringArg(saved, "pushBundleId"),
+                    teamId = stringArg(saved, "pushTeamId")
+                )
+                second.params = secondParams
+                second.refreshRegister()
+            }
             Log.i("VoIPCloud/Linphone", "Applied refreshed FCM token to SIP registration")
         } catch (error: Throwable) {
             // The saved token is authoritative and will be applied by the next
@@ -3230,6 +3611,8 @@ private class LinphoneBridge private constructor(private val context: android.co
         stopCallWaitingAlert()
         stopOutgoingRingback()
         stopPresenceSubscriptions()
+        callingNetwork?.stop()
+        callingNetwork = null
         core?.removeListener(listener)
         core?.stop()
         org.linphone.mediastream.MediastreamerAndroidContext.disableAudioRouteChanges(false)
@@ -3387,10 +3770,11 @@ private class LinphoneBridge private constructor(private val context: android.co
     }
 
     private fun updateRegistrationEnabled(enabled: Boolean) {
-        val currentAccount = account ?: return
-        val params = currentAccount.params.clone()
-        params.setRegisterEnabled(enabled)
-        currentAccount.params = params
+        for (currentAccount in accountsForPolicy()) {
+            val params = currentAccount.params.clone()
+            params.setRegisterEnabled(enabled)
+            currentAccount.params = params
+        }
     }
 
     private fun purgeAccount() {

@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phone_app/features/accounts/domain/account_line.dart';
 import 'package:phone_app/app/router/home_shell.dart';
 import 'package:phone_app/features/call_history/presentation/call_history_providers.dart';
 import 'package:phone_app/features/messages/presentation/messages_providers.dart';
@@ -48,6 +49,8 @@ class _ZeroMissedCalls extends MissedCallCountController {
 }
 
 class _TrackingMessagesController extends MessagesController {
+  _TrackingMessagesController() : super(AccountLine.primary);
+
   static var buildCount = 0;
 
   @override

@@ -8,10 +8,18 @@ import '../../../app/theme/app_theme.dart';
 import '../../../shared/icons/app_icons.dart';
 
 class CallEndedScreen extends StatefulWidget {
-  const CallEndedScreen({required this.statusLabel, this.caller, super.key});
+  const CallEndedScreen({
+    required this.statusLabel,
+    this.caller,
+    this.note,
+    super.key,
+  });
 
   final String statusLabel;
   final String? caller;
+
+  /// An explanation the user must be able to read; keeps the screen up longer.
+  final String? note;
 
   @override
   State<CallEndedScreen> createState() => _CallEndedScreenState();
@@ -23,7 +31,13 @@ class _CallEndedScreenState extends State<CallEndedScreen> {
   @override
   void initState() {
     super.initState();
-    _timer = Timer(const Duration(milliseconds: 1300), _goToDialer);
+    final hasNote = (widget.note ?? '').isNotEmpty;
+    _timer = Timer(
+      hasNote
+          ? const Duration(seconds: 12)
+          : const Duration(milliseconds: 1300),
+      _goToDialer,
+    );
   }
 
   @override
@@ -74,6 +88,16 @@ class _CallEndedScreenState extends State<CallEndedScreen> {
                       letterSpacing: 0,
                     ),
                   ),
+                ],
+                if ((widget.note ?? '').isNotEmpty) ...[
+                  const SizedBox(height: 20),
+                  Text(
+                    widget.note!,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 20),
+                  FilledButton(onPressed: _goToDialer, child: const Text('OK')),
                 ],
               ],
             ),

@@ -70,6 +70,7 @@ class _AudioRoutePickerSheetState
   String? _selectingDeviceKey;
   Timer? _refreshTimer;
   Timer? _volumeCommitTimer;
+  final ScrollController _scrollController = ScrollController();
   AudioVolumeLevels? _volumeLevels;
   bool _volumeLoadFailed = false;
   bool _resettingVolumes = false;
@@ -99,6 +100,7 @@ class _AudioRoutePickerSheetState
   void dispose() {
     _refreshTimer?.cancel();
     _volumeCommitTimer?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -173,7 +175,9 @@ class _AudioRoutePickerSheetState
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: availableHeight * 0.9),
         child: Scrollbar(
+          controller: _scrollController,
           child: SingleChildScrollView(
+            controller: _scrollController,
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -601,7 +605,9 @@ class _DesktopVolumeControls extends StatelessWidget {
       absorbing: !enabled,
       child: Column(
         children: [
-          if (!(Platform.isAndroid || Platform.isIOS)) ...[
+          // On macOS the system volume and input settings decide how loud calls
+          // are, so only Windows gets its own microphone and call volume.
+          if (!(Platform.isAndroid || Platform.isIOS || Platform.isMacOS)) ...[
             _VolumeSlider(
               icon: Icons.mic_rounded,
               label: 'Microphone',

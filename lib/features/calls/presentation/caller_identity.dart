@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import '../../../shared/utils/display_name.dart';
 
+import '../../accounts/domain/account_line.dart';
 import '../../contacts/domain/contact.dart';
 import '../../contacts/domain/quick_dial_entry.dart';
 import '../../directory/domain/directory_entry.dart';
@@ -46,12 +47,18 @@ CallerIdentity resolveCallerIdentity({
   required VoipCall? call,
   required List<Contact> contacts,
   required List<DirectoryEntry> directory,
+  List<DirectoryEntry> secondaryDirectory = const [],
 }) {
   return resolveRemoteIdentity(
     remoteUri: call?.remoteUri ?? '',
     remoteDisplayName: call?.remoteDisplayName,
     contacts: contacts,
-    directory: directory,
+    // Each account has its own phone system: a call is named from the
+    // directory of the account it is on, never the other one (the same
+    // extension can be a different person there).
+    directory: call?.line == AccountLine.secondary
+        ? secondaryDirectory
+        : directory,
   );
 }
 

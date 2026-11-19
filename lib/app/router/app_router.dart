@@ -10,7 +10,9 @@ import '../../features/contacts/presentation/device_contacts_screen.dart';
 import '../../features/dialer/presentation/dialer_screen.dart';
 import '../../features/directory/presentation/directory_screen.dart';
 import '../../features/messages/presentation/messages_screen.dart';
+import '../../features/messages/presentation/share_to_message_screen.dart';
 import '../../features/messages/domain/messaging_platform.dart';
+import '../../features/messages/presentation/messaging_lines.dart';
 import '../../features/legal/presentation/terms_agreement_screen.dart';
 import '../../features/session/presentation/session_controller.dart';
 import '../../features/provisioning/presentation/provisioning_screen.dart';
@@ -20,6 +22,8 @@ import '../../features/settings/presentation/sip_diagnostics_screen.dart';
 import '../../features/settings/presentation/sip_logs_screen.dart';
 import '../../features/session/presentation/account_status_screen.dart';
 import '../../features/startup/presentation/startup_screen.dart';
+import '../../features/accounts/presentation/accounts_screen.dart';
+import '../../core/config/app_config.dart';
 import 'home_shell.dart';
 import 'route_names.dart';
 
@@ -40,10 +44,12 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         return RoutePaths.splash;
       }
       if (state.uri.path.startsWith(RoutePaths.messages) &&
-          !isCarrierMessagingEnabled(
-            ref.read(sessionControllerProvider).value?.carrierMessaging,
-          )) {
+          ref.read(messagingLinesProvider).isEmpty) {
         return RoutePaths.dialer;
+      }
+      if (state.uri.path.startsWith(RoutePaths.accounts) &&
+          !multiAccountAvailable) {
+        return RoutePaths.settings;
       }
       if (state.uri.path.startsWith(RoutePaths.directory) &&
           ref.read(sessionControllerProvider).value?.directoryAccess == null) {
@@ -137,6 +143,23 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         ],
       ),
       GoRoute(
+        path: RoutePaths.shareToMessage,
+        name: RouteNames.shareToMessage,
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) => const ShareToMessageScreen(),
+      ),
+      GoRoute(
+        path: RoutePaths.accounts,
+        name: RouteNames.accounts,
+        builder: (context, state) => const AccountsScreen(),
+      ),
+      GoRoute(
+        path: RoutePaths.accountsAdd,
+        name: RouteNames.accountsAdd,
+        builder: (context, state) =>
+            const ProvisioningScreen(addingSecond: true),
+      ),
+      GoRoute(
         path: RoutePaths.sipDiagnostics,
         name: RouteNames.sipDiagnostics,
         parentNavigatorKey: _rootNavigatorKey,
@@ -155,7 +178,12 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final status = state.uri.queryParameters['status'] ?? 'Call ended';
           final caller = state.uri.queryParameters['caller'];
-          return CallEndedScreen(statusLabel: status, caller: caller);
+          final note = state.uri.queryParameters['note'];
+          return CallEndedScreen(
+            statusLabel: status,
+            caller: caller,
+            note: note,
+          );
         },
       ),
       GoRoute(

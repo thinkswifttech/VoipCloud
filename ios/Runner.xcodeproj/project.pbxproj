@@ -7,8 +7,13 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04D1857130AF509E00ACE1EA /* linphonesw in Frameworks */ = {isa = PBXBuildFile; productRef = 04D1857030AF509E00ACE1EA /* linphonesw */; };
+		04D1857630AF510800ACE1EA /* CallingNetworkPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D1857530AF510800ACE1EA /* CallingNetworkPolicy.swift */; };
+		04D1857730AF510800ACE1EA /* CallingNetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D1857430AF510800ACE1EA /* CallingNetworkManager.swift */; };
+		04D1857830AF510800ACE1EA /* BoundInterfaceBinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D1857230AF510800ACE1EA /* BoundInterfaceBinder.swift */; };
+		04D1857930AF510800ACE1EA /* CallingNetworkBinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D1857330AF510800ACE1EA /* CallingNetworkBinder.swift */; };
+		04D1857B30AF513500ACE1EA /* CallingNetworkPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D1857A30AF513500ACE1EA /* CallingNetworkPolicyTests.swift */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
-		20B61B192D00000100C0DEF0 /* linphonesw in Frameworks */ = {isa = PBXBuildFile; productRef = 20B61B182D00000100C0DEF0 /* linphonesw */; };
 		50F510012D00000100C0DEF0 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 50F510002D00000100C0DEF0 /* GoogleService-Info.plist */; };
 		50F510052D00000100C0DEF0 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 50F510042D00000100C0DEF0 /* PrivacyInfo.xcprivacy */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
@@ -45,6 +50,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		04D1857230AF510800ACE1EA /* BoundInterfaceBinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundInterfaceBinder.swift; sourceTree = "<group>"; };
+		04D1857330AF510800ACE1EA /* CallingNetworkBinder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallingNetworkBinder.swift; sourceTree = "<group>"; };
+		04D1857430AF510800ACE1EA /* CallingNetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallingNetworkManager.swift; sourceTree = "<group>"; };
+		04D1857530AF510800ACE1EA /* CallingNetworkPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallingNetworkPolicy.swift; sourceTree = "<group>"; };
+		04D1857A30AF513500ACE1EA /* CallingNetworkPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallingNetworkPolicyTests.swift; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
@@ -74,7 +84,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
-				20B61B192D00000100C0DEF0 /* linphonesw in Frameworks */,
+				04D1857130AF509E00ACE1EA /* linphonesw in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -84,6 +94,7 @@
 		331C8082294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXGroup;
 			children = (
+				04D1857A30AF513500ACE1EA /* CallingNetworkPolicyTests.swift */,
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
 			);
 			path = RunnerTests;
@@ -123,6 +134,10 @@
 		97C146F01CF9000F007C117D /* Runner */ = {
 			isa = PBXGroup;
 			children = (
+				04D1857230AF510800ACE1EA /* BoundInterfaceBinder.swift */,
+				04D1857330AF510800ACE1EA /* CallingNetworkBinder.swift */,
+				04D1857430AF510800ACE1EA /* CallingNetworkManager.swift */,
+				04D1857530AF510800ACE1EA /* CallingNetworkPolicy.swift */,
 				97C146FA1CF9000F007C117D /* Main.storyboard */,
 				97C146FD1CF9000F007C117D /* Assets.xcassets */,
 				97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */,
@@ -178,7 +193,7 @@
 			name = Runner;
 			packageProductDependencies = (
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
-				20B61B182D00000100C0DEF0 /* linphonesw */,
+				04D1857030AF509E00ACE1EA /* linphonesw */,
 			);
 			productName = Runner;
 			productReference = 97C146EE1CF9000F007C117D /* Runner.app */;
@@ -224,7 +239,7 @@
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
 			packageReferences = (
 				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
-				20B61B172D00000100C0DEF0 /* XCRemoteSwiftPackageReference "linphone-sdk-swift-ios" */,
+				04D1856F30AF509E00ACE1EA /* XCLocalSwiftPackageReference "../../../linphone-sdk-build/linphone-sdk/build-ios/linphone-sdk-swift-ios" */,
 			);
 			projectDirPath = "";
 			projectRoot = "";
@@ -298,6 +313,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				04D1857B30AF513500ACE1EA /* CallingNetworkPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -306,6 +322,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
+				04D1857630AF510800ACE1EA /* CallingNetworkPolicy.swift in Sources */,
+				04D1857730AF510800ACE1EA /* CallingNetworkManager.swift in Sources */,
+				04D1857830AF510800ACE1EA /* BoundInterfaceBinder.swift in Sources */,
+				04D1857930AF510800ACE1EA /* CallingNetworkBinder.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);
@@ -340,21 +360,9 @@
 		};
 /* End PBXVariantGroup section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		20B61B172D00000100C0DEF0 /* XCRemoteSwiftPackageReference "linphone-sdk-swift-ios" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://gitlab.linphone.org/BC/public/linphone-sdk-swift-ios";
-			requirement = {
-				kind = revision;
-				revision = 1084b9f1051c94d1997d93fc7f9c89e7ef89e9ef;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
 /* Begin XCSwiftPackageProductDependency section */
-		20B61B182D00000100C0DEF0 /* linphonesw */ = {
+		04D1857030AF509E00ACE1EA /* linphonesw */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 20B61B172D00000100C0DEF0 /* XCRemoteSwiftPackageReference "linphone-sdk-swift-ios" */;
 			productName = linphonesw;
 		};
 /* End XCSwiftPackageProductDependency section */
@@ -676,6 +684,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		04D1856F30AF509E00ACE1EA /* XCLocalSwiftPackageReference "../../../linphone-sdk-build/linphone-sdk/build-ios/linphone-sdk-swift-ios" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../linphone-sdk-build/linphone-sdk/build-ios/linphone-sdk-swift-ios";
+		};
 		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage;

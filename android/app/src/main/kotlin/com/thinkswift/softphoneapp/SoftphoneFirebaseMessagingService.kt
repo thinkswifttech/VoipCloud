@@ -23,6 +23,14 @@ class SoftphoneFirebaseMessagingService : FirebaseMessagingService() {
             )
             return
         }
+        if ((message.data["event"] ?: message.data["kind"]) == "refresh_registration") {
+            // The server found this phone's registration close to expiring. Start the core,
+            // which registers again; the service then shuts itself down. A phone whose
+            // registration lapses cannot be woken for calls, so this must stay cheap.
+            Log.i("Softphone/FCM", "Registration refresh requested by the server")
+            SoftphoneWakeHandler.startLinphoneCore(this, "registration_refresh")
+            return
+        }
         Log.i(
             "Softphone/FCM",
             "Received push from=${message.from ?: "unknown"} " +

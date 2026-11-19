@@ -1,3 +1,4 @@
+import '../../accounts/presentation/line_tone.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -14,6 +15,7 @@ import '../../../shared/widgets/app_modal_bottom_sheet.dart';
 import '../../../shared/widgets/help_support_sheet.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
+import '../../accounts/domain/account_line.dart';
 import '../../auth/presentation/auth_providers.dart';
 import '../../calls/presentation/call_session_providers.dart';
 import '../../calls/presentation/call_waiting_presentation.dart';
@@ -23,7 +25,11 @@ import '../../settings/presentation/settings_controller.dart';
 import '../../settings/presentation/dnd_settings_section.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import '../../sip/presentation/calling_status_text.dart';
+import '../../accounts/presentation/accounts_controller.dart';
+import '../../accounts/presentation/line_widgets.dart';
+import '../../accounts/domain/line_resolver.dart';
 import 'dialer_controller.dart';
+import 'dialer_line.dart';
 import 'dialer_input_platform.dart';
 
 class DialerScreen extends ConsumerStatefulWidget {
@@ -134,6 +140,11 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
     final registration =
         ref.watch(sipRegistrationStateProvider).value ??
         SipRegistrationState.initial();
+    final hasSecond = ref.watch(hasSecondaryAccountProvider);
+    final lines = ref.watch(accountLinesProvider);
+    final secondRegistration =
+        ref.watch(secondaryRegistrationStateProvider).value ??
+        SipRegistrationState.initial();
     final session = ref.watch(sessionControllerProvider).value;
     final authUser = ref.watch(currentUserProvider).value;
     final settings = ref.watch(settingsControllerProvider);
@@ -170,6 +181,23 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
               _RegistrationHeader(
                 registration: registration,
                 identity: identity,
+                primaryDotColor: hasSecond ? lines.first.colorValue : null,
+                primaryDnd:
+                    settings.localDndEnabled || settings.pbxDnd.enabled == true,
+                second: hasSecond && lines.length > 1
+                    ? _SecondLineChip(
+                        registration: secondRegistration,
+                        identity: lines.last.config?.extension.trim() ?? '',
+                        colorValue: lines.last.colorValue,
+                        dnd:
+                            settings.localDndEnabled ||
+                            settings.secondaryPbxDnd.enabled == true,
+                      )
+                    : null,
+                onOpenSecondDetail: () => _showAccountDetail(
+                  context,
+                  identity: lines.last.config?.extension.trim() ?? '',
+                ),
                 dndEnabled: dndEnabled,
                 dndScope: settings.dndScope,
                 showActions: !acceptsKeyboardInput,
@@ -336,7 +364,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
                     child: Consumer(
                       builder: (context, ref, _) {
                         final number = ref.watch(dialerControllerProvider);
-                        return FilledButton.icon(
+                        final button = FilledButton.icon(
                           onPressed: number.isEmpty
                               ? null
                               : () async {
@@ -344,6 +372,26 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
                                 },
                           icon: const Icon(AppIcons.call, size: AppIconSize.md),
                           label: const Text('Call'),
+                        );
+                        if (!ref.watch(hasSecondaryAccountProvider)) {
+                          return button;
+                        }
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            // Kept in the layout (just hidden) so the Call
+                            // button does not jump when typing starts.
+                            Visibility(
+                              visible: number.isNotEmpty,
+                              maintainSize: true,
+                              maintainAnimation: true,
+                              maintainState: true,
+                              child: const _CallingFromSelector(),
+                            ),
+                            const SizedBox(height: 8),
+                            button,
+                          ],
                         );
                       },
                     ),
@@ -359,7 +407,16 @@ class _DialerScreenState extends ConsumerState<DialerScreen> {
 
   Future<void> _placeCall(BuildContext context, WidgetRef ref) async {
     try {
-      final callId = await ref.read(dialerControllerProvider.notifier).call();
+      final line = ref.read(hasSecondaryAccountProvider)
+          ? await chooseLineForCall(context, ref)
+          : AccountLine.primary;
+      // Dismissing the "which account?" question cancels the call.
+      if (line == null) return;
+      final callId = await ref
+          .read(dialerControllerProvider.notifier)
+          .call(line: line);
+      ref.read(dialerLineHintProvider.notifier).clear();
+      ref.read(dialerLineOverrideProvider.notifier).clear();
       if (callId != null && context.mounted) {
         // Connected calls stay on Dial; CallRouteListener keeps shell routing.
         context.go(RoutePaths.dialer);
@@ -590,10 +647,29 @@ enum _RegistrationPhase { offline, registering, registered }
 const _registrationYellow = Color(0xFFF59E0B);
 const _registrationGreen = Color(0xFF16835B);
 
+/// The second account's small connection chip next to the primary one.
+class _SecondLineChip {
+  const _SecondLineChip({
+    required this.registration,
+    required this.identity,
+    required this.colorValue,
+    required this.dnd,
+  });
+
+  final SipRegistrationState registration;
+  final String identity;
+  final int colorValue;
+  final bool dnd;
+}
+
 class _RegistrationHeader extends StatelessWidget {
   const _RegistrationHeader({
     required this.registration,
     required this.identity,
+    this.primaryDotColor,
+    this.primaryDnd = false,
+    this.second,
+    this.onOpenSecondDetail,
     required this.dndEnabled,
     required this.dndScope,
     required this.showActions,
@@ -604,6 +680,10 @@ class _RegistrationHeader extends StatelessWidget {
 
   final SipRegistrationState registration;
   final String identity;
+  final int? primaryDotColor;
+  final bool primaryDnd;
+  final _SecondLineChip? second;
+  final VoidCallback? onOpenSecondDetail;
   final bool dndEnabled;
   final DndScope dndScope;
   final bool showActions;
@@ -635,14 +715,32 @@ class _RegistrationHeader extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Flexible(
-                  child: _RegistrationCard(
-                    phase: phase,
-                    color: color,
-                    identity: identity,
-                    onTap: onOpenAccountDetail,
-                  ),
+                  child: second == null
+                      ? _RegistrationCard(
+                          phase: phase,
+                          color: color,
+                          identity: identity,
+                          onTap: onOpenAccountDetail,
+                        )
+                      : _LinesPill(
+                          first: _PillSegment(
+                            identity: identity,
+                            colorValue: primaryDotColor ?? 0xFF2B5FD9,
+                            status: registration.status,
+                            dnd: primaryDnd,
+                            onTap: onOpenAccountDetail,
+                          ),
+                          second: _PillSegment(
+                            identity: second!.identity,
+                            colorValue: second!.colorValue,
+                            status: second!.registration.status,
+                            dnd: second!.dnd,
+                            onTap: onOpenSecondDetail ?? () {},
+                          ),
+                        ),
                 ),
-                if (dndEnabled) ...[
+                // With two accounts each chip carries its own DND mark.
+                if (dndEnabled && second == null) ...[
                   const SizedBox(width: 10),
                   Text(
                     'DND',
@@ -679,6 +777,120 @@ class _RegistrationHeader extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+class _PillSegment {
+  const _PillSegment({
+    required this.identity,
+    required this.colorValue,
+    required this.status,
+    required this.dnd,
+    required this.onTap,
+  });
+
+  final String identity;
+  final int colorValue;
+  final SipRegistrationStatus status;
+  final bool dnd;
+  final VoidCallback onTap;
+}
+
+/// Both accounts as one compact control: each half shows the account's
+/// colour mark and extension. A healthy account shows nothing else; an
+/// account that is connecting or offline gets a warning mark, and one with
+/// do-not-disturb on gets a bell-off mark. Tap a half for details.
+class _LinesPill extends StatelessWidget {
+  const _LinesPill({required this.first, required this.second});
+
+  final _PillSegment first;
+  final _PillSegment second;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      height: 44,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(child: _PillHalf(segment: first)),
+          VerticalDivider(
+            width: 1,
+            thickness: 1,
+            indent: 10,
+            endIndent: 10,
+            color: theme.colorScheme.outlineVariant,
+          ),
+          Flexible(child: _PillHalf(segment: second)),
+        ],
+      ),
+    );
+  }
+}
+
+class _PillHalf extends StatelessWidget {
+  const _PillHalf({required this.segment});
+
+  final _PillSegment segment;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tone = LineTone.of(context, segment.colorValue);
+    final (statusIcon, statusColor, statusText) = switch (segment.status) {
+      SipRegistrationStatus.registered => (null, null, ''),
+      SipRegistrationStatus.configuring || SipRegistrationStatus.registering =>
+        (AppIcons.refresh, _registrationYellow, ', connecting'),
+      _ => (AppIcons.warning, theme.colorScheme.error, ', not connected'),
+    };
+    return Semantics(
+      button: true,
+      label:
+          'Account ${segment.identity}$statusText'
+          '${segment.dnd ? ', do not disturb on' : ''}',
+      child: InkWell(
+        onTap: segment.onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              LineDot(colorValue: segment.colorValue, size: 8),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  segment.identity,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTheme.numberStyle(
+                    theme.textTheme.labelLarge,
+                    color: tone.onSoft,
+                  ),
+                ),
+              ),
+              if (statusIcon != null) ...[
+                const SizedBox(width: 6),
+                Icon(statusIcon, size: 15, color: statusColor),
+              ],
+              if (segment.dnd) ...[
+                const SizedBox(width: 6),
+                const Icon(
+                  AppIcons.bellOff,
+                  size: 15,
+                  color: Color(0xFFDC2626),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -783,6 +995,8 @@ class _DottedRoundedBorderPainter extends CustomPainter {
       oldDelegate.color != color || oldDelegate.radius != radius;
 }
 
+/// One sheet for both accounts: each account's connection is listed, and
+/// do-not-disturb sits below for the whole phone.
 class _AccountDetailSheet extends ConsumerWidget {
   const _AccountDetailSheet({required this.identity});
 
@@ -793,57 +1007,68 @@ class _AccountDetailSheet extends ConsumerWidget {
     final theme = Theme.of(context);
     final settings = ref.watch(settingsControllerProvider);
     final dndScope = settings.dndScope;
-    final registration =
-        ref.watch(sipRegistrationStateProvider).value ??
-        SipRegistrationState.initial();
-    final isRegistering =
-        registration.status == SipRegistrationStatus.registering ||
-        registration.status == SipRegistrationStatus.configuring;
-    final statusLabel = CallingStatusText.label(registration.status);
-    final statusColor = switch (registration.status) {
-      SipRegistrationStatus.registered => const Color(0xFF22C55E),
-      SipRegistrationStatus.registering ||
-      SipRegistrationStatus.configuring => _registrationYellow,
-      _ => const Color(0xFFF87171),
-    };
-    final displayIdentity = identity.trim().isEmpty ? '—' : identity.trim();
-    final detailMessage = CallingStatusText.dialerDetail(registration.status);
+    final lines = ref.watch(accountLinesProvider);
+    final hasSecond =
+        ref.watch(hasSecondaryAccountProvider) && lines.length > 1;
+    String extensionOf(AccountLine target) =>
+        lines
+            .where((info) => info.line == target)
+            .firstOrNull
+            ?.config
+            ?.extension
+            .trim() ??
+        '';
+    int colorOf(AccountLine target) =>
+        lines.where((info) => info.line == target).firstOrNull?.colorValue ??
+        0xFF2B5FD9;
 
-    final identityChip = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(999),
-        border: isRegistering
-            ? null
-            : Border.all(color: statusColor, width: 1.4),
-      ),
-      child: Text(
-        displayIdentity,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: AppTheme.numberStyle(
-          theme.textTheme.titleSmall,
-          color: statusColor,
-          fontWeight: FontWeight.w700,
+    Widget statusRow(AccountLine line) {
+      final registration =
+          (line == AccountLine.secondary
+              ? ref.watch(secondaryRegistrationStateProvider).value
+              : ref.watch(sipRegistrationStateProvider).value) ??
+          SipRegistrationState.initial();
+      final isRegistering =
+          registration.status == SipRegistrationStatus.registering ||
+          registration.status == SipRegistrationStatus.configuring;
+      final statusColor = switch (registration.status) {
+        SipRegistrationStatus.registered => const Color(0xFF22C55E),
+        SipRegistrationStatus.registering ||
+        SipRegistrationStatus.configuring => _registrationYellow,
+        _ => const Color(0xFFF87171),
+      };
+      final extension = line == AccountLine.secondary
+          ? extensionOf(line)
+          : (extensionOf(line).isNotEmpty ? extensionOf(line) : identity);
+      final detailMessage = CallingStatusText.dialerDetail(registration.status);
+      final identityChip = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(999),
+          border: isRegistering
+              ? null
+              : Border.all(color: statusColor, width: 1.4),
         ),
-      ),
-    );
-
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-        20,
-        4,
-        20,
-        20 + MediaQuery.paddingOf(context).bottom,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+        child: Text(
+          extension.trim().isEmpty ? '—' : extension.trim(),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AppTheme.numberStyle(
+            theme.textTheme.titleSmall,
+            color: statusColor,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      );
+      return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text('Account detail', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 18),
           Row(
             children: [
+              if (hasSecond) ...[
+                LineDot(colorValue: colorOf(line), size: 10),
+                const SizedBox(width: 10),
+              ],
               Flexible(
                 child: isRegistering
                     ? CustomPaint(
@@ -857,7 +1082,10 @@ class _AccountDetailSheet extends ConsumerWidget {
               ),
               const SizedBox(width: 12),
               Text(
-                statusLabel,
+                CallingStatusText.label(
+                  registration.status,
+                  reconnecting: registration.reconnecting,
+                ),
                 style: theme.textTheme.labelLarge?.copyWith(
                   color: statusColor,
                   fontWeight: FontWeight.w600,
@@ -874,11 +1102,48 @@ class _AccountDetailSheet extends ConsumerWidget {
               ),
             ),
           ],
+        ],
+      );
+    }
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        4,
+        20,
+        20 + MediaQuery.paddingOf(context).bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Account detail', style: theme.textTheme.titleLarge),
+          const SizedBox(height: 18),
+          statusRow(AccountLine.primary),
+          if (hasSecond) ...[
+            const SizedBox(height: 12),
+            statusRow(AccountLine.secondary),
+          ],
           const SizedBox(height: 22),
           DndSettingsSection(
             enabled: settings.selectedDndEnabled,
             pbxState: settings.pbxDnd,
             scope: dndScope,
+            accountSwitches: hasSecond
+                ? [
+                    for (final target in AccountLine.values)
+                      DndAccountSwitch(
+                        extension: extensionOf(target),
+                        colorValue: colorOf(target),
+                        pbxState: target == AccountLine.secondary
+                            ? settings.secondaryPbxDnd
+                            : settings.pbxDnd,
+                        onChanged: (enabled) => ref
+                            .read(settingsControllerProvider.notifier)
+                            .setPbxDndEnabled(target, enabled: enabled),
+                      ),
+                  ]
+                : const [],
             onEnabledChanged: (enabled) => ref
                 .read(settingsControllerProvider.notifier)
                 .setDndEnabled(enabled: enabled),
@@ -1113,4 +1378,58 @@ Widget _dialerNumberContextMenu({
     anchors: editableTextState.contextMenuAnchors,
     buttonItems: buttonItems,
   );
+}
+
+/// "Call from" with both accounts as one segmented control: the account the
+/// Call button will use is selected (one tap switches it), with a short
+/// reason under it. Hidden, space kept, until a number is typed.
+class _CallingFromSelector extends ConsumerWidget {
+  const _CallingFromSelector();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final choice = ref.watch(dialerLineChoiceProvider);
+    final lines = ref.watch(accountLinesProvider);
+    final destination = ref.watch(dialerControllerProvider);
+    final override = ref.watch(dialerLineOverrideProvider);
+    final chosenByHand =
+        override != null &&
+        override.destination == normalizeDialDestination(destination);
+    final reason = choice.line == null
+        ? 'Choose which account to call from'
+        : chosenByHand
+        ? 'You chose this account'
+        : switch (choice.reason) {
+            LineReason.context => 'Same account as the entry you tapped',
+            LineReason.numberHistory =>
+              'Used for your last call with this number',
+            LineReason.defaultSetting => 'Your default account',
+            _ => '',
+          };
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        LineSegmented(
+          lines: lines,
+          selected: choice.line,
+          onSelected: (line) {
+            if (line == null) return;
+            ref
+                .read(dialerLineOverrideProvider.notifier)
+                .set(destination, line);
+          },
+        ),
+        const SizedBox(height: 4),
+        Text(
+          reason.isEmpty ? ' ' : reason,
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ],
+    );
+  }
 }

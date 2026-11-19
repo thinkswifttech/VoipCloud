@@ -14,7 +14,10 @@ import '../domain/provisioning_activation_input.dart';
 import 'provisioning_controller.dart';
 
 class ProvisioningScreen extends ConsumerStatefulWidget {
-  const ProvisioningScreen({super.key});
+  const ProvisioningScreen({super.key, this.addingSecond = false});
+
+  /// Adds a second account instead of activating the first one.
+  final bool addingSecond;
 
   @override
   ConsumerState<ProvisioningScreen> createState() => _ProvisioningScreenState();
@@ -35,6 +38,12 @@ class _ProvisioningScreenState extends ConsumerState<ProvisioningScreen> {
     final state = ref.watch(provisioningControllerProvider);
 
     return Scaffold(
+      appBar: widget.addingSecond
+          ? AppBar(
+              title: const Text('Add an account'),
+              leading: BackButton(onPressed: () => context.pop()),
+            )
+          : null,
       backgroundColor: Theme.of(context).brightness == Brightness.dark
           ? AppTheme.darkCanvas
           : Colors.white,
@@ -51,6 +60,12 @@ class _ProvisioningScreenState extends ConsumerState<ProvisioningScreen> {
             autofocus: true,
             child: _ActivationExperience(
               formKey: _formKey,
+              title: widget.addingSecond
+                  ? 'Add a second account'
+                  : _activationTitle,
+              description: widget.addingSecond
+                  ? _secondAccountDescription
+                  : _activationDescription,
               controller: _controller,
               isLoading: state.isLoading,
               errorMessage: state.failure?.userMessage,
@@ -68,13 +83,16 @@ class _ProvisioningScreenState extends ConsumerState<ProvisioningScreen> {
       return;
     }
 
-    final ok = await ref
-        .read(provisioningControllerProvider.notifier)
-        .activate(_controller.text);
+    final controller = ref.read(provisioningControllerProvider.notifier);
+    final ok = widget.addingSecond
+        ? await controller.activateSecond(_controller.text)
+        : await controller.activate(_controller.text);
     if (!ok || !context.mounted) {
       return;
     }
-    context.go(RoutePaths.termsAgreement);
+    context.go(
+      widget.addingSecond ? RoutePaths.accounts : RoutePaths.termsAgreement,
+    );
   }
 
   Future<void> _scan(BuildContext context) async {
@@ -119,12 +137,20 @@ double _provisioningHorizontalPadding(double width) {
 
 /// Preferred line break matches the mockup; each half can still wrap
 /// further on very narrow widths.
+const _activationTitle = 'Set up your calling app';
+
+const _secondAccountDescription =
+    'Use the QR code or setup link for your\n'
+    'other account to add it to this phone';
+
 const _activationDescription =
     'Use the QR code or setup link from your\n'
     'administrator to get this phone activated';
 
 class _ActivationExperience extends StatelessWidget {
   const _ActivationExperience({
+    required this.title,
+    required this.description,
     required this.formKey,
     required this.controller,
     required this.isLoading,
@@ -133,6 +159,8 @@ class _ActivationExperience extends StatelessWidget {
     required this.onActivate,
   });
 
+  final String title;
+  final String description;
   final GlobalKey<FormState> formKey;
   final TextEditingController controller;
   final bool isLoading;
@@ -157,6 +185,8 @@ class _ActivationExperience extends StatelessWidget {
                   key: formKey,
                   child: isWide
                       ? _WideActivationLayout(
+                          title: title,
+                          description: description,
                           controller: controller,
                           isLoading: isLoading,
                           errorMessage: errorMessage,
@@ -164,6 +194,8 @@ class _ActivationExperience extends StatelessWidget {
                           onActivate: onActivate,
                         )
                       : _CompactActivationLayout(
+                          title: title,
+                          description: description,
                           controller: controller,
                           isLoading: isLoading,
                           errorMessage: errorMessage,
@@ -218,6 +250,8 @@ class _ActivationExperience extends StatelessWidget {
 
 class _CompactActivationLayout extends StatelessWidget {
   const _CompactActivationLayout({
+    required this.title,
+    required this.description,
     required this.controller,
     required this.isLoading,
     required this.errorMessage,
@@ -226,6 +260,8 @@ class _CompactActivationLayout extends StatelessWidget {
     required this.keyboardOpen,
   });
 
+  final String title;
+  final String description;
   final TextEditingController controller;
   final bool isLoading;
   final String? errorMessage;
@@ -245,7 +281,7 @@ class _CompactActivationLayout extends StatelessWidget {
         children: [
           if (!keyboardOpen) ...[const _AppIcon(), const SizedBox(height: 36)],
           Text(
-            'Set up your calling app',
+            title,
             textAlign: TextAlign.center,
             style: theme.textTheme.headlineMedium?.copyWith(
               color: theme.colorScheme.onSurface,
@@ -255,7 +291,7 @@ class _CompactActivationLayout extends StatelessWidget {
           if (!keyboardOpen) ...[
             const SizedBox(height: 18),
             Text(
-              _activationDescription,
+              description,
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
@@ -280,6 +316,8 @@ class _CompactActivationLayout extends StatelessWidget {
 
 class _WideActivationLayout extends StatelessWidget {
   const _WideActivationLayout({
+    required this.title,
+    required this.description,
     required this.controller,
     required this.isLoading,
     required this.errorMessage,
@@ -287,6 +325,8 @@ class _WideActivationLayout extends StatelessWidget {
     required this.onActivate,
   });
 
+  final String title;
+  final String description;
   final TextEditingController controller;
   final bool isLoading;
   final String? errorMessage;
@@ -314,7 +354,7 @@ class _WideActivationLayout extends StatelessWidget {
                   const _AppIcon(alignment: Alignment.centerLeft, size: 84),
                   const SizedBox(height: 36),
                   Text(
-                    'Set up your calling app',
+                    title,
                     style: theme.textTheme.headlineLarge?.copyWith(
                       color: theme.colorScheme.onSurface,
                       height: 1.1,
@@ -324,7 +364,7 @@ class _WideActivationLayout extends StatelessWidget {
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 440),
                     child: Text(
-                      _activationDescription,
+                      description,
                       style: theme.textTheme.bodyLarge?.copyWith(
                         color: theme.colorScheme.onSurfaceVariant,
                         height: 1.45,

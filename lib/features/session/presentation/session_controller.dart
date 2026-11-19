@@ -9,6 +9,7 @@ import '../../../core/errors/failure.dart';
 import '../../../core/network/api_endpoints.dart';
 import '../../../core/network/dio_provider.dart';
 import '../../../core/storage/storage_providers.dart';
+import '../../accounts/presentation/accounts_controller.dart';
 import '../../call_history/presentation/call_history_providers.dart';
 import '../../calls/domain/voip_call.dart';
 import '../../contacts/presentation/quick_dial_providers.dart';
@@ -441,6 +442,18 @@ class SessionController extends AsyncNotifier<AppSession?> {
     await ref
         .read(settingsControllerProvider.notifier)
         .resetDeviceDndForAppReset();
+    await ref
+        .read(settingsControllerProvider.notifier)
+        .resetCallingNetworkForAppReset();
+    try {
+      await ref.read(accountsControllerProvider.notifier).resetForAppReset();
+    } catch (error, stackTrace) {
+      AppLogger.error(
+        'Second account could not be reset',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
     await sipService.unregister();
     // A disabled native account can be restored by a later FCM/APNs wake.
     // Purge it only for a real local reset, after the unregister transaction.
@@ -540,6 +553,9 @@ class SessionController extends AsyncNotifier<AppSession?> {
             .registerDevice(sipIdentity: sipWithPush.sipIdentity);
       }
       await service.register();
+      // The second account (when there is one) starts after the primary one
+      // and can never delay or break it.
+      unawaited(ref.read(accountsControllerProvider.notifier).syncSecondary());
       _registrationRetryTimer = Timer(
         const Duration(seconds: 6),
         () => unawaited(_retryStartupRegistration(service)),

@@ -117,6 +117,18 @@ if(PLUGIN_BUNDLED_LIBRARIES)
     COMPONENT Runtime)
 endif()
 
+# Ship the Visual C++ runtime DLLs beside VoipCloud.exe so a clean PC without
+# the Microsoft Visual C++ Redistributable can still load liblinphone.dll.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION "${INSTALL_BUNDLE_LIB_DIR}")
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_COMPONENT Runtime)
+include(InstallRequiredSystemLibraries)
+if(NOT CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS AND NOT VOIPCLOUD_ALLOW_MISSING_LINPHONE)
+  message(FATAL_ERROR
+    "The Visual C++ runtime DLLs were not found, so the app would not run on a "
+    "PC without the Microsoft Visual C++ Redistributable. Install the Visual "
+    "Studio C++ desktop workload (it includes them) and reconfigure.")
+endif()
+
 # Bundle the locally installed Linphone SDK runtime beside VoipCloud.exe. The
 # native bridge resolves liblinphone dynamically, so no import library is
 # needed, but liblinphone and all of its companion DLLs must be present at
@@ -125,6 +137,26 @@ set(LINPHONE_SDK_BIN
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/linphone/linphone-sdk/win64/bin")
 set(LINPHONE_SDK_ROOT
   "${CMAKE_CURRENT_SOURCE_DIR}/third_party/linphone/linphone-sdk/win64")
+# A build without the SDK starts but cannot call ("Linphone ... not linked"),
+# and a half-extracted SDK fails only at run time with a vague error. Stop the
+# build here instead. Pass -DVOIPCLOUD_ALLOW_MISSING_LINPHONE=ON to override.
+set(LINPHONE_REQUIRED_DLLS liblinphone.dll bctoolbox.dll belle-sip.dll
+  mediastreamer2.dll ortp.dll lime.dll belr.dll belcard.dll xml2.dll
+  xerces-c.dll zlib1.dll soci_core_4_0.dll sqlite3.dll ZXing.dll hidapi.dll
+  jsoncpp.dll turbojpeg.dll)
+set(LINPHONE_MISSING_DLLS "")
+foreach(LINPHONE_DLL ${LINPHONE_REQUIRED_DLLS})
+  if(NOT EXISTS "${LINPHONE_SDK_BIN}/${LINPHONE_DLL}")
+    list(APPEND LINPHONE_MISSING_DLLS "${LINPHONE_DLL}")
+  endif()
+endforeach()
+if(LINPHONE_MISSING_DLLS AND NOT VOIPCLOUD_ALLOW_MISSING_LINPHONE)
+  message(FATAL_ERROR
+    "The Linphone Windows SDK is missing or incomplete in ${LINPHONE_SDK_BIN}.\n"
+    "Missing: ${LINPHONE_MISSING_DLLS}\n"
+    "Extract linphone-sdk-win64-<version>.zip as described in "
+    "windows/third_party/linphone/README.md, then delete build/windows and rebuild.")
+endif()
 if(EXISTS "${LINPHONE_SDK_BIN}/liblinphone.dll")
   file(GLOB LINPHONE_RUNTIME_DLLS CONFIGURE_DEPENDS
     "${LINPHONE_SDK_BIN}/*.dll")

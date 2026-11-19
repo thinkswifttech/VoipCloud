@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/app_version_provider.dart';
+import '../../../core/config/app_config.dart';
 import '../../../core/updates/desktop_update.dart';
 import '../../../core/updates/windows_update_installer.dart';
 import '../../../app/router/route_names.dart';
@@ -23,12 +24,22 @@ import '../../calls/presentation/audio_route_picker.dart';
 import '../../session/presentation/session_controller.dart';
 import '../../sip/domain/sip_registration_state.dart';
 import '../../sip/presentation/calling_status_text.dart';
+import 'calling_network_section.dart';
 import 'liblinphone_attribution.dart';
 import 'settings_controller.dart';
 import 'windows_always_on_top_tile.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({
+    super.key,
+    this.showAccountsCard,
+    this.showCallingNetworkCard,
+  });
+
+  /// Default to the build flags; tests turn the optional cards on to check
+  /// that Appearance and About still show.
+  final bool? showAccountsCard;
+  final bool? showCallingNetworkCard;
 
   @override
   ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
@@ -71,13 +82,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       icon: AppIcons.initialize,
                       title: sip == null
                           ? 'Calling not configured'
-                          : CallingStatusText.title(state.status),
+                          : CallingStatusText.title(
+                              state.status,
+                              reconnecting: state.reconnecting,
+                            ),
                       subtitle: sip == null
                           ? 'No calling account configured'
-                          : CallingStatusText.description(state.status),
+                          : CallingStatusText.description(
+                              state.status,
+                              reconnecting: state.reconnecting,
+                            ),
                       trailing: StatusPill(
                         label: CallingStatusText.label(
                           state.status,
+                          reconnecting: state.reconnecting,
                         ).toUpperCase(),
                         color: _registrationColor(context, state.status),
                       ),
@@ -161,71 +179,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 ],
               ),
             ),
-            AppCard(
-              title: 'Appearance',
-              subtitle: 'Choose how the app follows your display',
-              child: SizedBox(
-                width: double.infinity,
-                child: SegmentedButton<AppThemeMode>(
-                  style: ButtonStyle(
-                    backgroundColor: WidgetStateProperty.resolveWith((states) {
-                      if (states.contains(WidgetState.selected)) {
-                        return AppTheme.swiftRed;
-                      }
-                      return theme.brightness == Brightness.dark
-                          ? theme.colorScheme.surface
-                          : Colors.white;
-                    }),
-                    foregroundColor: WidgetStateProperty.resolveWith((states) {
-                      if (states.contains(WidgetState.selected)) {
-                        return Colors.white;
-                      }
-                      return AppTheme.swiftRed;
-                    }),
-                    side: WidgetStatePropertyAll(
-                      BorderSide(
-                        color: AppTheme.swiftRed.withValues(alpha: 0.45),
-                      ),
-                    ),
-                    iconColor: WidgetStateProperty.resolveWith((states) {
-                      if (states.contains(WidgetState.selected)) {
-                        return Colors.white;
-                      }
-                      return AppTheme.swiftRed;
-                    }),
-                  ),
-                  segments: const [
-                    ButtonSegment(
-                      value: AppThemeMode.system,
-                      icon: Icon(AppIcons.themeSystem),
-                      label: Text('System'),
-                    ),
-                    ButtonSegment(
-                      value: AppThemeMode.light,
-                      icon: Icon(AppIcons.themeLight),
-                      label: Text('Light'),
-                    ),
-                    ButtonSegment(
-                      value: AppThemeMode.dark,
-                      icon: Icon(AppIcons.themeDark),
-                      label: Text('Dark'),
-                    ),
-                  ],
-                  selected: {settings.themeMode},
-                  onSelectionChanged: (selection) {
-                    ref
-                        .read(settingsControllerProvider.notifier)
-                        .setThemeMode(selection.first);
-                  },
+            if (widget.showAccountsCard ?? multiAccountAvailable)
+              AppCard(
+                title: 'Accounts',
+                subtitle:
+                    'Add a second account and choose which one to call from',
+                child: AppInfoTile(
+                  icon: AppIcons.account,
+                  title: 'Manage accounts',
+                  subtitle: 'Names, colours and the account for new calls',
+                  trailing: const Icon(AppIcons.chevronRight),
+                  onTap: () => context.push(RoutePaths.accounts),
                 ),
               ),
-            ),
-            const AppCard(
-              title: 'About',
-              subtitle: 'App information',
-              child: _AboutSection(),
-            ),
+            if (widget.showCallingNetworkCard ?? callingNetworkAvailable)
+              const AppCard(
+                title: 'Calling network',
+                subtitle: 'Choose the connection calls use',
+                child: CallingNetworkSection(),
+              ),
           ];
+
+          final appearanceCard = AppCard(
+            title: 'Appearance',
+            subtitle: 'Choose how the app follows your display',
+            child: SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<AppThemeMode>(
+                style: AppTheme.segmentedButtonStyle(theme),
+                segments: const [
+                  ButtonSegment(
+                    value: AppThemeMode.system,
+                    icon: Icon(AppIcons.themeSystem),
+                    label: Text('System'),
+                  ),
+                  ButtonSegment(
+                    value: AppThemeMode.light,
+                    icon: Icon(AppIcons.themeLight),
+                    label: Text('Light'),
+                  ),
+                  ButtonSegment(
+                    value: AppThemeMode.dark,
+                    icon: Icon(AppIcons.themeDark),
+                    label: Text('Dark'),
+                  ),
+                ],
+                selected: {settings.themeMode},
+                onSelectionChanged: (selection) {
+                  ref
+                      .read(settingsControllerProvider.notifier)
+                      .setThemeMode(selection.first);
+                },
+              ),
+            ),
+          );
+          final aboutCard = const AppCard(
+            title: 'About',
+            subtitle: 'App information',
+            child: _AboutSection(),
+          );
 
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -244,14 +256,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 const SizedBox(height: 16),
                 cards[1],
               ],
+              // Optional cards (Accounts, Calling network) come before Appearance;
+              // draw whatever is there instead of fixed positions.
+              for (final card in cards.skip(2)) ...[
+                const SizedBox(height: 16),
+                card,
+              ],
               const SizedBox(height: 16),
-              cards[2],
+              appearanceCard,
               if (Platform.isWindows) ...[
                 const SizedBox(height: 16),
                 const AppCard(title: 'Window', child: WindowsAlwaysOnTopTile()),
               ],
               const SizedBox(height: 16),
-              cards[3],
+              aboutCard,
               const SizedBox(height: 16),
               AppCard(
                 title: 'Device',
@@ -346,7 +364,7 @@ class _AndroidBackgroundPermissionTileState
     extends State<_AndroidBackgroundPermissionTile> {
   static const _platformChannel = VoipPlatformChannel();
   bool _loading = true;
-  bool _ignored = true;
+  AndroidBackgroundStatus _status = const AndroidBackgroundStatus();
 
   @override
   void initState() {
@@ -355,12 +373,12 @@ class _AndroidBackgroundPermissionTileState
   }
 
   Future<void> _refreshStatus() async {
-    final ignored = await _platformChannel.isBatteryOptimizationIgnored();
+    final status = await _platformChannel.getBackgroundStatus();
     if (!mounted) {
       return;
     }
     setState(() {
-      _ignored = ignored;
+      _status = status;
       _loading = false;
     });
   }
@@ -376,8 +394,11 @@ class _AndroidBackgroundPermissionTileState
   Widget build(BuildContext context) {
     final subtitle = _loading
         ? 'Checking battery optimization status'
-        : _ignored
+        : _status.isAllowed
         ? 'Background restrictions are disabled for Softphone'
+        : _status.isRestricted
+        ? 'Android is restricting VoipCloud in the background. Open Battery '
+              'and allow background activity (Unrestricted).'
         : 'Allow unrestricted background activity for reliable incoming calls';
 
     return AppInfoTile(
@@ -390,7 +411,7 @@ class _AndroidBackgroundPermissionTileState
               height: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : _ignored
+          : _status.isAllowed
           ? StatusPill(label: 'ALLOWED', color: const Color(0xFF16A34A))
           : TextButton(onPressed: _openSettings, child: const Text('Allow')),
     );
@@ -610,7 +631,7 @@ class _AboutSectionState extends ConsumerState<_AboutSection> {
           ],
         ),
         const Divider(height: 28),
-        if (Platform.isWindows || Platform.isMacOS) ...[
+        if (Platform.isWindows) ...[
           _DesktopUpdateTile(
             checking: update.isLoading,
             failed: update.hasError,
@@ -682,7 +703,7 @@ class _DesktopUpdateTile extends StatelessWidget {
           : available
           ? FilledButton(
               onPressed: () => onAction(release!),
-              child: Text(Platform.isWindows ? 'Update' : 'Download'),
+              child: const Text('Update'),
             )
           : TextButton(onPressed: onCheck, child: const Text('Check')),
       onTap: checking || installing || available ? null : onCheck,

@@ -5,6 +5,7 @@ class StorageKeys {
   static const appDndEnabled = 'app.dnd_enabled';
   static const appLocalDndEnabled = 'app.local_dnd_enabled';
   static const appDndScope = 'app.dnd_scope';
+  static const appCallingNetwork = 'app.calling_network';
   static const appVoipDebugLogsEnabled = 'app.voip_debug_logs_enabled';
 
   static const appAccessToken = 'app.access_token';
@@ -19,6 +20,8 @@ class StorageKeys {
   static const appCarrierMessaging = 'app.carrier_messaging';
   static const appDeviceId = 'app.device_id';
   static const appPushTokenStatus = 'app.push_token_status';
+  static const appSecondaryAccount = 'app.secondary_account';
+  static const appAccountsPrefs = 'app.accounts_prefs';
   static const appCallHistory = 'app.call_history';
   static const appCallHistoryLastViewedAt = 'app.call_history_last_viewed_at';
   // Kept in device-only history storage across provisioning/session resets.

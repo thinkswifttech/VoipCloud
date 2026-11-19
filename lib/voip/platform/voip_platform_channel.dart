@@ -14,12 +14,16 @@ class VoipPlatformChannel {
     EventChannel presenceEvents = const EventChannel(
       'voipcloud/linphone/presence',
     ),
+    EventChannel callingNetworkEvents = const EventChannel(
+      'voipcloud/linphone/calling_network',
+    ),
   }) : _channel = channel,
        _registrationEvents = registrationEvents,
        _callEvents = callEvents,
        _messageEvents = messageEvents,
        _sipLogEvents = sipLogEvents,
-       _presenceEvents = presenceEvents;
+       _presenceEvents = presenceEvents,
+       _callingNetworkEvents = callingNetworkEvents;
 
   final MethodChannel _channel;
   final EventChannel _registrationEvents;
@@ -27,6 +31,7 @@ class VoipPlatformChannel {
   final EventChannel _messageEvents;
   final EventChannel _sipLogEvents;
   final EventChannel _presenceEvents;
+  final EventChannel _callingNetworkEvents;
 
   // Directory and diagnostics must share one native event-channel listener.
   static final _presenceStreams = Expando<Stream<Map<String, dynamic>>>();
@@ -63,10 +68,11 @@ class VoipPlatformChannel {
     });
   }
 
-  Future<void> stopDndDiagnostic() => _channel.invokeMethod<void>(
-    'stopPresenceSubscriptions',
-    {'diagnostic': true},
-  );
+  Future<void> stopDndDiagnostic({String accountId = 'primary'}) =>
+      _channel.invokeMethod<void>('stopPresenceSubscriptions', {
+        'diagnostic': true,
+        'accountId': accountId,
+      });
 
   Future<void> reconcilePresenceSubscriptions(
     Iterable<String> extensions, {
@@ -100,8 +106,9 @@ class VoipPlatformChannel {
 
   Future<void> startPbxDndSubscription(
     String extension,
-    String subscriptionId,
-  ) {
+    String subscriptionId, {
+    String accountId = 'primary',
+  }) {
     if (!RegExp(r'^[0-9]{2,8}$').hasMatch(extension) ||
         subscriptionId.isEmpty) {
       throw ArgumentError(
@@ -112,6 +119,7 @@ class VoipPlatformChannel {
       'extensions': ['*76$extension'],
       'diagnostic': true,
       'subscriptionId': subscriptionId,
+      'accountId': accountId,
     });
   }
 
@@ -136,6 +144,20 @@ class VoipPlatformChannel {
 
   Future<void> register() {
     return _channel.invokeMethod<void>('register');
+  }
+
+  /// Adds (or replaces) the second SIP account next to the primary one. The
+  /// primary account is not touched.
+  Future<void> configureSecondaryAccount(Map<String, Object?> account) {
+    return _channel.invokeMethod<void>('configureAccount', {
+      ...account,
+      'accountSlot': 'secondary',
+    });
+  }
+
+  /// Removes only the second SIP account (and its saved credentials).
+  Future<void> removeSecondaryAccount() {
+    return _channel.invokeMethod<void>('removeSecondaryAccount');
   }
 
   Future<Map<String, dynamic>?> syncCurrentCall() async {
@@ -174,10 +196,21 @@ class VoipPlatformChannel {
     });
   }
 
+  /// Places a call from the account named by [accountId] (`secondary`).
+  Future<void> makeCallOnAccount(String destination, String accountId) {
+    return _channel.invokeMethod<void>('makeCall', {
+      'destination': destination,
+      'accountId': accountId,
+    });
+  }
+
   /// Places a short SIP INVITE for a PBX feature code (e.g. *76). Returns the
   /// native call id so Flutter can suppress UI/history for that call.
-  Future<String?> dialFeatureCode(String code) {
-    return _channel.invokeMethod<String>('dialFeatureCode', {'code': code});
+  Future<String?> dialFeatureCode(String code, {String? accountId}) {
+    return _channel.invokeMethod<String>('dialFeatureCode', {
+      'code': code,
+      'accountId': ?accountId,
+    });
   }
 
   Future<void> endCall(String callId) {
@@ -226,6 +259,25 @@ class VoipPlatformChannel {
     return result ?? true;
   }
 
+  /// Both Android background switches: the Doze exemption and the app's own
+  /// background-usage restriction. See [AndroidBackgroundStatus].
+  Future<AndroidBackgroundStatus> getBackgroundStatus() async {
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'getBackgroundStatus',
+    );
+    if (result == null) return const AndroidBackgroundStatus();
+    return AndroidBackgroundStatus(
+      exempt: result['exempt'] != false,
+      restricted: result['restricted'] == true,
+      standbyBucket: (result['standbyBucket'] as num?)?.toInt() ?? 10,
+    );
+  }
+
+  /// The app's own system settings page (Battery / Background usage).
+  Future<void> openAppBatterySettings() {
+    return _channel.invokeMethod<void>('openAppBatterySettings');
+  }
+
   Future<bool> requestIgnoreBatteryOptimizations() async {
     final result = await _channel.invokeMethod<bool>(
       'requestIgnoreBatteryOptimizations',
@@ -249,18 +301,50 @@ class VoipPlatformChannel {
     return result ?? false;
   }
 
+  /// [line] is `primary` (default) or `secondary`: each account keeps its own
+  /// cached names, so the same extension on two phone systems never mixes.
   Future<void> updateDirectoryCache({
     required String tenantKey,
     required List<Map<String, Object?>> entries,
+    String line = 'primary',
   }) {
     return _channel.invokeMethod<void>('updateDirectoryCache', {
       'tenantKey': tenantKey,
       'entries': entries,
+      'line': line,
     });
   }
 
   Future<void> setNativeDnd(bool enabled) {
     return _channel.invokeMethod<void>('setNativeDnd', {'enabled': enabled});
+  }
+
+  /// Mirrors the calling-network preference into native storage and applies
+  /// it. [preference] is `auto`, `wifi` or `cellular`.
+  Future<void> setCallingNetworkPreference({
+    required bool enabled,
+    required String preference,
+  }) {
+    return _channel.invokeMethod<void>('setCallingNetworkPreference', {
+      'enabled': enabled,
+      'preference': preference,
+    });
+  }
+
+  /// Native routing status: requested/effective path, reason and whether a
+  /// change is waiting for the current call to end. Empty when unsupported.
+  Future<Map<String, Object?>> getCallingNetworkStatus() async {
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'getCallingNetworkStatus',
+    );
+    return result ?? const {};
+  }
+
+  /// Pushes the routing status whenever it changes (and once on listen).
+  Stream<Map<String, Object?>> callingNetworkStatusEvents() {
+    return _callingNetworkEvents.receiveBroadcastStream().map(
+      (event) => Map<String, Object?>.from(event as Map),
+    );
   }
 
   Future<void> clearNativeCallState() {
@@ -433,4 +517,27 @@ Map<String, dynamic> _asMap(Object? value) {
     return Map<String, dynamic>.from(value);
   }
   return const {};
+}
+
+/// What Android allows the app to do in the background.
+class AndroidBackgroundStatus {
+  const AndroidBackgroundStatus({
+    this.exempt = true,
+    this.restricted = false,
+    this.standbyBucket = 10,
+  });
+
+  /// Not subject to battery optimisation (Doze).
+  final bool exempt;
+
+  /// The user (or the phone) chose "Restricted" for the app's background usage.
+  final bool restricted;
+
+  /// Android's standby bucket: 10 active ... 40 rare, 45 restricted.
+  final int standbyBucket;
+
+  /// Restricted apps cannot run in the background, whatever Doze says.
+  bool get isRestricted => restricted || standbyBucket >= 45;
+
+  bool get isAllowed => exempt && !isRestricted;
 }

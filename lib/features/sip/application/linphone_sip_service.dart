@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -9,12 +10,14 @@ import '../../../core/errors/app_exception.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
 import '../../call_history/domain/call_history_classification.dart';
 import '../../call_history/domain/call_history_repository.dart';
+import '../../accounts/domain/account_line.dart';
 import '../../calls/domain/audio_output_route.dart';
 import '../../calls/domain/audio_volume_levels.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_quality_info.dart';
 import '../../calls/domain/call_status.dart';
 import '../../calls/domain/voip_call.dart';
+import '../../calls/domain/calling_network_loss.dart';
 import '../../dialer/domain/post_dial_sequence.dart';
 import '../domain/sip_message.dart';
 import '../domain/sip_config.dart';
@@ -61,6 +64,9 @@ class LinphoneSipService implements SipService {
   final Duration registrationTransitionGrace;
   final StreamController<SipRegistrationState> _registrationController =
       StreamController<SipRegistrationState>.broadcast();
+  final StreamController<SipRegistrationState>
+  _secondaryRegistrationController =
+      StreamController<SipRegistrationState>.broadcast();
   final StreamController<VoipCall?> _callController =
       StreamController<VoipCall?>.broadcast();
   final StreamController<List<VoipCall>> _liveCallsController =
@@ -75,6 +81,9 @@ class LinphoneSipService implements SipService {
   StreamSubscription<Map<String, dynamic>>? _messageSubscription;
   SipRegistrationState _registrationState = SipRegistrationState.initial();
   SipConfig? _config;
+  SipConfig? _secondaryConfig;
+  SipRegistrationState _secondaryRegistrationState =
+      SipRegistrationState.initial();
   VoipCall? _activeCall;
   final Map<String, VoipCall> _knownCalls = {};
   final Set<String> _dndRejectedCallIds = {};
@@ -103,6 +112,8 @@ class LinphoneSipService implements SipService {
   // Consecutive Windows syncs in which the engine reported no call while the
   // app still held a live one.
   int _windowsNoCallStreak = 0;
+  static const Duration _resumeHeldWindow = Duration(seconds: 20);
+  DateTime? _resumeHeldUntil;
   static const _windowsNoCallStreakLimit = 5;
   final Stopwatch _callTraceClock = Stopwatch()..start();
   int _callTraceSequence = 0;
@@ -143,6 +154,67 @@ class LinphoneSipService implements SipService {
 
   @override
   SipConfig? get currentConfig => _config;
+
+  @override
+  SipConfig? get secondaryConfig => _secondaryConfig;
+
+  @override
+  SipRegistrationState getSecondaryRegistrationState() =>
+      _secondaryRegistrationState;
+
+  @override
+  Stream<SipRegistrationState> get secondaryRegistrationStateStream =>
+      _secondaryRegistrationController.stream;
+
+  @override
+  Future<void> configureSecondary(SipConfig config) async {
+    _secondaryConfig = config;
+    _sipLog('info', 'Second line: configuring ${config.sipIdentity}');
+    try {
+      if (!_initialized) {
+        _bindNativeEvents();
+        await _platformChannel.initialize();
+        _initialized = true;
+      }
+      if (await hasActiveCall()) {
+        // Native refuses account changes during a call; the next sync applies it.
+        return;
+      }
+      _emitSecondaryRegistration(
+        SipRegistrationState(
+          status: SipRegistrationStatus.configuring,
+          updatedAt: DateTime.now(),
+          message: 'Preparing the second line',
+        ),
+      );
+      await _platformChannel.configureSecondaryAccount(
+        _nativeAccountMap(config),
+      );
+    } on Object catch (error) {
+      _emitSecondaryRegistration(
+        SipRegistrationState(
+          status: SipRegistrationStatus.failed,
+          updatedAt: DateTime.now(),
+          message: _nativeErrorMessage(error),
+        ),
+      );
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> removeSecondary() async {
+    _secondaryConfig = null;
+    _emitSecondaryRegistration(SipRegistrationState.initial());
+    await _platformChannel.removeSecondaryAccount();
+  }
+
+  void _emitSecondaryRegistration(SipRegistrationState state) {
+    _secondaryRegistrationState = state;
+    if (!_secondaryRegistrationController.isClosed) {
+      _secondaryRegistrationController.add(state);
+    }
+  }
 
   @override
   Future<void> initialize(SipConfig config) async {
@@ -368,9 +440,12 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> makeCall(String destination) {
+  Future<void> makeCall(
+    String destination, {
+    AccountLine line = AccountLine.primary,
+  }) {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
-      return _makeCall(destination);
+      return _makeCall(destination, line);
     }
     final pending = _outgoingCallOperation;
     if (pending != null) {
@@ -380,7 +455,7 @@ class LinphoneSipService implements SipService {
         userMessage: 'A call is already being prepared. Please wait.',
       );
     }
-    final operation = _makeCall(destination);
+    final operation = _makeCall(destination, line);
     _outgoingCallOperation = operation;
     _pendingOutgoingDestination = destination.trim();
     return operation.whenComplete(() {
@@ -391,7 +466,7 @@ class LinphoneSipService implements SipService {
     });
   }
 
-  Future<void> _makeCall(String destination) async {
+  Future<void> _makeCall(String destination, AccountLine line) async {
     final trimmed = destination.trim();
     final postDial = PostDialSequence.parse(trimmed);
     if (postDial.destination.isEmpty) {
@@ -400,7 +475,11 @@ class LinphoneSipService implements SipService {
         userMessage: 'Enter a number or SIP address.',
       );
     }
-    if (!_isOperationallyRegistered && !kIsWeb) {
+    final onSecondLine =
+        line == AccountLine.secondary && _secondaryConfig != null;
+    if (onSecondLine) {
+      await _ensureSecondaryReady();
+    } else if (!_isOperationallyRegistered && !kIsWeb) {
       await _ensureOutgoingRegistrationReady();
     }
     if (_disposed || (!kIsWeb && _config?.hasCredentials != true)) {
@@ -409,7 +488,7 @@ class LinphoneSipService implements SipService {
         userMessage: 'Sign in before placing a call.',
       );
     }
-    if (!_isOperationallyRegistered) {
+    if (!onSecondLine && !_isOperationallyRegistered) {
       throw VoipException(
         message: 'SIP account is not registered',
         userMessage: _registrationState.message == null
@@ -424,6 +503,9 @@ class LinphoneSipService implements SipService {
       direction: CallDirection.outgoing,
       status: CallStatus.dialing,
       startedAt: DateTime.now(),
+      line: _secondaryConfig == null
+          ? null
+          : (onSecondLine ? line : AccountLine.primary),
     );
     _knownCalls[placeholder.id] = placeholder;
     _activeCall = placeholder;
@@ -435,7 +517,14 @@ class LinphoneSipService implements SipService {
         : null;
     _traceCall('make_call_requested', identity: postDial.destination);
     try {
-      await _platformChannel.makeCall(postDial.destination);
+      if (onSecondLine) {
+        await _platformChannel.makeCallOnAccount(
+          postDial.destination,
+          line.wire,
+        );
+      } else {
+        await _platformChannel.makeCall(postDial.destination);
+      }
       _traceCall(
         'make_call_native_accepted',
         identity: postDial.destination,
@@ -468,6 +557,26 @@ class LinphoneSipService implements SipService {
       _clearOutgoingPlaceholder(placeholder);
       _pendingPostDialPlan = null;
       rethrow;
+    }
+  }
+
+  /// The second line must be registered before it can place a call; give a
+  /// registration already in progress a short chance to finish.
+  Future<void> _ensureSecondaryReady() async {
+    if (_secondaryRegistrationState.isRegistered) return;
+    unawaited(_platformChannel.register().catchError((Object _) {}));
+    final deadline = DateTime.now().add(outgoingRegistrationTimeout);
+    while (!_disposed &&
+        !_secondaryRegistrationState.isRegistered &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    if (!_secondaryRegistrationState.isRegistered) {
+      throw const VoipException(
+        message: 'Second SIP account is not registered',
+        userMessage:
+            "That line isn't connected right now. Check your connection and try again in a moment, or call from your other line.",
+      );
     }
   }
 
@@ -567,7 +676,25 @@ class LinphoneSipService implements SipService {
   }
 
   @override
-  Future<void> syncPbxDndToggle({bool requireImmediate = false}) async {
+  Future<void> syncPbxDndToggle({
+    bool requireImmediate = false,
+    AccountLine line = AccountLine.primary,
+  }) async {
+    if (line == AccountLine.secondary) {
+      // The second line only ever toggles on demand: no queued retries.
+      if (!_secondaryRegistrationState.isRegistered ||
+          _secondaryConfig == null ||
+          liveCalls.isNotEmpty ||
+          _featureCodeDialInFlight ||
+          _disposed) {
+        throw const VoipException(
+          message: 'PBX DND cannot be changed now',
+          userMessage: 'Register and end active calls before changing DND.',
+        );
+      }
+      await _dialPbxDndToggle(propagateFailure: true, line: line);
+      return;
+    }
     if (requireImmediate) {
       final config = _config;
       final busy = await hasActiveCall();
@@ -607,7 +734,10 @@ class LinphoneSipService implements SipService {
     await _dialPbxDndToggle();
   }
 
-  Future<void> _dialPbxDndToggle({bool propagateFailure = false}) async {
+  Future<void> _dialPbxDndToggle({
+    bool propagateFailure = false,
+    AccountLine line = AccountLine.primary,
+  }) async {
     if (_featureCodeDialInFlight) {
       _pendingPbxDndToggle = !_pendingPbxDndToggle;
       return;
@@ -615,7 +745,10 @@ class LinphoneSipService implements SipService {
     _featureCodeDialInFlight = true;
     _pendingPbxDndToggle = false;
     try {
-      final id = await _platformChannel.dialFeatureCode(_pbxDndToggleCode);
+      final id = await _platformChannel.dialFeatureCode(
+        _pbxDndToggleCode,
+        accountId: line == AccountLine.secondary ? line.wire : null,
+      );
       if (id != null && id.isNotEmpty) {
         _featureCodeCallIds.add(id);
         // Safety net if native never reports an ended event for this dial.
@@ -1277,6 +1410,7 @@ class LinphoneSipService implements SipService {
       // The native bridge may not exist in widget/unit tests.
     }
     await _registrationController.close();
+    await _secondaryRegistrationController.close();
     await _callController.close();
     await _liveCallsController.close();
     await _messageController.close();
@@ -1284,7 +1418,11 @@ class LinphoneSipService implements SipService {
   }
 
   Future<void> _configureNativeAccount(SipConfig config) {
-    return _platformChannel.configureAccount({
+    return _platformChannel.configureAccount(_nativeAccountMap(config));
+  }
+
+  Map<String, Object?> _nativeAccountMap(SipConfig config) {
+    return {
       'extension': config.extension,
       'sipUsername': config.sipUsername,
       'authUsername': config.authUsername,
@@ -1306,12 +1444,29 @@ class LinphoneSipService implements SipService {
       'pushParam': config.pushConfig?.param,
       'pushBundleId': config.pushConfig?.bundleId,
       'pushTeamId': config.pushConfig?.teamId,
-    });
+    };
   }
 
   void _bindNativeEvents() {
     _registrationSubscription ??= _platformChannel.registrationEvents().listen(
       (event) {
+        if (AccountLine.tryParse(event['accountId']) == AccountLine.secondary) {
+          final status = _registrationStatus('${event['status']}');
+          final message = _nullableString(event['message']);
+          _sipLog(
+            'info',
+            'Second line registration => ${status.name}'
+                '${message == null || message.isEmpty ? '' : ' · $message'}',
+          );
+          _emitSecondaryRegistration(
+            SipRegistrationState(
+              status: status,
+              updatedAt: DateTime.now(),
+              message: message,
+            ),
+          );
+          return;
+        }
         final state = _registrationFromEvent(event);
         _sipLog(
           'info',
@@ -1462,7 +1617,11 @@ class LinphoneSipService implements SipService {
     // Only a call this app saw ringing or live can complete in front of the
     // user. A finished call that first reaches the app late (after launch, or
     // while another call was ending) belongs to history, not to the screen.
-    if (_activeCall == null && call.answeredElsewhere && wasLiveBefore) {
+    // A call the app ended because its network was lost is explained on
+    // screen the same way.
+    if (_activeCall == null &&
+        (call.answeredElsewhere || call.networkLossPath != null) &&
+        wasLiveBefore) {
       // Let the router/incoming screen present the meaningful completion before
       // publishing the normal idle state.
       _callController.add(call);
@@ -1476,18 +1635,39 @@ class LinphoneSipService implements SipService {
       _startWindowsCallReconciliation();
     }
     if (previousActive != null && _isFinished(call.status)) {
-      final held = _orderedLiveCalls()
-          .where((candidate) => candidate.status == CallStatus.held)
-          .toList(growable: false);
-      final hasMediaCall = _currentMediaCall() != null;
-      final hasRinging = _orderedLiveCalls().any(
-        (candidate) => candidate.status == CallStatus.ringing,
-      );
-      if (!hasMediaCall && !hasRinging && held.length == 1) {
-        unawaited(_resumeAfterPeerEnded(held.single.id));
-      } else if (_activeCall == null) {
-        _flushPendingPbxDndToggleIfIdle();
-      }
+      // The call that took the user away from a held call just ended. The hold
+      // may still be completing, so keep the intent for a short while and
+      // re-check on later call events rather than only at this moment.
+      _resumeHeldUntil = DateTime.now().add(_resumeHeldWindow);
+    }
+    _resumeHeldCallIfPeerEnded();
+  }
+
+  /// Resumes the single held call once nothing else is ringing or in media.
+  /// Armed when a call finishes; stays armed while another call is still
+  /// settling (for example the held call's hold request has not completed
+  /// yet), so the held call is not left waiting for a timeout.
+  void _resumeHeldCallIfPeerEnded() {
+    final until = _resumeHeldUntil;
+    if (until == null) return;
+    if (DateTime.now().isAfter(until)) {
+      _resumeHeldUntil = null;
+      return;
+    }
+    final live = _orderedLiveCalls();
+    final hasMediaCall = _currentMediaCall() != null;
+    final hasRinging = live.any(
+      (candidate) => candidate.status == CallStatus.ringing,
+    );
+    if (hasMediaCall || hasRinging) return;
+    _resumeHeldUntil = null;
+    final held = live
+        .where((candidate) => candidate.status == CallStatus.held)
+        .toList(growable: false);
+    if (held.length == 1) {
+      unawaited(_resumeAfterPeerEnded(held.single.id));
+    } else if (_activeCall == null) {
+      _flushPendingPbxDndToggleIfIdle();
     }
   }
 
@@ -1743,8 +1923,16 @@ class LinphoneSipService implements SipService {
     // current time. Otherwise opening the app manufactures a new missed call
     // at the launch time.
     final historyPersistedAt = _date(event['historyPersistedAtEpochMs']);
+    // Windows names a call after its memory address, which the next call can
+    // reuse. A live event for an id whose known call already ended is a new
+    // call, so it must not inherit that call's name or start time.
+    final knownEarlier = _knownCalls[id];
+    final reusedAfterEnd =
+        knownEarlier != null &&
+        _isFinished(knownEarlier.status) &&
+        !_isFinished(status);
     final previous = mergeWithLiveState
-        ? _knownCalls[id] ??
+        ? (reusedAfterEnd ? null : knownEarlier) ??
               _promotePreviousCallIdentity(
                 newId: id,
                 direction: direction,
@@ -1814,6 +2002,10 @@ class LinphoneSipService implements SipService {
           previous?.answeredElsewhere == true ||
           event['answeredElsewhere'] == true ||
           isAnsweredElsewhereReason(_nullableString(event['stateMessage'])),
+      networkLossPath:
+          previous?.networkLossPath ??
+          callingNetworkLossPathFrom(_nullableString(event['stateMessage'])),
+      line: AccountLine.tryParse(event['accountId']) ?? previous?.line,
     );
   }
 
@@ -2008,6 +2200,7 @@ class LinphoneSipService implements SipService {
           startedAt: call.startedAt,
           endedAt: call.endedAt ?? DateTime.now(),
           sipCallId: call.id,
+          line: call.line,
         )
         .then<void>((_) async {
           if (!historyOnly) _rememberPersistedHistoryCall(call.id);
@@ -2066,7 +2259,25 @@ class LinphoneSipService implements SipService {
     }
   }
 
+  /// Becomes true once registered; cleared by a fresh setup or a real failure,
+  /// so only a connection lost after working is reported as "Reconnecting".
+  bool _wasRegistered = false;
+
   void _emitRegistration(SipRegistrationState state) {
+    switch (state.status) {
+      case SipRegistrationStatus.registered:
+        _wasRegistered = true;
+      case SipRegistrationStatus.uninitialized ||
+          SipRegistrationStatus.configuring ||
+          SipRegistrationStatus.failed:
+        _wasRegistered = false;
+      case SipRegistrationStatus.registering ||
+          SipRegistrationStatus.unregistered:
+        break;
+    }
+    if (_wasRegistered && state.status == SipRegistrationStatus.registering) {
+      state = state.copyWith(reconnecting: true);
+    }
     _registrationState = state;
     _registrationController.add(state);
   }
@@ -2326,6 +2537,15 @@ String _nativeErrorMessage(Object error) {
     return 'Linphone native bridge is not installed for this platform.';
   }
   if (text.contains('LINPHONE_NOT_LINKED')) {
+    // Windows reports why liblinphone.dll could not load (missing file or
+    // missing Visual C++ runtime); show that instead of an iOS-only message.
+    if (Platform.isWindows) {
+      final match = RegExp(
+        r'PlatformException\(LINPHONE_NOT_LINKED,\s*([^,]+)',
+      ).firstMatch(text);
+      return match?.group(1)?.trim() ??
+          'The calling engine could not be loaded. Reinstall VoipCloud.';
+    }
     return 'Linphone iOS SDK is not linked in this build.';
   }
   if (text.contains('PlatformException')) {

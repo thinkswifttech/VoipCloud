@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:phone_app/core/config/sip_transport.dart';
+import 'package:phone_app/core/errors/app_exception.dart';
+import 'package:phone_app/features/accounts/domain/account_line.dart';
 import 'package:phone_app/features/call_history/domain/call_history_item.dart';
 import 'package:phone_app/features/call_history/domain/call_history_repository.dart';
 import 'package:phone_app/features/calls/domain/call_direction.dart';
@@ -44,6 +46,188 @@ void main() {
       await service.dispose();
       await platform.close();
     });
+
+    group('second line', () {
+      const second = SipConfig(
+        extension: '305',
+        sipUsername: '305',
+        authUsername: '305',
+        password: 'pw',
+        domain: 'other.example.test',
+        registrar: 'sip.example.test',
+        outboundProxy: '',
+        port: 5061,
+        transport: SipTransport.tls,
+      );
+
+      Future<void> registerSecond() async {
+        await service.configureSecondary(second);
+        platform.emitRegistration({
+          'status': 'registered',
+          'accountId': 'secondary',
+        });
+        await _flushEvents();
+      }
+
+      test(
+        'is configured beside the primary and registers on its own',
+        () async {
+          await service.configureSecondary(second);
+          expect(platform.secondaryConfigs, hasLength(1));
+          expect(platform.secondaryConfigs.single['sipUsername'], '305');
+          expect(
+            platform.secondaryConfigs.single['domain'],
+            'other.example.test',
+          );
+          expect(
+            service.secondaryConfig?.sipIdentity,
+            '305@other.example.test',
+          );
+
+          platform.emitRegistration({
+            'status': 'registered',
+            'accountId': 'secondary',
+          });
+          await _flushEvents();
+          expect(service.getSecondaryRegistrationState().isRegistered, isTrue);
+
+          // A second-line failure must not disturb the primary account.
+          platform.emitRegistration({
+            'status': 'failed',
+            'accountId': 'secondary',
+          });
+          await _flushEvents();
+          expect(
+            service.getSecondaryRegistrationState().status,
+            SipRegistrationStatus.failed,
+          );
+          expect(service.getRegistrationState().isRegistered, isTrue);
+        },
+      );
+
+      test('a call on the second line leaves from that account', () async {
+        await registerSecond();
+
+        await service.makeCall('600', line: AccountLine.secondary);
+        await _flushEvents();
+        expect(platform.actions, contains('call:600@secondary'));
+        expect(service.activeCall?.line, AccountLine.secondary);
+
+        // The primary line still uses the plain call and is marked primary.
+        await service.endCall(service.activeCall!.id);
+        await _flushEvents();
+        await service.makeCall('601');
+        await _flushEvents();
+        expect(platform.actions, contains('call:601'));
+        expect(service.activeCall?.line, AccountLine.primary);
+      });
+
+      test('an unregistered second line says so instead of dialing', () async {
+        await service.configureSecondary(second);
+        await expectLater(
+          service.makeCall('600', line: AccountLine.secondary),
+          throwsA(isA<VoipException>()),
+        );
+        expect(platform.actions.where((a) => a.startsWith('call:')), isEmpty);
+      });
+
+      test('a finished second-line call is saved with its line', () async {
+        await registerSecond();
+        await service.makeCall('600', line: AccountLine.secondary);
+        await _flushEvents();
+        final id = service.activeCall!.id;
+        platform.emitCall({
+          ..._event(id, 'active', direction: 'outgoing'),
+          'accountId': 'secondary',
+        });
+        await _flushEvents();
+        platform.emitCall({
+          ..._event(id, 'ended', direction: 'outgoing'),
+          'accountId': 'secondary',
+        });
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        expect(history.items, isNotEmpty);
+        expect(history.items.first.line, AccountLine.secondary);
+      });
+
+      test(
+        'a native id reused after a queue call ended does not keep its name',
+        () async {
+          platform.emitCall(
+            _event(
+              'win-1',
+              'ringing',
+              remoteUri: 'sip:SUP:4165550100@example.test',
+              remoteDisplayName: 'SUP:Victoria Suites',
+            ),
+          );
+          await _flushEvents();
+          platform.emitCall(
+            _event(
+              'win-1',
+              'ended',
+              remoteUri: 'sip:SUP:4165550100@example.test',
+              remoteDisplayName: 'SUP:Victoria Suites',
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+
+          // Windows reuses the same address for the next call.
+          platform.emitCall(
+            _event(
+              'win-1',
+              'dialing',
+              direction: 'outgoing',
+              remoteUri: 'sip:12644767050@example.test',
+              remoteDisplayName: '12644767050',
+            ),
+          );
+          await _flushEvents();
+
+          final call = service.activeCall!;
+          expect(call.remoteDisplayName, '12644767050');
+          expect(call.direction, CallDirection.outgoing);
+        },
+      );
+
+      test('single-account behaviour is unchanged', () async {
+        await service.makeCall('600');
+        await _flushEvents();
+        expect(platform.actions, contains('call:600'));
+        expect(platform.actions.any((a) => a.contains('@')), isFalse);
+      });
+
+      test('removing it asks native to drop only that account', () async {
+        await service.configureSecondary(second);
+        await service.removeSecondary();
+        expect(platform.secondaryRemovals, 1);
+        expect(service.secondaryConfig, isNull);
+        expect(service.getRegistrationState().isRegistered, isTrue);
+      });
+    });
+
+    test(
+      'registering again after a working connection reads as reconnecting',
+      () async {
+        // setUp left the service registered.
+        platform.emitRegistration({'status': 'unregistered'});
+        await _flushEvents();
+        expect(service.getRegistrationState().reconnecting, isFalse);
+        platform.emitRegistration({'status': 'registering'});
+        // A short blip is hidden on purpose; wait past the transition grace.
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        expect(service.getRegistrationState().reconnecting, isTrue);
+        platform.emitRegistration({'status': 'registered'});
+        await _flushEvents();
+        expect(service.getRegistrationState().reconnecting, isFalse);
+        // A real failure starts over: the next attempt is a plain connect.
+        platform.emitRegistration({'status': 'failed'});
+        platform.emitRegistration({'status': 'registering'});
+        await _flushEvents();
+        expect(service.getRegistrationState().reconnecting, isFalse);
+      },
+    );
 
     void useIos() {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -344,6 +528,27 @@ void main() {
         CallStatus.active,
       );
     });
+
+    test(
+      'resumes the held call when the answered call ends before the hold completes',
+      () async {
+        platform.emitCall(_event('first', 'active', direction: 'outgoing'));
+        platform.emitCall(_event('second', 'connecting'));
+        await _flushEvents();
+        platform.actions.clear();
+
+        // The caller hangs up while the first call's hold is still pending.
+        platform.emitCall(_event('second', 'ended'));
+        await _flushEvents();
+        expect(platform.actions, isEmpty);
+
+        // The hold completes afterwards; the call must still come back.
+        platform.emitCall(_event('first', 'held', direction: 'outgoing'));
+        await _flushEvents();
+
+        expect(platform.actions, ['resume:first']);
+      },
+    );
 
     test('swaps the active and held calls in a serialized order', () async {
       platform.emitCall(_event('first', 'held', direction: 'outgoing'));
@@ -694,6 +899,35 @@ void main() {
         expect(service.liveCalls, hasLength(1));
         expect(service.activeCall?.id, 'first');
         expect(service.activeCall?.status, CallStatus.active);
+      },
+    );
+
+    test(
+      'publishes a call ended by network loss so the screen can explain it',
+      () async {
+        platform.emitCall(_event('lost', 'active', direction: 'outgoing'));
+        await _flushEvents();
+
+        final seen = <VoipCall?>[];
+        final subscription = service.callStateStream.listen(seen.add);
+        platform.emitCall(
+          _event(
+            'lost',
+            'ended',
+            direction: 'outgoing',
+            stateMessage: 'calling_network_lost:wifi',
+          ),
+        );
+        await _flushEvents();
+        await _flushEvents();
+        await subscription.cancel();
+
+        final finished = seen.whereType<VoipCall>().where(
+          (call) => call.id == 'lost' && call.status == CallStatus.ended,
+        );
+        expect(finished, isNotEmpty);
+        expect(finished.first.networkLossPath, 'wifi');
+        expect(service.activeCall, isNull);
       },
     );
 
@@ -1065,6 +1299,28 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   @override
   Future<void> configureAccount(Map<String, Object?> account) async {}
 
+  final List<Map<String, Object?>> secondaryConfigs = [];
+  int secondaryRemovals = 0;
+
+  @override
+  Future<void> configureSecondaryAccount(Map<String, Object?> account) async {
+    secondaryConfigs.add(account);
+  }
+
+  @override
+  Future<void> removeSecondaryAccount() async {
+    secondaryRemovals++;
+  }
+
+  @override
+  Future<void> makeCallOnAccount(String destination, String accountId) async {
+    actions.add('call:$destination@$accountId');
+    emitCall({
+      ..._event('outgoing-$destination', 'dialing', direction: 'outgoing'),
+      'accountId': accountId,
+    });
+  }
+
   @override
   Future<void> register() async {
     registrationRequests++;
@@ -1117,11 +1373,14 @@ class _FakeVoipPlatformChannel extends VoipPlatformChannel {
   @override
   Future<void> makeCall(String destination) async {
     actions.add('call:$destination');
-    emitCall(_event('outgoing-$destination', 'dialing', direction: 'outgoing'));
+    emitCall({
+      ..._event('outgoing-$destination', 'dialing', direction: 'outgoing'),
+      'accountId': 'primary',
+    });
   }
 
   @override
-  Future<String?> dialFeatureCode(String code) async {
+  Future<String?> dialFeatureCode(String code, {String? accountId}) async {
     actions.add('feature:$code');
     return 'feature-dnd';
   }
@@ -1194,6 +1453,7 @@ class _MemoryCallHistoryRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) async {
     await writeGate;
     if (writeError case final error?) throw error;
@@ -1206,6 +1466,7 @@ class _MemoryCallHistoryRepository implements CallHistoryRepository {
       disposition: disposition,
       startedAt: startedAt,
       endedAt: endedAt,
+      line: line,
     );
     items
       ..removeWhere((entry) => entry.id == item.id)

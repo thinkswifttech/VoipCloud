@@ -1,12 +1,14 @@
 package com.thinkswift.softphoneapp
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.app.usage.UsageStatsManager
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -20,6 +22,36 @@ internal object SoftphoneBackgroundPermissions {
         }
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         return powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    /**
+     * Android has two separate switches. The battery-optimisation exemption (Doze) is one; the
+     * app's own "Background usage" choice (Unrestricted / Optimised / Restricted, shown on some
+     * phones as "Allow background activity") is the other. A restricted app is not allowed to
+     * run in the background even when it is exempt from Doze, so registration is never renewed.
+     */
+    fun backgroundStatus(context: Context): Map<String, Any> {
+        val exempt = isIgnoringBatteryOptimizations(context)
+        var restricted = false
+        var bucket = 10
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            restricted = manager.isBackgroundRestricted
+            val usage = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            bucket = usage.appStandbyBucket
+        }
+        Log.i(TAG, "Background status exempt=$exempt restricted=$restricted standbyBucket=$bucket")
+        return mapOf("exempt" to exempt, "restricted" to restricted, "standbyBucket" to bucket)
+    }
+
+    /** The app's own settings page, where Battery / Background usage can be changed. */
+    fun openAppSettings(context: Context) {
+        launchSettingsIntent(
+            context,
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${context.packageName}")
+            }
+        )
     }
 
     fun requestIgnoreBatteryOptimizations(activity: MainActivity): Boolean {

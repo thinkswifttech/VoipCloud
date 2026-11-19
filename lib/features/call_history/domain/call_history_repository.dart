@@ -1,3 +1,4 @@
+import '../../accounts/domain/account_line.dart';
 import 'call_history_item.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
@@ -17,5 +18,6 @@ abstract class CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   });
 }

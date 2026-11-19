@@ -44,6 +44,37 @@ private enum DesktopWaitingTonePolicy {
   }
 }
 
+/// Short end-of-call, lost-call, on-hold and unanswered indications. Linphone's
+/// built-in versions play at full level, so replace them with the same quiet
+/// 425 Hz beep Windows uses, scaled by the call volume and capped near -21 dBFS.
+private enum DesktopStatusTonePolicy {
+  static func wave(level: Int) -> Data {
+    let sampleRate = 16_000
+    let count = sampleRate * 160 / 1000
+    let fade = Double(sampleRate * 20 / 1000)
+    var wave = Data()
+    wave.append(contentsOf: "RIFF".utf8)
+    wave.appendLittleEndian(UInt32(36 + count * 2))
+    wave.append(contentsOf: "WAVEfmt ".utf8)
+    wave.appendLittleEndian(UInt32(16))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt16(1))
+    wave.appendLittleEndian(UInt32(sampleRate))
+    wave.appendLittleEndian(UInt32(sampleRate * 2))
+    wave.appendLittleEndian(UInt16(2))
+    wave.appendLittleEndian(UInt16(16))
+    wave.append(contentsOf: "data".utf8)
+    wave.appendLittleEndian(UInt32(count * 2))
+    let peak = 0.09 * Double(min(100, max(0, level))) / 100
+    for index in 0..<count {
+      let time = Double(index) / Double(sampleRate)
+      let edge = min(1, min(Double(index) / fade, Double(count - 1 - index) / fade))
+      let sample = Int16(sin(2 * .pi * 425 * time) * peak * edge * 32767)
+      wave.appendLittleEndian(sample)
+    }
+    return wave
+  }
+}
 #endif
 
 private enum DesktopDndStore {
@@ -465,6 +496,9 @@ private final class NativeLinphoneController: LinphoneController {
   private let presenceEvents: LinphoneEventStreamHandler
 
   private var core: Core?
+  private var iterateTimer: Timer?
+  private var activityToken: NSObjectProtocol?
+  private var systemAudioListeners: [(AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
   private var waitingAlertTimer: Timer?
   private var waitingPreviewPlayer: AVAudioPlayer?
   private var account: Account?
@@ -735,8 +769,16 @@ private final class NativeLinphoneController: LinphoneController {
     }
   }
 
+  /// Run with `VOIPCLOUD_NATIVE_LOGS=1` to print Linphone's own debug log to
+  /// the console. No Swift callback is attached (it runs on media threads).
+  private let nativeDebugLogs =
+    ProcessInfo.processInfo.environment["VOIPCLOUD_NATIVE_LOGS"] == "1"
+
   private func initialize() throws {
     guard core == nil else { return }
+    if nativeDebugLogs {
+      LoggingService.Instance.logLevel = LogLevel.Debug
+    }
     let newCore = try Factory.Instance.createCore(
       configPath: nil,
       factoryConfigPath: nil,
@@ -751,6 +793,9 @@ private final class NativeLinphoneController: LinphoneController {
       forInfoDictionaryKey: "CFBundleShortVersionString"
     ) as? String ?? "0.1.0"
     newCore.setUserAgent(name: "VoIPCloud-macOS", version: appVersion)
+    // The SDK declines unanswered calls after 30 s by default; queue calls
+    // must keep ringing until the server stops them.
+    newCore.incTimeout = 120
     newCore.ipv6Enabled = true
     newCore.micEnabled = true
     newCore.config?.setInt(section: "sip", key: "inactive_audio_on_pause", value: 0)
@@ -760,6 +805,8 @@ private final class NativeLinphoneController: LinphoneController {
     // Never use the SDK's unattenuated synthesized waiting fallback.
     let waitingTone = try waitingAlertFile(level: DesktopAudioVolumeStore.level(for: DesktopAudioVolumeStore.waitingKey))
     newCore.setTone(toneId: .CallWaiting, audiofile: waitingTone.path)
+    // Same for the end-of-call, lost-call, hold and unanswered beeps.
+    applyStatusTones(on: newCore, level: 70)
 
     let newDelegate = CoreDelegateStub(
       onCallStateChanged: { [weak self] _, call, state, message in
@@ -822,6 +869,7 @@ private final class NativeLinphoneController: LinphoneController {
       },
       onAudioDevicesListUpdated: { [weak self] _ in
         guard let self else { return }
+        self.followSystemAudioDevices()
         if let selected = self.selectedAudioEndpointId,
            !self.outputAudioDevices().contains(where: {
              self.audioEndpointId($0) == selected
@@ -847,8 +895,53 @@ private final class NativeLinphoneController: LinphoneController {
     try newCore.start()
     core = newCore
     delegate = newDelegate
+    startIterateTimer()
     restorePreferredAudioDevices()
+    installSystemAudioListeners()
     registrationEvents.send(["status": "unregistered", "message": nil])
+  }
+
+  /// The Linphone Swift package only schedules `iterate()` itself on iOS and
+  /// Android (`autoIterateEnabled` is documented "Android & iOS only"), so the
+  /// desktop app must drive the core. Without this nothing is ever processed:
+  /// the account is added but no REGISTER is sent.
+  private func startIterateTimer() {
+    iterateTimer?.invalidate()
+    let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
+      self?.core?.iterate()
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    iterateTimer = timer
+    // A hidden window must not let macOS (App Nap) slow the timer down, or
+    // registration and incoming calls would be delayed.
+    if activityToken == nil {
+      activityToken = ProcessInfo.processInfo.beginActivity(
+        options: .userInitiatedAllowingIdleSystemSleep,
+        reason: "VoipCloud keeps its SIP connection alive"
+      )
+    }
+  }
+
+  private func statusToneFile(level: Int) throws -> URL {
+    let directory = try FileManager.default.url(for: .applicationSupportDirectory,
+      in: .userDomainMask, appropriateFor: nil, create: true)
+      .appendingPathComponent("VoipCloud/Audio", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let file = directory.appendingPathComponent("status-tone-v1-\(level).wav")
+    let expected = DesktopStatusTonePolicy.wave(level: level)
+    if (try? Data(contentsOf: file)) != expected { try expected.write(to: file, options: .atomic) }
+    return file
+  }
+
+  private func applyStatusTones(on currentCore: Core, level: Int) {
+    do {
+      let path = try statusToneFile(level: level).path
+      for tone in [ToneID.CallEnd, ToneID.CallLost, ToneID.CallOnHold, ToneID.CallNotAnswered] {
+        currentCore.setTone(toneId: tone, audiofile: path)
+      }
+    } catch {
+      NSLog("Softphone/Audio status tones could not be prepared: %@", error.localizedDescription)
+    }
   }
 
   private func waitingAlertFile(level: Int) throws -> URL {
@@ -1099,8 +1192,9 @@ private final class NativeLinphoneController: LinphoneController {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
       )
-      var name: CFString = "" as CFString
-      var nameSize = UInt32(MemoryLayout<CFString>.size)
+      // The property returns a retained CFString, so read it through Unmanaged.
+      var name: Unmanaged<CFString>?
+      var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
       guard AudioObjectGetPropertyData(
         device,
         &nameAddress,
@@ -1108,8 +1202,8 @@ private final class NativeLinphoneController: LinphoneController {
         nil,
         &nameSize,
         &name
-      ) == noErr else { continue }
-      if (name as String).caseInsensitiveCompare(requested) == .orderedSame {
+      ) == noErr, let deviceName = name?.takeRetainedValue() else { continue }
+      if (deviceName as String).caseInsensitiveCompare(requested) == .orderedSame {
         return device
       }
     }
@@ -1662,7 +1756,8 @@ private final class NativeLinphoneController: LinphoneController {
       )
     }
     selectedAudioEndpointId = audioEndpointId(selected)
-    UserDefaults.standard.set(selectedAudioEndpointId, forKey: "VoipCloudAudioOutputEndpoint")
+    UserDefaults.standard.set(selectedAudioEndpointId, forKey: Self.outputPreferenceKey)
+    UserDefaults.standard.set(systemDefaultAudioName(input: false), forKey: Self.outputPinKey)
     currentCore.defaultOutputAudioDevice = selected
     currentCore.outputAudioDevice = selected
     if let currentCall = findCurrentCall() {
@@ -1691,10 +1786,8 @@ private final class NativeLinphoneController: LinphoneController {
       )
     }
     selectedAudioInputEndpointId = audioEndpointId(selected)
-    UserDefaults.standard.set(
-      selectedAudioInputEndpointId,
-      forKey: "VoipCloudAudioInputEndpoint"
-    )
+    UserDefaults.standard.set(selectedAudioInputEndpointId, forKey: Self.inputPreferenceKey)
+    UserDefaults.standard.set(systemDefaultAudioName(input: true), forKey: Self.inputPinKey)
     currentCore.defaultInputAudioDevice = selected
     currentCore.inputAudioDevice = selected
     if let currentCall = findCurrentCall() {
@@ -1706,8 +1799,10 @@ private final class NativeLinphoneController: LinphoneController {
 
   private func restorePreferredAudioDevices() {
     guard let currentCore = core else { return }
+    dropStaleAudioPins()
+    defer { followSystemAudioDevices() }
     if let preferredOutput = UserDefaults.standard.string(
-      forKey: "VoipCloudAudioOutputEndpoint"
+      forKey: Self.outputPreferenceKey
     ), let device = outputAudioDevices().first(where: {
       audioEndpointId($0) == preferredOutput
     }) {
@@ -1716,7 +1811,7 @@ private final class NativeLinphoneController: LinphoneController {
       currentCore.outputAudioDevice = device
     }
     if let preferredInput = UserDefaults.standard.string(
-      forKey: "VoipCloudAudioInputEndpoint"
+      forKey: Self.inputPreferenceKey
     ), let device = inputAudioDevices().first(where: {
       audioEndpointId($0) == preferredInput
     }) {
@@ -1726,6 +1821,134 @@ private final class NativeLinphoneController: LinphoneController {
     }
   }
 
+  // MARK: - Follow the macOS system audio devices
+
+  private static let outputPreferenceKey = "VoipCloudAudioOutputEndpoint"
+  private static let inputPreferenceKey = "VoipCloudAudioInputEndpoint"
+  private static let outputPinKey = "VoipCloudAudioOutputPinnedSystem"
+  private static let inputPinKey = "VoipCloudAudioInputPinnedSystem"
+
+  private func coreAudioName(of deviceId: AudioDeviceID) -> String? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioObjectPropertyName,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var name: Unmanaged<CFString>?
+    var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+    guard AudioObjectGetPropertyData(deviceId, &address, 0, nil, &size, &name) == noErr,
+      let value = name?.takeRetainedValue() else { return nil }
+    return value as String
+  }
+
+  /// Name of the device macOS currently uses for calls and sound.
+  private func systemDefaultAudioName(input: Bool) -> String? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: input
+        ? kAudioHardwarePropertyDefaultInputDevice
+        : kAudioHardwarePropertyDefaultOutputDevice,
+      mScope: kAudioObjectPropertyScopeGlobal,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    var device = AudioDeviceID(0)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(
+      AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device
+    ) == noErr, device != 0 else { return nil }
+    return coreAudioName(of: device)
+  }
+
+  private func clearAudioPin(input: Bool) {
+    let defaults = UserDefaults.standard
+    defaults.removeObject(forKey: input ? Self.inputPreferenceKey : Self.outputPreferenceKey)
+    defaults.removeObject(forKey: input ? Self.inputPinKey : Self.outputPinKey)
+    if input { selectedAudioInputEndpointId = nil } else { selectedAudioEndpointId = nil }
+  }
+
+  /// A device picked in the app stays in use only while the macOS default is
+  /// the same as when it was picked. If the Mac's default changed since (for
+  /// example AirPods were connected), the system choice wins again.
+  private func dropStaleAudioPins() {
+    let defaults = UserDefaults.standard
+    for input in [false, true] {
+      let preference = input ? Self.inputPreferenceKey : Self.outputPreferenceKey
+      let pin = input ? Self.inputPinKey : Self.outputPinKey
+      guard defaults.string(forKey: preference) != nil else { continue }
+      if defaults.string(forKey: pin) != systemDefaultAudioName(input: input) {
+        clearAudioPin(input: input)
+      }
+    }
+  }
+
+  /// With no device picked in the app, use whatever macOS uses.
+  private func followSystemAudioDevices() {
+    guard let currentCore = core else { return }
+    let defaults = UserDefaults.standard
+    if defaults.string(forKey: Self.outputPreferenceKey) == nil,
+       let name = systemDefaultAudioName(input: false),
+       let device = outputAudioDevices().first(where: {
+         $0.deviceName.caseInsensitiveCompare(name) == .orderedSame
+       }),
+       currentCore.outputAudioDevice?.deviceName != device.deviceName {
+      selectedAudioEndpointId = audioEndpointId(device)
+      currentCore.defaultOutputAudioDevice = device
+      currentCore.outputAudioDevice = device
+      if let currentCall = findCurrentCall() {
+        currentCall.outputAudioDevice = device
+        emitCall(call: currentCall, state: currentCall.state)
+      }
+    }
+    if defaults.string(forKey: Self.inputPreferenceKey) == nil,
+       let name = systemDefaultAudioName(input: true),
+       let device = inputAudioDevices().first(where: {
+         $0.deviceName.caseInsensitiveCompare(name) == .orderedSame
+       }),
+       currentCore.inputAudioDevice?.deviceName != device.deviceName {
+      selectedAudioInputEndpointId = audioEndpointId(device)
+      currentCore.defaultInputAudioDevice = device
+      currentCore.inputAudioDevice = device
+      if let currentCall = findCurrentCall() {
+        currentCall.inputAudioDevice = device
+        emitCall(call: currentCall, state: currentCall.state)
+      }
+    }
+  }
+
+  private func systemDefaultDeviceChanged(input: Bool) {
+    clearAudioPin(input: input)
+    followSystemAudioDevices()
+  }
+
+  private func installSystemAudioListeners() {
+    guard systemAudioListeners.isEmpty else { return }
+    for (selector, isInput) in [
+      (kAudioHardwarePropertyDefaultOutputDevice, false),
+      (kAudioHardwarePropertyDefaultInputDevice, true),
+    ] {
+      var address = AudioObjectPropertyAddress(
+        mSelector: selector,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+      )
+      let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        self?.systemDefaultDeviceChanged(input: isInput)
+      }
+      if AudioObjectAddPropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
+      ) == noErr {
+        systemAudioListeners.append((address, block))
+      }
+    }
+  }
+
+  private func removeSystemAudioListeners() {
+    for var listener in systemAudioListeners {
+      _ = AudioObjectRemovePropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject), &listener.0, DispatchQueue.main, listener.1
+      )
+    }
+    systemAudioListeners.removeAll()
+  }
   private func gainDb(for level: Int) -> Float {
     let clamped = min(100, max(0, level))
     guard clamped > 0 else { return -80 }
@@ -1751,12 +1974,10 @@ private final class NativeLinphoneController: LinphoneController {
   }
 
   private func restoreAudioVolumes(on currentCore: Core) {
-    currentCore.micGainDb = gainDb(for: DesktopAudioVolumeStore.level(
-      for: DesktopAudioVolumeStore.microphoneKey
-    ))
-    currentCore.playbackGainDb = gainDb(for: DesktopAudioVolumeStore.level(
-      for: DesktopAudioVolumeStore.callAudioKey
-    ))
+    // The Mac's own volume and input settings control how loud calls are, so the
+    // app adds no extra gain of its own.
+    currentCore.micGainDb = 0
+    currentCore.playbackGainDb = 0
     do {
       try applyRingtoneVolume(
         on: currentCore,
@@ -1780,7 +2001,7 @@ private final class NativeLinphoneController: LinphoneController {
     ringtoneSourceURL = desktopSoundURL(
       relativePath: "rings/oldphone-mono.wav",
       preferredPath: existingRing
-    )
+    ) ?? (try? makeDesktopRingtoneTone())
     if let ringtoneSourceURL { currentCore.ring = ringtoneSourceURL.path }
     ringbackSourceURL = desktopSoundURL(
       relativePath: "ringback.wav",
@@ -1810,6 +2031,32 @@ private final class NativeLinphoneController: LinphoneController {
       }
       samples.appendLittleEndian(value)
     }
+    return try writeDesktopWave(samples: samples, sampleRate: sampleRate, name: "ringback")
+  }
+
+  /// Used only when no packaged ringtone is a plain 16-bit WAV, so the ringtone
+  /// volume control still has a source it can scale: two short double-tone
+  /// bursts, then quiet.
+  private func makeDesktopRingtoneTone() throws -> URL {
+    let sampleRate = 16_000
+    let sampleCount = sampleRate * 3
+    var samples = Data(capacity: sampleCount * 2)
+    for index in 0..<sampleCount {
+      let time = Double(index) / Double(sampleRate)
+      var value: Int16 = 0
+      for start in [0.0, 0.5] where time >= start && time < start + 0.4 {
+        let local = time - start
+        let edge = min(1, min(local / 0.01, (0.4 - local) / 0.01))
+        let warble = 0.6 + 0.4 * sin(2 * .pi * 20 * local)
+        let tone = (sin(2 * .pi * 700 * time) + sin(2 * .pi * 900 * time)) * 0.18 * warble
+        value = Int16(tone * edge * 32767)
+      }
+      samples.appendLittleEndian(value)
+    }
+    return try writeDesktopWave(samples: samples, sampleRate: sampleRate, name: "ringtone")
+  }
+
+  private func writeDesktopWave(samples: Data, sampleRate: Int, name: String) throws -> URL {
     var wave = Data()
     wave.append(contentsOf: "RIFF".utf8)
     wave.appendLittleEndian(UInt32(36 + samples.count))
@@ -1825,26 +2072,63 @@ private final class NativeLinphoneController: LinphoneController {
     wave.appendLittleEndian(UInt32(samples.count))
     wave.append(samples)
     let url = FileManager.default.temporaryDirectory
-      .appendingPathComponent("VoipCloud-ringback-\(ProcessInfo.processInfo.processIdentifier).wav")
+      .appendingPathComponent("VoipCloud-\(name)-\(ProcessInfo.processInfo.processIdentifier).wav")
     try wave.write(to: url, options: .atomic)
     return url
   }
 
+  /// Linphone's default ring and ringback are not always plain 16-bit WAV
+  /// files, and the volume controls can only scale those. Look for the packaged
+  /// WAV first, accept the configured file only if it is also plain 16-bit WAV,
+  /// and let the caller fall back to a generated tone otherwise.
   private func desktopSoundURL(relativePath: String, preferredPath: String?) -> URL? {
     let files = FileManager.default
-    if let preferredPath, !preferredPath.isEmpty,
-      files.fileExists(atPath: preferredPath) {
-      return URL(fileURLWithPath: preferredPath)
-    }
     for bundle in [Bundle.main] + Bundle.allFrameworks {
       guard let root = bundle.resourceURL else { continue }
       for prefix in ["share/sounds/linphone", "sounds/linphone"] {
         let candidate = root.appendingPathComponent(prefix)
           .appendingPathComponent(relativePath)
-        if files.fileExists(atPath: candidate.path) { return candidate }
+        if files.fileExists(atPath: candidate.path), isPlainPcm16Wav(candidate) {
+          return candidate
+        }
       }
     }
+    if let preferredPath, !preferredPath.isEmpty,
+      files.fileExists(atPath: preferredPath) {
+      let url = URL(fileURLWithPath: preferredPath)
+      if isPlainPcm16Wav(url) { return url }
+    }
     return nil
+  }
+
+  private func isPlainPcm16Wav(_ url: URL) -> Bool {
+    guard let data = try? Data(contentsOf: url), data.count >= 44,
+      String(data: data.subdata(in: 0..<4), encoding: .ascii) == "RIFF",
+      String(data: data.subdata(in: 8..<12), encoding: .ascii) == "WAVE" else {
+      return false
+    }
+    func u16(_ offset: Int) -> Int {
+      Int(data[offset]) | (Int(data[offset + 1]) << 8)
+    }
+    func u32(_ offset: Int) -> Int {
+      u16(offset) | (u16(offset + 2) << 16)
+    }
+    var pcm16 = false
+    var hasAudio = false
+    var offset = 12
+    while offset + 8 <= data.count {
+      let size = u32(offset + 4)
+      let start = offset + 8
+      guard size <= data.count - start else { break }
+      let kind = String(data: data.subdata(in: offset..<(offset + 4)), encoding: .ascii)
+      if kind == "fmt " && size >= 16 {
+        pcm16 = u16(start) == 1 && u16(start + 14) == 16
+      } else if kind == "data" {
+        hasAudio = size > 0 && size.isMultiple(of: 2)
+      }
+      offset = start + size + (size & 1)
+    }
+    return pcm16 && hasAudio
   }
 
   private func applyRingtoneVolume(on currentCore: Core, level: Int) throws {
@@ -2253,6 +2537,13 @@ private final class NativeLinphoneController: LinphoneController {
     waitingAlertTimer = nil
     stopAudioInputTest()
     stopPresenceSubscriptions()
+    iterateTimer?.invalidate()
+    iterateTimer = nil
+    removeSystemAudioListeners()
+    if let activityToken {
+      ProcessInfo.processInfo.endActivity(activityToken)
+    }
+    activityToken = nil
     if let delegate {
       core?.removeDelegate(delegate: delegate)
     }

@@ -60,6 +60,9 @@ fi
 mkdir -p "$frameworks_dir"
 cp -fL "$source_library" "$destination"
 chmod 755 "$destination"
+# The copy keeps its original signature; drop it before editing the install
+# name (which would invalidate it) and sign again below.
+codesign --remove-signature "$destination" 2>/dev/null || true
 install_name_tool -id "@rpath/${library_name}" "$destination"
 
 # Reject an installer/archive that contains a dylib for only some of the

@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../accounts/domain/account_line.dart';
 import '../../session/presentation/session_controller.dart';
 
 final dialerControllerProvider = NotifierProvider<DialerController, String>(
@@ -64,13 +65,14 @@ class DialerController extends Notifier<String> {
     state = '';
   }
 
-  Future<String?> call() async {
+  /// [line] only matters when a second account exists.
+  Future<String?> call({AccountLine line = AccountLine.primary}) async {
     final destination = state.trim();
     if (destination.isEmpty) {
       return null;
     }
     final service = ref.read(sipServiceProvider);
-    await service.makeCall(destination);
+    await service.makeCall(destination, line: line);
     final callId = service.activeCall?.id;
     clear();
     return callId;

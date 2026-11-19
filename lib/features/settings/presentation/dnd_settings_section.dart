@@ -1,8 +1,24 @@
 import 'package:flutter/material.dart';
 
 import '../../../shared/icons/app_icons.dart';
+import '../../accounts/presentation/line_widgets.dart';
 import 'settings_controller.dart';
 import '../application/pbx_dnd_monitor.dart';
+
+/// One account's own switch on the "All devices" tab.
+class DndAccountSwitch {
+  const DndAccountSwitch({
+    required this.extension,
+    required this.colorValue,
+    required this.pbxState,
+    required this.onChanged,
+  });
+
+  final String extension;
+  final int colorValue;
+  final PbxDndState pbxState;
+  final ValueChanged<bool> onChanged;
+}
 
 class DndSettingsSection extends StatelessWidget {
   const DndSettingsSection({
@@ -11,6 +27,7 @@ class DndSettingsSection extends StatelessWidget {
     required this.onEnabledChanged,
     required this.onScopeChanged,
     this.pbxState,
+    this.accountSwitches = const [],
     super.key,
   });
 
@@ -20,9 +37,16 @@ class DndSettingsSection extends StatelessWidget {
   final ValueChanged<DndScope> onScopeChanged;
   final PbxDndState? pbxState;
 
+  /// With two accounts, "All devices" shows one switch each, and "This
+  /// device" says it covers both.
+  final List<DndAccountSwitch> accountSwitches;
+
+  bool get _twoAccounts => accountSwitches.length > 1;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final perAccount = _twoAccounts && scope == DndScope.allDevices;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -60,25 +84,33 @@ class DndSettingsSection extends StatelessWidget {
           onSelectionChanged: (selection) => onScopeChanged(selection.single),
         ),
         const SizedBox(height: 12),
-        DecoratedBox(
-          decoration: BoxDecoration(
-            border: Border.all(color: theme.colorScheme.outlineVariant),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: SwitchListTile.adaptive(
-            title: const Text('Enable do not disturb'),
-            subtitle: Text(
-              scope == DndScope.allDevices && pbxState != null
-                  ? 'Applies to: all devices\n${pbxState!.message}'
-                  : 'Applies to: ${scope.label.toLowerCase()}',
+        if (perAccount)
+          for (final account in accountSwitches) ...[
+            _switchTile(
+              theme,
+              title: Row(
+                children: [
+                  LineDot(colorValue: account.colorValue, size: 10),
+                  const SizedBox(width: 8),
+                  Flexible(child: Text('Extension ${account.extension}')),
+                ],
+              ),
+              subtitle: account.pbxState.message,
+              value: account.pbxState.enabled == true,
+              onChanged: account.pbxState.canChange ? account.onChanged : null,
             ),
+            const SizedBox(height: 8),
+          ]
+        else
+          _switchTile(
+            theme,
+            title: const Text('Enable do not disturb'),
+            subtitle: scope == DndScope.allDevices && pbxState != null
+                ? 'Applies to: all devices\n${pbxState!.message}'
+                : _twoAccounts
+                ? 'Applies to: this device (both accounts)'
+                : 'Applies to: ${scope.label.toLowerCase()}',
             value: enabled,
-            activeThumbColor: Colors.white,
-            activeTrackColor: theme.colorScheme.primary,
-            inactiveThumbColor: Colors.white,
-            inactiveTrackColor: theme.brightness == Brightness.dark
-                ? const Color(0xFF5C616A)
-                : const Color(0xFFB8BCC4),
             onChanged:
                 scope == DndScope.allDevices &&
                     pbxState != null &&
@@ -86,12 +118,18 @@ class DndSettingsSection extends StatelessWidget {
                 ? null
                 : onEnabledChanged,
           ),
-        ),
-        const SizedBox(height: 10),
+        const SizedBox(height: 2),
         Text(
           scope == DndScope.thisDevice
-              ? 'Only this device will stay silent. Calls will continue '
-                    'ringing on your other signed-in devices.'
+              ? _twoAccounts
+                    ? 'This phone will stay silent for both accounts. Calls '
+                          'will continue ringing on your other signed-in '
+                          'devices.'
+                    : 'Only this device will stay silent. Calls will continue '
+                          'ringing on your other signed-in devices.'
+              : perAccount
+              ? 'Each account has its own setting. Every device signed in to '
+                    'that extension will stay silent.'
               : 'Every device signed in to this extension will stay silent.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
@@ -99,6 +137,33 @@ class DndSettingsSection extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _switchTile(
+    ThemeData theme, {
+    required Widget title,
+    required String subtitle,
+    required bool value,
+    required ValueChanged<bool>? onChanged,
+  }) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: SwitchListTile.adaptive(
+        title: title,
+        subtitle: Text(subtitle),
+        value: value,
+        activeThumbColor: Colors.white,
+        activeTrackColor: theme.colorScheme.primary,
+        inactiveThumbColor: Colors.white,
+        inactiveTrackColor: theme.brightness == Brightness.dark
+            ? const Color(0xFF5C616A)
+            : const Color(0xFFB8BCC4),
+        onChanged: onChanged,
+      ),
     );
   }
 }

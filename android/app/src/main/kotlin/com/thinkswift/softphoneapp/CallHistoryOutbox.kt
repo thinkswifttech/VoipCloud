@@ -43,6 +43,9 @@ internal object CallHistoryOutbox {
             ) {
                 event["startedAt"] = previousStartedAt
             }
+            // Dart ends a call at this time when the event carries no endedAt;
+            // without it a replay hours later would use the replay time.
+            event["historyPersistedAtEpochMs"] = now
             event["historyEventId"] = eventId
             event["historyReplay"] = false
             val entries = loaded

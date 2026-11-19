@@ -27,7 +27,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>$(PRODUCT_COPYRIGHT)</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>VoipCloud needs microphone access for calls.</string>
+	<string>VoipCloud uses the microphone so the person you are calling can hear you. For example, when you place or answer a call, your voice is sent to the other person; audio is never recorded or stored.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>

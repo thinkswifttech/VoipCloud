@@ -20,6 +20,38 @@ void main() {
     expect(restored.effectiveDisposition, CallHistoryDisposition.declined);
   });
 
+  test('treats hours of ringing on an unanswered call as unknown', () {
+    CallHistoryItem item(CallHistoryDisposition disposition, Duration length) {
+      final start = DateTime.utc(2026, 11, 3, 12);
+      return CallHistoryItem(
+        id: disposition.name,
+        remoteNumber: '210',
+        direction: CallDirection.incoming,
+        status: CallStatus.ended,
+        disposition: disposition,
+        startedAt: start,
+        endedAt: start.add(length),
+      );
+    }
+
+    expect(
+      item(CallHistoryDisposition.missed, const Duration(hours: 4)).duration,
+      isNull,
+    );
+    expect(
+      item(CallHistoryDisposition.declined, const Duration(hours: 16)).duration,
+      isNull,
+    );
+    expect(
+      item(CallHistoryDisposition.missed, const Duration(seconds: 25)).duration,
+      const Duration(seconds: 25),
+    );
+    expect(
+      item(CallHistoryDisposition.answered, const Duration(hours: 2)).duration,
+      const Duration(hours: 2),
+    );
+  });
+
   test('infers dispositions for history saved by older app versions', () {
     CallHistoryItem legacy({
       required CallDirection direction,

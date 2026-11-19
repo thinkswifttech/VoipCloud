@@ -13,7 +13,8 @@ class SceneDelegate: FlutterSceneDelegate {
     for context in connectionOptions.urlContexts where !handledExternalIntent {
       handledExternalIntent = ExternalCommunicationIntentBridge.shared.handle(
         url: context.url
-      )
+      ) ||
+        ShareIntentBridge.shared.handle(url: context.url)
     }
     for userActivity in connectionOptions.userActivities
       where !handledExternalIntent {
@@ -34,7 +35,8 @@ class SceneDelegate: FlutterSceneDelegate {
     openURLContexts URLContexts: Set<UIOpenURLContext>
   ) {
     if URLContexts.contains(where: {
-      ExternalCommunicationIntentBridge.shared.handle(url: $0.url)
+      ExternalCommunicationIntentBridge.shared.handle(url: $0.url) ||
+        ShareIntentBridge.shared.handle(url: $0.url)
     }) {
       return
     }
@@ -64,6 +66,7 @@ class SceneDelegate: FlutterSceneDelegate {
   }
 
   override func sceneWillEnterForeground(_ scene: UIScene) {
+    ShareIntentBridge.shared.publishSharedContent()
     LinphoneFlutterBridge.shared?.handleEnterForeground()
     super.sceneWillEnterForeground(scene)
   }

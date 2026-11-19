@@ -1,4 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phone_app/features/accounts/domain/account_line.dart';
+import 'package:phone_app/features/calls/domain/call_direction.dart';
+import 'package:phone_app/features/calls/domain/call_status.dart';
+import 'package:phone_app/features/calls/domain/voip_call.dart';
 import 'package:phone_app/features/calls/presentation/caller_identity.dart';
 import 'package:phone_app/features/contacts/domain/contact.dart';
 import 'package:phone_app/features/contacts/domain/quick_dial_entry.dart';
@@ -173,5 +177,82 @@ void main() {
 
     expect(identity.label, '+14165550123');
     expect(identity.number, '+14165550123');
+  });
+
+  group('two accounts with the same extension', () {
+    // The loaded directory belongs to the primary phone system.
+    final primaryDirectory = [
+      DirectoryEntry(
+        id: '102',
+        displayName: 'Primary System Person',
+        numbers: const ['102'],
+        telephoneKind: DirectoryTelephoneKind.internal,
+        presence: DirectoryPresence.unknown,
+      ),
+    ];
+
+    VoipCall callOn(AccountLine? line) => VoipCall(
+      id: 'c1',
+      remoteUri: 'sip:102@tenant.example.test',
+      direction: CallDirection.incoming,
+      status: CallStatus.ringing,
+      startedAt: DateTime(2026, 10, 29),
+      line: line,
+    );
+
+    test('a call on the primary line may use the primary directory', () {
+      final identity = resolveCallerIdentity(
+        call: callOn(AccountLine.primary),
+        contacts: const [],
+        directory: primaryDirectory,
+      );
+      expect(identity.label, 'Primary System Person');
+    });
+
+    test('a call on the second line never borrows a name from it', () {
+      final identity = resolveCallerIdentity(
+        call: callOn(AccountLine.secondary),
+        contacts: const [],
+        directory: primaryDirectory,
+      );
+      expect(identity.isResolvedName, isFalse);
+      expect(identity.label, '102');
+    });
+
+    test('a call on the second line is named from the second directory', () {
+      final secondDirectory = [
+        DirectoryEntry(
+          id: '102',
+          displayName: 'Second System Person',
+          numbers: const ['102'],
+          telephoneKind: DirectoryTelephoneKind.internal,
+          presence: DirectoryPresence.unknown,
+        ),
+      ];
+      final onSecond = resolveCallerIdentity(
+        call: callOn(AccountLine.secondary),
+        contacts: const [],
+        directory: primaryDirectory,
+        secondaryDirectory: secondDirectory,
+      );
+      expect(onSecond.label, 'Second System Person');
+      // The same extension on the primary line is still the primary person.
+      final onPrimary = resolveCallerIdentity(
+        call: callOn(AccountLine.primary),
+        contacts: const [],
+        directory: primaryDirectory,
+        secondaryDirectory: secondDirectory,
+      );
+      expect(onPrimary.label, 'Primary System Person');
+    });
+
+    test('a call with no line (single account) is unchanged', () {
+      final identity = resolveCallerIdentity(
+        call: callOn(null),
+        contacts: const [],
+        directory: primaryDirectory,
+      );
+      expect(identity.label, 'Primary System Person');
+    });
   });
 }

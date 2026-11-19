@@ -53,6 +53,52 @@ void main() {
       },
     );
   }
+  testWidgets(
+    'two accounts: this device covers both, all devices is per account',
+    (tester) async {
+      var scope = DndScope.thisDevice;
+      final toggled = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) => SingleChildScrollView(
+                child: DndSettingsSection(
+                  enabled: false,
+                  scope: scope,
+                  onEnabledChanged: (_) {},
+                  onScopeChanged: (value) => setState(() => scope = value),
+                  accountSwitches: [
+                    for (final ext in ['210', '106'])
+                      DndAccountSwitch(
+                        extension: ext,
+                        colorValue: 0xFF2B5FD9,
+                        pbxState: PbxDndState(
+                          enabled: false,
+                          message: 'Off $ext',
+                        ),
+                        onChanged: (_) => toggled.add(ext),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.text('Applies to: this device (both accounts)'),
+        findsOneWidget,
+      );
+      expect(find.byType(SwitchListTile), findsOneWidget);
+      await tester.tap(find.text('All devices'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SwitchListTile), findsNWidgets(2));
+      await tester.tap(find.text('Extension 106'));
+      await tester.pumpAndSettle();
+      expect(toggled, ['106']);
+    },
+  );
   for (final width in [320.0, 800.0]) {
     testWidgets('DND order and interactions at width $width', (tester) async {
       DndScope scope = DndScope.thisDevice;

@@ -996,6 +996,55 @@ class StreamHandler : public flutter::StreamHandler<EncodableValue> {
   std::function<void()> on_listen_;
 };
 
+// Why liblinphone.dll could not be used: missing beside the app, or present but
+// one of the DLLs it needs (its own companions or the Visual C++ runtime) is
+// missing. LoadLibrary reports both the same way (error 126), so probe them.
+std::string DescribeLinphoneLoadFailure(DWORD error) {
+  wchar_t exe_path[MAX_PATH] = {};
+  const DWORD length = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+  std::filesystem::path folder;
+  if (length > 0 && length < MAX_PATH) {
+    folder = std::filesystem::path(exe_path).parent_path();
+  }
+  const bool beside_app =
+      !folder.empty() &&
+      (std::filesystem::exists(folder / L"liblinphone.dll") ||
+       std::filesystem::exists(folder / L"linphone.dll"));
+  std::string text;
+  if (!beside_app) {
+    text = "liblinphone.dll is not beside the app";
+    if (!folder.empty()) text += " (" + WideToUtf8(folder.wstring()) + ")";
+    text += ". Rebuild after adding the Linphone SDK, or reinstall VoipCloud.";
+    return text;
+  }
+  static const wchar_t* const kNeeded[] = {
+      L"mediastreamer2.dll", L"belle-sip.dll",   L"xml2.dll",
+      L"lime.dll",           L"xerces-c.dll",    L"zlib1.dll",
+      L"soci_core_4_0.dll",  L"belcard.dll",     L"ZXing.dll",
+      L"hidapi.dll",         L"jsoncpp.dll",     L"ortp.dll",
+      L"turbojpeg.dll",      L"sqlite3.dll",     L"belr.dll",
+      L"bctoolbox.dll",      L"MSVCP140.dll",    L"VCRUNTIME140.dll",
+      L"VCRUNTIME140_1.dll"};
+  std::string missing;
+  for (const wchar_t* name : kNeeded) {
+    HMODULE probe = LoadLibraryExW(name, nullptr, LOAD_LIBRARY_AS_DATAFILE);
+    if (probe == nullptr) {
+      if (!missing.empty()) missing += ", ";
+      missing += WideToUtf8(name);
+    } else {
+      FreeLibrary(probe);
+    }
+  }
+  text = "liblinphone.dll is present but could not be loaded (Windows error " +
+         std::to_string(error) + ").";
+  if (!missing.empty()) {
+    text += " Missing: " + missing +
+            ". Install the Microsoft Visual C++ Redistributable (x64) or "
+            "reinstall VoipCloud.";
+  }
+  return text;
+}
+
 class LinphoneApi {
  public:
   ~LinphoneApi() {
@@ -1004,6 +1053,8 @@ class LinphoneApi {
     }
   }
 
+  const std::string& load_failure() const { return load_failure_; }
+
   bool Load() {
     TraceNative("LinphoneApi.Load enter");
     if (module_ != nullptr) {
@@ -1011,9 +1062,11 @@ class LinphoneApi {
       return true;
     }
 
+    DWORD load_error = 0;
     module_ = LoadLibraryW(L"linphone.dll");
     if (module_ == nullptr) {
       module_ = LoadLibraryW(L"liblinphone.dll");
+      if (module_ == nullptr) load_error = GetLastError();
     }
     if (module_ == nullptr) {
       wchar_t configured_path[MAX_PATH] = {};
@@ -1024,7 +1077,8 @@ class LinphoneApi {
       }
     }
     if (module_ == nullptr) {
-      TraceNative("LinphoneApi.Load DLL not found");
+      load_failure_ = DescribeLinphoneLoadFailure(load_error);
+      TraceNative("LinphoneApi.Load DLL not loaded: " + load_failure_);
       return false;
     }
     TraceNative("LinphoneApi.Load DLL loaded");
@@ -1043,6 +1097,9 @@ class LinphoneApi {
     linphone_core_set_user_agent =
         LoadSymbol<void (*)(LinphoneCore*, const char*, const char*)>(
             "linphone_core_set_user_agent");
+    linphone_core_set_inc_timeout =
+        LoadSymbol<void (*)(LinphoneCore*, int)>(
+            "linphone_core_set_inc_timeout");
     linphone_core_set_root_ca =
         LoadSymbol<void (*)(LinphoneCore*, const char*)>(
             "linphone_core_set_root_ca");
@@ -1422,6 +1479,7 @@ class LinphoneApi {
   int (*linphone_core_start)(LinphoneCore*) = nullptr;
   void (*linphone_core_set_user_agent)(LinphoneCore*, const char*,
                                         const char*) = nullptr;
+  void (*linphone_core_set_inc_timeout)(LinphoneCore*, int) = nullptr;
   void (*linphone_core_set_root_ca)(LinphoneCore*, const char*) = nullptr;
   void (*linphone_core_stop)(LinphoneCore*) = nullptr;
   void (*linphone_core_unref)(LinphoneCore*) = nullptr;
@@ -1628,6 +1686,7 @@ class LinphoneApi {
     return reinterpret_cast<T>(GetProcAddress(module_, name));
   }
 
+  std::string load_failure_;
   HMODULE module_ = nullptr;
 };
 
@@ -1892,9 +1951,10 @@ class LinphoneWindowsBridge::Impl {
     TraceNative("EnsureReady enter");
     if (!api_.Load()) {
       result->Error("LINPHONE_NOT_LINKED",
-                    "Windows liblinphone DLL was not found. Put linphone.dll "
-                    "or liblinphone.dll beside ThinkSwift.exe, add it to PATH, "
-                    "or set LINPHONE_WINDOWS_DLL.");
+                    api_.load_failure().empty()
+                        ? "The Windows calling engine (liblinphone.dll) "
+                          "could not be loaded."
+                        : api_.load_failure());
       return false;
     }
     if (core_ == nullptr) {
@@ -1940,6 +2000,11 @@ class LinphoneWindowsBridge::Impl {
         api_.linphone_core_set_user_agent(core_, "VoIPCloud-Windows",
                                           kVoipCloudVersion);
         TraceNative("EnsureReady desktop user agent configured");
+      }
+      // The SDK declines unanswered calls after 30 s by default; queue calls
+      // must keep ringing until the server stops them.
+      if (api_.linphone_core_set_inc_timeout != nullptr) {
+        api_.linphone_core_set_inc_timeout(core_, 120);
       }
       if (api_.linphone_core_set_root_ca != nullptr) {
         const std::string root_ca_path =

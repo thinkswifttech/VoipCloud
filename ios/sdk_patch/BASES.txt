@@ -1,0 +1,12 @@
+Base: linphone-sdk tag 5.5.19 (commit 8e1ec723a2091854e3f6c19790fd64cbb7667539), the exact source the iPhone
+package linphone-sdk-swift-ios 5.5.19 is built from. In that tag the five modules are plain folders:
+
+  bctoolbox       tree 8b84b75d53f3247eade8461a30dddab71e0d0885   patch: 168 lines
+  belle-sip       tree 709d091ca10c7ebc47418206403102c4594c638b   patch:  21 lines
+  liblinphone     tree 7c981fa5c5c238a9763f55be5648300cf4660cd6   patch:  22 lines
+  mediastreamer2  tree f932f72fedd539b1c31c7e528069ee58efc0185e   patch:  42 lines
+  ortp            tree 37ff7d5e29befe08d717b62615b33c33c6d5f93a   patch:  21 lines
+
+All five apply cleanly with `git apply --check --directory=<module>` to a fresh checkout of 5.5.19, and
+were built and tested on a Mac and an iPhone (see SHIPPED-SDK-CHECKSUMS.txt). The Apple-only code
+(IP_BOUND_IF) can only build on a Mac.

@@ -43,7 +43,14 @@ CallHistoryItem mergeLogicalCall(
   final earliestStart = primary.startedAt.isBefore(secondary.startedAt)
       ? primary.startedAt
       : secondary.startedAt;
-  final latestEnd = _latest(primary.endedAt, secondary.endedAt);
+  // The server's end time is authoritative; a phone-side end time can be a
+  // late replay time and must not stretch the call.
+  final serverEnd = primary.serverFinalized && primary.endedAt != null
+      ? primary.endedAt
+      : secondary.serverFinalized
+      ? secondary.endedAt
+      : null;
+  final latestEnd = serverEnd ?? _latest(primary.endedAt, secondary.endedAt);
   return CallHistoryItem(
     id: preservePrimaryId
         ? primary.id
@@ -56,6 +63,7 @@ CallHistoryItem mergeLogicalCall(
     startedAt: earliestStart,
     endedAt: latestEnd,
     serverFinalized: primary.serverFinalized || secondary.serverFinalized,
+    line: primary.line ?? secondary.line,
   );
 }
 

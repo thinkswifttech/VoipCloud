@@ -76,11 +76,18 @@ class HomeScreen extends ConsumerWidget {
                     registration.when(
                       data: (state) => AppInfoTile(
                         icon: AppIcons.initialize,
-                        title: CallingStatusText.title(state.status),
-                        subtitle: CallingStatusText.description(state.status),
+                        title: CallingStatusText.title(
+                          state.status,
+                          reconnecting: state.reconnecting,
+                        ),
+                        subtitle: CallingStatusText.description(
+                          state.status,
+                          reconnecting: state.reconnecting,
+                        ),
                         trailing: StatusPill(
                           label: CallingStatusText.label(
                             state.status,
+                            reconnecting: state.reconnecting,
                           ).toUpperCase(),
                           color: _registrationColor(context, state.status),
                         ),

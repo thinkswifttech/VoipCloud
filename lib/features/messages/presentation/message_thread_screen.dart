@@ -25,8 +25,13 @@ import '../../../features/messages/domain/sms_segment_info.dart';
 import '../../../shared/icons/app_icons.dart';
 import '../../../shared/platform/desktop_platform.dart';
 import '../data/message_image_normalizer.dart';
+import 'linkified_text.dart';
 import 'message_text_presentation.dart';
+import '../../accounts/domain/account_line.dart';
+import '../../accounts/presentation/accounts_controller.dart';
+import '../../accounts/presentation/line_widgets.dart';
 import 'messages_providers.dart';
+import 'messaging_lines.dart';
 
 class MessageThreadScreen extends ConsumerStatefulWidget {
   const MessageThreadScreen({required this.remoteNumber, super.key});
@@ -59,7 +64,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     _messagesScrollController.addListener(_loadOlderIfNeeded);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref
-          .read(messagesControllerProvider.notifier)
+          .read(messagesProviderOf(ref).notifier)
           .ensureThread(widget.remoteNumber);
       if (isSupportedDesktopPlatform() && mounted) {
         _focusNode.requestFocus();
@@ -93,11 +98,12 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
         ),
       ),
     );
-    final messaging = ref.watch(messagesControllerProvider);
+    ref.watch(activeMessagingLineProvider);
+    final messaging = ref.watch(messagesProviderOf(ref));
     ref.listen<int>(
-      messagesControllerProvider.select(
-        (value) => value.unreadByRemoteNumber[widget.remoteNumber] ?? 0,
-      ),
+      messagesProviderOf(
+        ref,
+      ).select((value) => value.unreadByRemoteNumber[widget.remoteNumber] ?? 0),
       (_, unread) {
         if (unread > 0) _markVisibleConversationRead();
       },
@@ -110,7 +116,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     final desktopInteractions = isSupportedDesktopPlatform();
     final isBlocked = messaging.isBlocked(widget.remoteNumber);
     final canReplyToRemote = ref
-        .read(messagesControllerProvider.notifier)
+        .read(messagesProviderOf(ref).notifier)
         .destinationForRaw(widget.remoteNumber)
         .isNotEmpty;
     final draftText = _outboundText(_controller.text.trim(), _replyingTo);
@@ -400,6 +406,24 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
+                            if (ref.watch(messagingLinesProvider).length > 1)
+                              _SendFromButton(
+                                enabled: !_isSending,
+                                onChanged: (line) {
+                                  ref
+                                      .read(
+                                        messagingLineSelectionProvider.notifier,
+                                      )
+                                      .select(line);
+                                  ref
+                                      .read(
+                                        messagesControllerForLineProvider(
+                                          line,
+                                        ).notifier,
+                                      )
+                                      .ensureThread(widget.remoteNumber);
+                                },
+                              ),
                             IconButton(
                               tooltip: messaging.canSendMms
                                   ? 'Attach a photo'
@@ -529,7 +553,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
   }
 
   Future<void> _refreshConversation() => ref
-      .read(messagesControllerProvider.notifier)
+      .read(messagesProviderOf(ref).notifier)
       .refreshConversation(widget.remoteNumber);
 
   void _cancelComposerContext() {
@@ -556,7 +580,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       }
       try {
         await ref
-            .read(messagesControllerProvider.notifier)
+            .read(messagesProviderOf(ref).notifier)
             .markConversationRead(widget.remoteNumber);
       } finally {
         _isMarkingVisibleConversationRead = false;
@@ -577,14 +601,14 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     if (position.pixels < position.maxScrollExtent - 240) return;
     unawaited(
       ref
-          .read(messagesControllerProvider.notifier)
+          .read(messagesProviderOf(ref).notifier)
           .loadOlderMessages(widget.remoteNumber),
     );
   }
 
   Future<void> _retryMessage(CarrierMessage message) async {
     try {
-      await ref.read(messagesControllerProvider.notifier).retryMessage(message);
+      await ref.read(messagesProviderOf(ref).notifier).retryMessage(message);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -632,7 +656,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     );
     if (confirmed != true || !mounted) return;
     try {
-      final controller = ref.read(messagesControllerProvider.notifier);
+      final controller = ref.read(messagesProviderOf(ref).notifier);
       if (unblock) {
         await controller.unblockNumber(widget.remoteNumber);
       } else {
@@ -685,33 +709,38 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              title: Text(phoneNumber),
-              subtitle: const Text('Not saved in contacts'),
-            ),
-            if (supported) ...[
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
               ListTile(
-                leading: const Icon(Icons.person_add_alt_1_outlined),
-                title: const Text('Create new contact'),
-                onTap: () =>
-                    Navigator.pop(sheetContext, _ContactCardAction.create),
+                title: Text(phoneNumber),
+                subtitle: const Text('Not saved in contacts'),
               ),
+              if (supported) ...[
+                ListTile(
+                  leading: const Icon(Icons.person_add_alt_1_outlined),
+                  title: const Text('Create new contact'),
+                  onTap: () =>
+                      Navigator.pop(sheetContext, _ContactCardAction.create),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.person_add_outlined),
+                  title: const Text('Add to existing contact'),
+                  onTap: () => Navigator.pop(
+                    sheetContext,
+                    _ContactCardAction.addExisting,
+                  ),
+                ),
+              ],
               ListTile(
-                leading: const Icon(Icons.person_add_outlined),
-                title: const Text('Add to existing contact'),
+                leading: const Icon(Icons.copy_outlined),
+                title: const Text('Copy number'),
                 onTap: () =>
-                    Navigator.pop(sheetContext, _ContactCardAction.addExisting),
+                    Navigator.pop(sheetContext, _ContactCardAction.copy),
               ),
             ],
-            ListTile(
-              leading: const Icon(Icons.copy_outlined),
-              title: const Text('Copy number'),
-              onTap: () => Navigator.pop(sheetContext, _ContactCardAction.copy),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -802,66 +831,70 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       context: context,
       showDragHandle: true,
       builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (reactionTarget.isNotEmpty && allowReply) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final reaction in SmsReactionKind.values)
-                      IconButton(
-                        tooltip: 'React ${reaction.emoji}',
-                        onPressed: () => Navigator.pop(context, reaction),
-                        icon: Text(
-                          reaction.emoji,
-                          style: const TextStyle(fontSize: 24),
+        // Scrolls when the desktop sheet is shorter than its list of actions.
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (reactionTarget.isNotEmpty && allowReply) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      for (final reaction in SmsReactionKind.values)
+                        IconButton(
+                          tooltip: 'React ${reaction.emoji}',
+                          onPressed: () => Navigator.pop(context, reaction),
+                          icon: Text(
+                            reaction.emoji,
+                            style: const TextStyle(fontSize: 24),
+                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
+                const Divider(height: 1),
+              ],
+              if (allowReply)
+                ListTile(
+                  leading: const Icon(Icons.reply_rounded),
+                  title: const Text('Reply'),
+                  subtitle: const Text('Includes a readable quote'),
+                  onTap: () => Navigator.pop(context, _MessageAction.reply),
+                ),
+              if (message.text.isNotEmpty)
+                ListTile(
+                  leading: const Icon(AppIcons.copy),
+                  title: const Text('Copy message'),
+                  onTap: () => Navigator.pop(context, _MessageAction.copy),
+                ),
+              if (message.text.isNotEmpty)
+                ListTile(
+                  leading: const Icon(Icons.text_fields_rounded),
+                  title: const Text('Select text'),
+                  subtitle: const Text('Copy just a part, like a code or key'),
+                  onTap: () =>
+                      Navigator.pop(context, _MessageAction.selectText),
+                ),
+              if (message.direction == MessageDirection.outgoing)
+                ListTile(
+                  leading: const Icon(Icons.info_outline_rounded),
+                  title: const Text('Message info'),
+                  subtitle: const Text('See where this message is'),
+                  onTap: () => Navigator.pop(context, _MessageAction.info),
+                ),
+              ListTile(
+                leading: Icon(
+                  AppIcons.trash,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                title: const Text('Delete message'),
+                subtitle: const Text('Removes it from this app'),
+                onTap: () => Navigator.pop(context, _MessageAction.delete),
               ),
-              const Divider(height: 1),
             ],
-            if (allowReply)
-              ListTile(
-                leading: const Icon(Icons.reply_rounded),
-                title: const Text('Reply'),
-                subtitle: const Text('Includes a readable quote'),
-                onTap: () => Navigator.pop(context, _MessageAction.reply),
-              ),
-            if (message.text.isNotEmpty)
-              ListTile(
-                leading: const Icon(AppIcons.copy),
-                title: const Text('Copy message'),
-                onTap: () => Navigator.pop(context, _MessageAction.copy),
-              ),
-            if (message.text.isNotEmpty)
-              ListTile(
-                leading: const Icon(Icons.text_fields_rounded),
-                title: const Text('Select text'),
-                subtitle: const Text('Copy just a part, like a code or key'),
-                onTap: () => Navigator.pop(context, _MessageAction.selectText),
-              ),
-            if (message.direction == MessageDirection.outgoing)
-              ListTile(
-                leading: const Icon(Icons.info_outline_rounded),
-                title: const Text('Message info'),
-                subtitle: const Text('See where this message is'),
-                onTap: () => Navigator.pop(context, _MessageAction.info),
-              ),
-            ListTile(
-              leading: Icon(
-                AppIcons.trash,
-                color: Theme.of(context).colorScheme.error,
-              ),
-              title: const Text('Delete message'),
-              subtitle: const Text('Removes it from this app'),
-              onTap: () => Navigator.pop(context, _MessageAction.delete),
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -904,47 +937,49 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       context: context,
       showDragHandle: true,
       builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(_tickIcon(delivery), color: color),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      delivery.title,
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(_tickIcon(delivery), color: color),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        delivery.title,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(delivery.explanation, style: theme.textTheme.bodyMedium),
+                const SizedBox(height: 14),
+                Text(
+                  '${_dayLabel(message.createdAt)} at '
+                  '${_timeLabel(message.createdAt)}',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (message.canRetry) ...[
+                  const SizedBox(height: 14),
+                  FilledButton.tonal(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      _retryMessage(message);
+                    },
+                    child: const Text('Retry'),
                   ),
                 ],
-              ),
-              const SizedBox(height: 10),
-              Text(delivery.explanation, style: theme.textTheme.bodyMedium),
-              const SizedBox(height: 14),
-              Text(
-                '${_dayLabel(message.createdAt)} at '
-                '${_timeLabel(message.createdAt)}',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              if (message.canRetry) ...[
-                const SizedBox(height: 14),
-                FilledButton.tonal(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    _retryMessage(message);
-                  },
-                  child: const Text('Retry'),
-                ),
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -1020,7 +1055,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
         smsReactionTargetText(message),
       );
       await ref
-          .read(messagesControllerProvider.notifier)
+          .read(messagesProviderOf(ref).notifier)
           .sendMessage(destination: widget.remoteNumber, text: fallback);
     } catch (error) {
       if (!mounted) return;
@@ -1058,9 +1093,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     );
     if (confirmed != true || !mounted) return;
     try {
-      await ref
-          .read(messagesControllerProvider.notifier)
-          .deleteMessage(message);
+      await ref.read(messagesProviderOf(ref).notifier).deleteMessage(message);
     } on AppException catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -1094,7 +1127,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
           );
     if (source == null || !mounted) return;
     try {
-      final messaging = ref.read(messagesControllerProvider);
+      final messaging = ref.read(messagesProviderOf(ref));
       final file = await ImagePicker().pickImage(
         source: source,
         maxWidth: 1600,
@@ -1154,7 +1187,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
 
   Future<void> _send() async {
     if (ref
-        .read(messagesControllerProvider.notifier)
+        .read(messagesProviderOf(ref).notifier)
         .destinationForRaw(widget.remoteNumber)
         .isEmpty) {
       return;
@@ -1173,7 +1206,7 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
     });
     try {
       await ref
-          .read(messagesControllerProvider.notifier)
+          .read(messagesProviderOf(ref).notifier)
           .sendMessage(
             destination: widget.remoteNumber,
             text: text,
@@ -1261,6 +1294,53 @@ class _MessageThreadScreenState extends ConsumerState<MessageThreadScreen> {
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
       alignment: 0.45,
+    );
+  }
+}
+
+/// Which account the text goes from, like the SIM picker in a phone's own
+/// messages. Switching shows this number's conversation on the other account.
+class _SendFromButton extends ConsumerWidget {
+  const _SendFromButton({required this.enabled, required this.onChanged});
+
+  final bool enabled;
+  final ValueChanged<AccountLine> onChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final active = ref.watch(activeMessagingLineProvider);
+    final lines = ref.watch(messagingLinesProvider);
+    final infos = ref
+        .watch(accountLinesProvider)
+        .where((info) => lines.contains(info.line))
+        .toList();
+    final current = infos.where((info) => info.line == active).firstOrNull;
+    if (current == null) return const SizedBox.shrink();
+    return PopupMenuButton<AccountLine>(
+      tooltip: 'Send from which account',
+      enabled: enabled,
+      onSelected: onChanged,
+      itemBuilder: (context) => [
+        for (final info in infos)
+          PopupMenuItem(
+            value: info.line,
+            child: Row(
+              children: [
+                LineDot(colorValue: info.colorValue),
+                const SizedBox(width: 10),
+                Text(info.label),
+                if (info.line == active) ...[
+                  const Spacer(),
+                  const Icon(Icons.check, size: 18),
+                ],
+              ],
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+        child: LineTag(info: current),
+      ),
     );
   }
 }
@@ -1626,7 +1706,7 @@ class _MessageBubble extends StatelessWidget {
                                   final presentation = messageTextPresentation(
                                     displayedText,
                                   );
-                                  return Text(
+                                  return LinkifiedText(
                                     displayedText,
                                     style: theme.textTheme.bodyMedium?.copyWith(
                                       color: foreground,
@@ -1934,7 +2014,7 @@ class _MessageAttachmentViewState
   void initState() {
     super.initState();
     if (_isImage && widget.attachment.downloadUri != null) {
-      final controller = ref.read(messagesControllerProvider.notifier);
+      final controller = ref.read(messagesProviderOf(ref).notifier);
       _initialContent = controller.cachedAttachment(widget.attachment);
       _content = _initialContent == null
           ? controller.loadAttachment(widget.attachment)
@@ -1949,12 +2029,12 @@ class _MessageAttachmentViewState
         oldWidget.attachment.contentType != widget.attachment.contentType) {
       _content = _isImage && widget.attachment.downloadUri != null
           ? ref
-                .read(messagesControllerProvider.notifier)
+                .read(messagesProviderOf(ref).notifier)
                 .loadAttachment(widget.attachment)
           : null;
       _initialContent = _isImage
           ? ref
-                .read(messagesControllerProvider.notifier)
+                .read(messagesProviderOf(ref).notifier)
                 .cachedAttachment(widget.attachment)
           : null;
     }
@@ -2045,7 +2125,7 @@ class _MessageAttachmentViewState
     setState(() {
       _initialContent = null;
       _content = ref
-          .read(messagesControllerProvider.notifier)
+          .read(messagesProviderOf(ref).notifier)
           .loadAttachment(widget.attachment);
     });
   }
@@ -2070,7 +2150,7 @@ class _MessageAttachmentViewState
     setState(() => _saving = true);
     try {
       final content = await ref
-          .read(messagesControllerProvider.notifier)
+          .read(messagesProviderOf(ref).notifier)
           .loadAttachment(widget.attachment);
       if (!mounted) return;
       await _openViewer(content);
@@ -2113,7 +2193,7 @@ class _MessageAttachmentViewState
       final content =
           existing ??
           await ref
-              .read(messagesControllerProvider.notifier)
+              .read(messagesProviderOf(ref).notifier)
               .loadAttachment(widget.attachment);
       final location = await AppFiles().saveBytes(
         fileName: _fileName(widget.attachment),

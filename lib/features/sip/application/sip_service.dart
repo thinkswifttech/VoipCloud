@@ -3,6 +3,7 @@ import '../../calls/domain/audio_volume_levels.dart';
 import '../../calls/domain/call_quality_info.dart';
 import '../../calls/domain/voip_call.dart';
 import '../domain/sip_message.dart';
+import '../../accounts/domain/account_line.dart';
 import '../domain/sip_config.dart';
 import '../domain/sip_registration_state.dart';
 
@@ -54,10 +55,30 @@ abstract class SipService {
 
   Stream<PostDialPrompt?> get postDialPromptStream;
 
-  Future<void> makeCall(String destination);
+  /// [line] picks the account the call leaves from; it only matters once a
+  /// second account exists.
+  Future<void> makeCall(
+    String destination, {
+    AccountLine line = AccountLine.primary,
+  });
+
+  /// Adds or replaces the second account, leaving the primary one alone.
+  Future<void> configureSecondary(SipConfig config);
+
+  /// Removes the second account only.
+  Future<void> removeSecondary();
+
+  SipConfig? get secondaryConfig;
+
+  SipRegistrationState getSecondaryRegistrationState();
+
+  Stream<SipRegistrationState> get secondaryRegistrationStateStream;
 
   /// Silently dial the PBX-wide DND feature toggle. No in-call UI or history.
-  Future<void> syncPbxDndToggle({bool requireImmediate = false});
+  Future<void> syncPbxDndToggle({
+    bool requireImmediate = false,
+    AccountLine line = AccountLine.primary,
+  });
 
   Future<void> endCall(String callId);
 

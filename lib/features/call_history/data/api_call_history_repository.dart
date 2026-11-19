@@ -10,6 +10,7 @@ import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
 import '../../directory/domain/directory_access.dart';
 import '../../../voip/platform/voip_platform_channel.dart';
+import '../../accounts/domain/account_line.dart';
 import '../domain/call_history_item.dart';
 import '../domain/call_history_repository.dart';
 
@@ -105,6 +106,7 @@ class ApiCallHistoryRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) {
     throw UnsupportedError('Server call history is read-only');
   }

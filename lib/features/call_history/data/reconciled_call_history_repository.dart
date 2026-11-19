@@ -3,6 +3,7 @@ import '../../../core/constants/storage_keys.dart';
 import '../../../core/storage/secure_storage_service.dart';
 import '../../calls/domain/call_direction.dart';
 import '../../calls/domain/call_status.dart';
+import '../../accounts/domain/account_line.dart';
 import '../domain/call_history_item.dart';
 import '../domain/call_history_reconciliation.dart';
 import '../domain/call_history_repository.dart';
@@ -144,6 +145,7 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
     DateTime? endedAt,
     String? sipCallId,
     bool serverFinalized = false,
+    AccountLine? line,
   }) {
     final generation = _generation;
     return _write(() async {
@@ -160,6 +162,7 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
           disposition: disposition,
           startedAt: startedAt,
           endedAt: endedAt,
+          line: line,
         );
       }
       return local.syncCallLog(
@@ -172,6 +175,7 @@ class ReconciledCallHistoryRepository implements CallHistoryRepository {
         endedAt: endedAt,
         sipCallId: sipCallId,
         serverFinalized: serverFinalized,
+        line: line,
       );
     });
   }

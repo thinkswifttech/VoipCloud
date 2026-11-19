@@ -1,0 +1,42 @@
+diff --git a/src/base/mtu.c b/src/base/mtu.c
+index 7d6574e04d..2d348044d0 100644
+--- a/src/base/mtu.c
++++ b/src/base/mtu.c
+@@ -21,6 +21,7 @@
+ /* mtu.c : discover the mtu automatically */
+ 
+ #include <bctoolbox/defs.h>
++#include <bctoolbox/vconnect.h>
+ 
+ #include "mediastreamer2/mscommon.h"
+ 
+@@ -201,7 +202,7 @@ int ms_discover_mtu(const char *host) {
+ 		ms_error("getaddrinfo(): %s\n", gai_strerror(err));
+ 		return -1;
+ 	}
+-	sock = socket(family, SOCK_DGRAM, 0);
++	sock = bctbx_socket(family, SOCK_DGRAM, 0);
+ 	if (sock < 0) {
+ 		ms_error("socket(): %s", strerror(errno));
+ 		return sock;
+diff --git a/src/voip/turn_tcp.cpp b/src/voip/turn_tcp.cpp
+index 5e9d32c36f..678fe3343f 100644
+--- a/src/voip/turn_tcp.cpp
++++ b/src/voip/turn_tcp.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include "bctoolbox/crypto.h"
+ #include "bctoolbox/defs.h"
++#include "bctoolbox/vconnect.h"
+ 
+ #include "mediastreamer2/mscommon.h"
+ #include "mediastreamer2/stun.h"
+@@ -444,7 +445,7 @@ int TurnSocket::connect() {
+ 		return -1;
+ 	}
+ 
+-	mSocket = ::socket(ai->ai_family, SOCK_STREAM, 0);
++	mSocket = bctbx_socket(ai->ai_family, SOCK_STREAM, 0);
+ 	if (mSocket == -1) {
+ 		ms_error("TurnSocket [%p]: could not create socket", this);
+ 		bctbx_freeaddrinfo(ai);

@@ -22,7 +22,11 @@ import '../../../shared/platform/desktop_platform.dart';
 import '../../../shared/widgets/empty_state.dart';
 import '../../../shared/widgets/page_content.dart';
 import '../../../shared/widgets/responsive.dart';
+import '../../accounts/domain/account_line.dart';
+import '../../accounts/presentation/accounts_controller.dart';
+import '../../accounts/presentation/line_widgets.dart';
 import 'message_thread_screen.dart';
+import 'messaging_lines.dart';
 import 'messages_providers.dart';
 
 class MessagesScreen extends ConsumerStatefulWidget {
@@ -84,14 +88,14 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     }
     _openedInitialDestination = destination;
     final uri = ref
-        .read(messagesControllerProvider.notifier)
+        .read(messagesProviderOf(ref).notifier)
         .destinationForRaw(destination);
     _openThread(uri);
   }
 
   Future<void> _openInitialMessage() async {
     final messageId = widget.initialMessageId?.trim() ?? '';
-    final messaging = ref.read(messagesControllerProvider);
+    final messaging = ref.read(messagesProviderOf(ref));
     if (messageId.isEmpty ||
         messageId == _openedInitialMessageId ||
         _isOpeningInitialMessage ||
@@ -101,7 +105,7 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     }
     _isOpeningInitialMessage = true;
     final remote = await ref
-        .read(messagesControllerProvider.notifier)
+        .read(messagesProviderOf(ref).notifier)
         .remoteNumberForMessage(messageId);
     _isOpeningInitialMessage = false;
     if (!mounted || remote == null || remote.isEmpty) return;
@@ -109,13 +113,19 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     await _openThread(remote);
   }
 
-  Future<void> _openThread(String remoteNumber) async {
+  Future<void> _openThread(String remoteNumber) =>
+      _openConversation(ref.read(activeMessagingLineProvider), remoteNumber);
+
+  Future<void> _openConversation(AccountLine line, String remoteNumber) async {
     final number = remoteNumber.trim();
     if (number.isEmpty) return;
-    ref.read(messagesControllerProvider.notifier).ensureThread(number);
-    await ref
-        .read(messagesControllerProvider.notifier)
-        .markConversationRead(number);
+    // The thread screens follow the chosen account.
+    ref.read(messagingLineSelectionProvider.notifier).select(line);
+    final controller = ref.read(
+      messagesControllerForLineProvider(line).notifier,
+    );
+    controller.ensureThread(number);
+    await controller.markConversationRead(number);
     if (!mounted) return;
     await Navigator.of(context, rootNavigator: true).push<void>(
       MaterialPageRoute<void>(
@@ -126,13 +136,42 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final messaging = ref.watch(messagesControllerProvider);
-    ref.listen(messagesControllerProvider, (_, _) {
+    final messagingLines = ref.watch(messagingLinesProvider);
+    final states = {
+      for (final line in messagingLines)
+        line: ref.watch(messagesControllerForLineProvider(line)),
+    };
+    final messaging = ref.watch(messagesProviderOf(ref));
+    ref.listen(messagesProviderOf(ref), (_, _) {
       WidgetsBinding.instance.addPostFrameCallback(
         (_) => _openInitialMessage(),
       );
     });
-    final threads = messaging.threads;
+    final readyLines = [
+      for (final entry in states.entries)
+        if (entry.value.availability == MessagingAvailability.ready) entry.key,
+    ];
+    final threads = <_ConvKey, List<CarrierMessage>>{};
+    final unread = <_ConvKey, int>{};
+    final blocked = <_ConvKey>{};
+    for (final line in readyLines) {
+      final state = states[line]!;
+      for (final entry in state.threads.entries) {
+        threads[(line, entry.key)] = entry.value;
+      }
+      for (final entry in state.unreadByRemoteNumber.entries) {
+        unread[(line, entry.key)] = entry.value;
+      }
+      for (final number in state.blocksByRemoteNumber.keys) {
+        blocked.add((line, number));
+      }
+    }
+    final lineInfos = messagingLines.length > 1
+        ? {
+            for (final info in ref.watch(accountLinesProvider))
+              if (messagingLines.contains(info.line)) info.line: info,
+          }
+        : null;
     final contacts = ref.watch(contactsProvider).value ?? const [];
     final directory = ref.watch(directoryProvider).value ?? const [];
 
@@ -147,47 +186,71 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
         desktopMaxWidth: ResponsiveContentWidths.desktopList,
         scrollable: false,
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-        child: messaging.isLoading
+        child: states.values.every((state) => state.isLoading)
             ? Center(
                 child: Semantics(
                   label: 'Loading messages',
                   child: const CircularProgressIndicator(),
                 ),
               )
-            : messaging.availability == MessagingAvailability.ready
+            : readyLines.isNotEmpty
             ? _ConversationList(
                 threads: threads,
                 contacts: contacts,
                 directory: directory,
-                unreadByRemoteNumber: messaging.unreadByRemoteNumber,
-                blockedNumbers: messaging.blocksByRemoteNumber.keys.toSet(),
-                canStartConversation: messaging.canSend,
-                syncError: messaging.errorMessage,
+                unreadByConversation: unread,
+                lineInfos: lineInfos,
+                blockedNumbers: blocked,
+                canStartConversation: readyLines.any(
+                  (line) => states[line]!.canSend,
+                ),
+                syncError: states.values
+                    .map((state) => state.errorMessage)
+                    .nonNulls
+                    .firstOrNull,
                 showNewMessageLabel: _showNewMessageLabel,
-                onOpenThread: _openThread,
+                onOpenThread: (key) => _openConversation(key.$1, key.$2),
                 onBlock: _blockConversation,
                 onDelete: _deleteConversation,
                 onNewConversation: _showNewMessageSheet,
-                onRefresh: () =>
-                    ref.read(messagesControllerProvider.notifier).refresh(),
-                hasMore: messaging.nextConversationCursor != null,
-                isLoadingMore: messaging.isLoadingMoreConversations,
-                onLoadMore: () => unawaited(
-                  ref
-                      .read(messagesControllerProvider.notifier)
-                      .loadMoreConversations(),
+                onRefresh: () => Future.wait([
+                  for (final line in readyLines)
+                    ref
+                        .read(messagesControllerForLineProvider(line).notifier)
+                        .refresh(),
+                ]),
+                hasMore: readyLines.any(
+                  (line) => states[line]!.nextConversationCursor != null,
                 ),
+                isLoadingMore: readyLines.any(
+                  (line) => states[line]!.isLoadingMoreConversations,
+                ),
+                onLoadMore: () {
+                  for (final line in readyLines) {
+                    if (states[line]!.nextConversationCursor != null) {
+                      unawaited(
+                        ref
+                            .read(
+                              messagesControllerForLineProvider(line).notifier,
+                            )
+                            .loadMoreConversations(),
+                      );
+                    }
+                  }
+                },
               )
-            : _MessagingReadinessState(state: messaging),
+            : _MessagingReadinessState(
+                state: states[messagingLines.firstOrNull] ?? messaging,
+              ),
       ),
     );
   }
 
-  Future<void> _blockConversation(String remoteNumber) async {
+  Future<void> _blockConversation(_ConvKey conversation) async {
     try {
       await ref
-          .read(messagesControllerProvider.notifier)
-          .blockNumber(remoteNumber);
+          .read(messagesControllerForLineProvider(conversation.$1).notifier)
+          .blockNumber(conversation.$2);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -204,7 +267,7 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     }
   }
 
-  Future<bool> _deleteConversation(String remoteNumber) async {
+  Future<bool> _deleteConversation(_ConvKey conversation) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -227,8 +290,8 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
     if (confirmed != true || !mounted) return false;
     try {
       await ref
-          .read(messagesControllerProvider.notifier)
-          .deleteConversation(remoteNumber);
+          .read(messagesControllerForLineProvider(conversation.$1).notifier)
+          .deleteConversation(conversation.$2);
       return true;
     } on AppException catch (error) {
       if (!mounted) return false;
@@ -295,12 +358,17 @@ class _MessagingReadinessState extends StatelessWidget {
   }
 }
 
+/// A conversation is one number on one account: the same number texting both
+/// accounts is two conversations.
+typedef _ConvKey = (AccountLine line, String remote);
+
 class _ConversationList extends StatefulWidget {
   const _ConversationList({
     required this.threads,
     required this.contacts,
     required this.directory,
-    required this.unreadByRemoteNumber,
+    required this.unreadByConversation,
+    required this.lineInfos,
     required this.blockedNumbers,
     required this.canStartConversation,
     required this.syncError,
@@ -315,17 +383,20 @@ class _ConversationList extends StatefulWidget {
     required this.onLoadMore,
   });
 
-  final Map<String, List<CarrierMessage>> threads;
+  final Map<_ConvKey, List<CarrierMessage>> threads;
   final List<Contact> contacts;
   final List<DirectoryEntry> directory;
-  final Map<String, int> unreadByRemoteNumber;
-  final Set<String> blockedNumbers;
+  final Map<_ConvKey, int> unreadByConversation;
+
+  /// Set only when both accounts can message: the rows then carry a tag.
+  final Map<AccountLine, LineInfo>? lineInfos;
+  final Set<_ConvKey> blockedNumbers;
   final bool canStartConversation;
   final String? syncError;
   final bool showNewMessageLabel;
-  final ValueChanged<String> onOpenThread;
-  final Future<void> Function(String remoteNumber) onBlock;
-  final Future<bool> Function(String remoteNumber) onDelete;
+  final ValueChanged<_ConvKey> onOpenThread;
+  final Future<void> Function(_ConvKey conversation) onBlock;
+  final Future<bool> Function(_ConvKey conversation) onDelete;
   final VoidCallback onNewConversation;
   final Future<void> Function() onRefresh;
   final bool hasMore;
@@ -390,14 +461,14 @@ class _ConversationListState extends State<_ConversationList> {
         : allEntries
               .where((entry) {
                 final identity = resolveRemoteIdentity(
-                  remoteUri: entry.key,
+                  remoteUri: entry.key.$2,
                   contacts: widget.contacts,
                   directory: widget.directory,
                 );
                 final latestText = entry.value.isEmpty
                     ? ''
                     : entry.value.last.text;
-                return entry.key.toLowerCase().contains(normalizedQuery) ||
+                return entry.key.$2.toLowerCase().contains(normalizedQuery) ||
                     identity.label.toLowerCase().contains(normalizedQuery) ||
                     identity.number.toLowerCase().contains(normalizedQuery) ||
                     latestText.toLowerCase().contains(normalizedQuery);
@@ -513,18 +584,23 @@ class _ConversationListState extends State<_ConversationList> {
                               ? null
                               : entry.value.last;
                           final identity = resolveRemoteIdentity(
-                            remoteUri: entry.key,
+                            remoteUri: entry.key.$2,
                             contacts: widget.contacts,
                             directory: widget.directory,
                           );
                           final unread =
-                              widget.unreadByRemoteNumber[entry.key] ?? 0;
+                              widget.unreadByConversation[entry.key] ?? 0;
                           final status = latest == null
                               ? null
                               : Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   crossAxisAlignment: CrossAxisAlignment.end,
                                   children: [
+                                    if (widget.lineInfos?[entry.key.$1]
+                                        case final info?) ...[
+                                      LineTag(info: info),
+                                      const SizedBox(height: 4),
+                                    ],
                                     Text(
                                       _listTimeLabel(latest.createdAt),
                                       style: theme.textTheme.labelSmall
@@ -1033,7 +1109,7 @@ class _PickQuickDialForMessageSheetState
                         ),
                         onTap: () {
                           final destination = ref
-                              .read(messagesControllerProvider.notifier)
+                              .read(messagesProviderOf(ref).notifier)
                               .destinationForRaw(entry.number);
                           if (destination.isNotEmpty) {
                             Navigator.of(context).pop(destination);
@@ -1055,7 +1131,7 @@ class _PickQuickDialForMessageSheetState
     List<QuickDialEntry> entries,
     String query,
   ) {
-    final controller = ref.read(messagesControllerProvider.notifier);
+    final controller = ref.read(messagesProviderOf(ref).notifier);
     final usable = entries
         .where((entry) => controller.destinationForRaw(entry.number).isNotEmpty)
         .toList(growable: false);
@@ -1227,7 +1303,7 @@ class _PickContactForMessageSheetState
       return;
     }
     final destination = ref
-        .read(messagesControllerProvider.notifier)
+        .read(messagesProviderOf(ref).notifier)
         .destinationForRaw(number);
     Navigator.of(context).pop(destination);
   }
@@ -1352,7 +1428,7 @@ class _PickDirectoryForMessageSheetState
                         ),
                         onTap: () {
                           final destination = ref
-                              .read(messagesControllerProvider.notifier)
+                              .read(messagesProviderOf(ref).notifier)
                               .destinationForRaw(entry.extension);
                           Navigator.of(context).pop(destination);
                         },
@@ -1372,7 +1448,7 @@ class _PickDirectoryForMessageSheetState
     List<DirectoryEntry> entries,
     String query,
   ) {
-    final controller = ref.read(messagesControllerProvider.notifier);
+    final controller = ref.read(messagesProviderOf(ref).notifier);
     final usable = entries
         .where(
           (entry) => controller.destinationForRaw(entry.extension).isNotEmpty,
@@ -1452,7 +1528,7 @@ class _NewNumberForMessageSheetState
       return;
     }
     final destination = ref
-        .read(messagesControllerProvider.notifier)
+        .read(messagesProviderOf(ref).notifier)
         .destinationForRaw(number);
     Navigator.of(context).pop(destination);
   }
