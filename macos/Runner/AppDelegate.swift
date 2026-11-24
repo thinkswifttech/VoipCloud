@@ -110,7 +110,10 @@ class AppDelegate: FlutterAppDelegate, UNUserNotificationCenterDelegate {
   private func showMainWindow() {
     DispatchQueue.main.async {
       NSApp.activate(ignoringOtherApps: true)
-      NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
+      if let window = NSApp.windows.first(where: { $0.canBecomeMain }) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+      }
     }
   }
 }

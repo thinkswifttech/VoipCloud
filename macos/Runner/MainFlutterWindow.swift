@@ -12,6 +12,9 @@ class MainFlutterWindow: NSWindow {
     windowFrame.size.height = max(windowFrame.size.height, 640)
     self.contentViewController = flutterViewController
     self.minSize = NSSize(width: 480, height: 640)
+    // Closing the window must only hide it: if it is released, clicking the Dock
+    // icon has no window to bring back (the app keeps running for calls).
+    self.isReleasedWhenClosed = false
     self.collectionBehavior.insert(.fullScreenNone)
     self.standardWindowButton(.zoomButton)?.isEnabled = false
     let frameName = NSWindow.FrameAutosaveName("VoipCloudMainWindow")
