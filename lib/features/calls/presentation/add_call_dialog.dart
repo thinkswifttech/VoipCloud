@@ -40,7 +40,15 @@ Future<void> showAddCallDialog(
 }) async {
   final entered = await showDialog<String>(
     context: context,
-    builder: (_) => _AddCallDialog(initial: normalizeDialDestination(initial)),
+    builder: (dialogContext) => _AddCallDialog(
+      initial: normalizeDialDestination(initial),
+      // Close the dialog and open that list. Its Call button comes back here
+      // with the chosen number (see openDialerOrAddCall).
+      onBrowse: (path) {
+        Navigator.of(dialogContext).pop();
+        if (context.mounted) context.go(path);
+      },
+    ),
   );
   final number = normalizeDialDestination(entered ?? '');
   if (number.isEmpty || !context.mounted) return;
@@ -80,9 +88,10 @@ Future<void> showAddCallDialog(
 }
 
 class _AddCallDialog extends StatefulWidget {
-  const _AddCallDialog({required this.initial});
+  const _AddCallDialog({required this.initial, required this.onBrowse});
 
   final String initial;
+  final void Function(String path) onBrowse;
 
   @override
   State<_AddCallDialog> createState() => _AddCallDialogState();
@@ -113,6 +122,27 @@ class _AddCallDialogState extends State<_AddCallDialog> {
             keyboardType: TextInputType.phone,
             decoration: const InputDecoration(labelText: 'Number'),
             onSubmitted: (value) => Navigator.of(context).pop(value),
+          ),
+          const SizedBox(height: 16),
+          const Text('Or choose someone from'),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              ActionChip(
+                label: const Text('Contacts'),
+                onPressed: () => widget.onBrowse(RoutePaths.contacts),
+              ),
+              ActionChip(
+                label: const Text('Directory'),
+                onPressed: () => widget.onBrowse(RoutePaths.directory),
+              ),
+              ActionChip(
+                label: const Text('Recents'),
+                onPressed: () => widget.onBrowse(RoutePaths.callHistory),
+              ),
+            ],
           ),
         ],
       ),

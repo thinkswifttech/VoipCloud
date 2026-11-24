@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -60,8 +61,12 @@ class FakeSip extends Fake implements SipService {
   }) async => actions.add('call $destination');
 }
 
-Future<FakeSip> pumpPanel(WidgetTester tester, List<VoipCall> calls) async {
-  await tester.binding.setSurfaceSize(const Size(1000, 800));
+Future<FakeSip> pumpPanel(
+  WidgetTester tester,
+  List<VoipCall> calls, {
+  Size size = const Size(1000, 800),
+}) async {
+  await tester.binding.setSurfaceSize(size);
   addTearDown(() => tester.binding.setSurfaceSize(null));
   final service = FakeSip(calls);
   final container = ProviderContainer(
@@ -127,5 +132,32 @@ void main() {
       call('b', CallStatus.held),
     ]);
     expect(find.text('Add call'), findsNothing);
+  });
+
+  testWidgets('all call buttons fit on a small phone screen', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await pumpPanel(tester, [
+        call('a', CallStatus.active),
+      ], size: const Size(320, 568));
+      expect(tester.takeException(), isNull);
+      for (final label in ['Mute', 'Hold', 'Dialpad', 'Add call']) {
+        final box = tester.getRect(find.text(label));
+        expect(box.left, greaterThanOrEqualTo(0), reason: label);
+        expect(box.right, lessThanOrEqualTo(320), reason: label);
+      }
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  test('call buttons are split into rows of at most three', () {
+    List<int> sizes(int n) => balancedActionRows(
+      List.generate(n, (i) => i),
+    ).map((row) => row.length).toList();
+    expect(sizes(3), [3]);
+    expect(sizes(4), [2, 2]);
+    expect(sizes(5), [3, 2]);
+    expect(sizes(7), [3, 2, 2]);
   });
 }

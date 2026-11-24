@@ -1155,6 +1155,23 @@ class _HeldCallCard extends StatelessWidget {
 /// Preserves the established phone control layout: three primary actions on
 /// the first row and the remaining actions centered below. Desktop keeps the
 /// adaptive wrap used for resizable windows and concurrent-call cards.
+/// Splits call buttons into rows of at most three, spread evenly (7 buttons:
+/// 3, 2, 2), so a narrow phone never pushes a button off the screen.
+@visibleForTesting
+List<List<T>> balancedActionRows<T>(List<T> actions) {
+  final rowCount = (actions.length / 3).ceil();
+  final rows = <List<T>>[];
+  var start = 0;
+  for (var index = 0; index < rowCount; index++) {
+    final size =
+        actions.length ~/ rowCount +
+        (index < actions.length % rowCount ? 1 : 0);
+    rows.add(actions.sublist(start, start + size));
+    start += size;
+  }
+  return rows;
+}
+
 class _MobileCallActions extends StatelessWidget {
   const _MobileCallActions({required this.actions, required this.compact});
 
@@ -1163,9 +1180,8 @@ class _MobileCallActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final firstRow = actions.take(3).toList(growable: false);
-    final secondRow = actions.skip(3).toList(growable: false);
     final spacing = compact ? 8.0 : 14.0;
+    final rows = balancedActionRows(actions);
 
     Widget row(List<Widget> children) => Row(
       mainAxisSize: MainAxisSize.min,
@@ -1181,10 +1197,9 @@ class _MobileCallActions extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        row(firstRow),
-        if (secondRow.isNotEmpty) ...[
-          SizedBox(height: compact ? 10 : 18),
-          row(secondRow),
+        for (var index = 0; index < rows.length; index++) ...[
+          if (index > 0) SizedBox(height: compact ? 10 : 18),
+          row(rows[index]),
         ],
       ],
     );

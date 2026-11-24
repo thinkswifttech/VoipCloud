@@ -92,6 +92,16 @@ class AppFiles {
   /// Opens a system file picker for a CSV/text file.
   /// Returns file contents, or null if the user cancels.
   Future<String?> pickCsvText() async {
+    // Desktop has no native picker behind the channel: use the system open panel.
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      final file = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(label: 'CSV files', extensions: ['csv', 'txt']),
+        ],
+      );
+      if (file == null) return null;
+      return utf8.decode(await file.readAsBytes(), allowMalformed: true);
+    }
     final result = await _channel.invokeMethod<dynamic>('pickCsv');
     if (result == null) {
       return null;

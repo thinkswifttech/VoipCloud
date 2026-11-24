@@ -1,2 +1,5 @@
 #include "../../Flutter/Flutter-Release.xcconfig"
 #include "Warnings.xcconfig"
+// Apple Silicon only: the bundled libhidapi has no x86_64 slice, and Xcode 27 no longer requires one.
+ARCHS = arm64
+ONLY_ACTIVE_ARCH = NO
