@@ -34,6 +34,13 @@
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
+    <!-- Not essential: without these Play hides the app from landscape-only and Wi-Fi-less devices. -->
+    <uses-feature
+        android:name="android.hardware.screen.portrait"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.wifi"
+        android:required="false" />
 
     <application
         android:label="VoipCloud"

@@ -15,6 +15,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.media.AudioManager
+import android.media.AudioDeviceInfo
 import android.media.ToneGenerator
 import android.media.MediaPlayer
 import android.media.AudioAttributes
@@ -1386,7 +1387,7 @@ private class LinphoneBridge private constructor(private val context: android.co
                     if (hasActiveCall()) {
                         result.error("AUDIO_TEST_BUSY", "Finish all calls before previewing the alert.", null)
                     } else {
-                        runCatching { previewWaitingAlert((call.argument<Int>("level") ?: 30).coerceIn(0, 100)) }
+                        runCatching { previewWaitingAlert((call.argument<Int>("level") ?: 30).coerceIn(0, 100), call.argument<String>("route") ?: "speaker") }
                             .onSuccess { result.success(null) }
                             .onFailure { result.error("AUDIO_TEST_FAILED", "Unable to play the alert preview.", null) }
                     }
@@ -1748,17 +1749,43 @@ private class LinphoneBridge private constructor(private val context: android.co
         mainHandler.post(callWaitingAlertRunnable)
     }
 
-    private fun previewWaitingAlert(level: Int) {
+    private fun previewWaitingAlert(level: Int, route: String) {
         waitingPreviewPlayer?.release()
         waitingPreviewPlayer = null
         val file = java.io.File(context.cacheDir, "voipcloud-waiting-preview.wav")
         file.writeBytes(CallWaitingTonePolicy.wave(preview = true))
         val player = MediaPlayer()
         try {
-            player.setAudioAttributes(AudioAttributes.Builder()
-                .setLegacyStreamType(AudioManager.STREAM_VOICE_CALL).build())
-            player.setDataSource(file.absolutePath)
+            val outputs = (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val headsetTypes = setOf(
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_USB_HEADSET,
+            )
+            if (route == "headset" && outputs.any { it.type in headsetTypes }) {
+                // The user chose the headset and one is connected: play there.
+                player.setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA).build())
+                player.setDataSource(file.absolutePath)
+            } else {
+                player.setAudioAttributes(AudioAttributes.Builder()
+                    .setLegacyStreamType(AudioManager.STREAM_VOICE_CALL).build())
+                player.setDataSource(file.absolutePath)
+                // Voice-call audio goes to the earpiece by default; pick the device explicitly.
+                val wanted = if (route != "speaker") AudioDeviceInfo.TYPE_BUILTIN_EARPIECE else AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                outputs.firstOrNull { it.type == wanted }?.let { player.setPreferredDevice(it) }
+            }
             player.setVolume(level / 100f, level / 100f)
+            player.isLooping = true
+            // About 10 s of beeps, so there is time to lift the phone to the ear.
+            mainHandler.postDelayed({
+                if (waitingPreviewPlayer === player) {
+                    waitingPreviewPlayer = null
+                    runCatching { player.stop() }
+                    player.release()
+                }
+            }, 10_000)
             player.setOnCompletionListener { completed ->
                 if (waitingPreviewPlayer === completed) waitingPreviewPlayer = null
                 completed.release()

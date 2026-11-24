@@ -1069,8 +1069,8 @@ class LinphoneSipService implements SipService {
   Future<void> playAudioTestSound() => _platformChannel.playAudioTestSound();
 
   @override
-  Future<void> previewCallWaitingAlert(int level) =>
-      _platformChannel.previewCallWaitingAlert(level);
+  Future<void> previewCallWaitingAlert(int level, {String route = 'speaker'}) =>
+      _platformChannel.previewCallWaitingAlert(level, route: route);
 
   @override
   Future<void> startAudioInputTest() => _platformChannel.startAudioInputTest();

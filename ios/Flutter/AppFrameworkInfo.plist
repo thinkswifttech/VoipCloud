@@ -11,7 +11,7 @@
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>MinimumOSVersion</key>
-  <string>15.0</string>
+  <string>17.0</string>
   <key>CFBundleName</key>
   <string>App</string>
   <key>CFBundlePackageType</key>

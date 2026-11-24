@@ -79,15 +79,15 @@ void main() {
     const platform = VoipPlatformChannel(channel: channel);
     await platform.previewCallWaitingAlert(25);
     await platform.previewCallWaitingAlert(-1);
-    await platform.previewCallWaitingAlert(120);
+    await platform.previewCallWaitingAlert(120, route: 'headset');
     expect(
       calls.map((call) => call.method),
       everyElement('previewCallWaitingAlert'),
     );
     expect(calls.map((call) => call.arguments), [
-      {'level': 25},
-      {'level': 0},
-      {'level': 100},
+      {'level': 25, 'route': 'speaker'},
+      {'level': 0, 'route': 'speaker'},
+      {'level': 100, 'route': 'headset'},
     ]);
   });
 }

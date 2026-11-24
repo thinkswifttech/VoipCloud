@@ -24,6 +24,7 @@ class HelpSupportSheet extends ConsumerWidget {
   static const _ticketUrl =
       'https://whmcs.thinkswift.com/submitticket.php?deptid=1&step=2';
   static const _guidesUrl = 'https://guides.thinkswift.com/';
+  static const _privacyUrl = 'https://thinkswift.com/privacy/';
   static const _supportEmail = 'support@thinkswift.com';
 
   @override
@@ -101,6 +102,12 @@ class HelpSupportSheet extends ConsumerWidget {
               title: 'Submit a support ticket',
               subtitle: 'Open the ThinkSwift help desk',
               onTap: () => _openExternal(_ticketUrl),
+            ),
+            _HelpContactTile(
+              icon: AppIcons.externalLink,
+              title: 'Privacy policy',
+              subtitle: 'thinkswift.com/privacy',
+              onTap: () => _openExternal(_privacyUrl),
             ),
             _HelpContactTile(
               icon: AppIcons.email,

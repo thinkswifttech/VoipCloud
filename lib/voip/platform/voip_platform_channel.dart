@@ -425,9 +425,12 @@ class VoipPlatformChannel {
     return _channel.invokeMethod<void>('playAudioTestSound');
   }
 
-  Future<void> previewCallWaitingAlert(int level) {
+  /// [route] is 'earpiece', 'speaker' or 'headset' (a connected Bluetooth or
+  /// wired headset; the earpiece if none is connected). Desktop ignores it.
+  Future<void> previewCallWaitingAlert(int level, {String route = 'speaker'}) {
     return _channel.invokeMethod<void>('previewCallWaitingAlert', {
       'level': level.clamp(0, 100),
+      'route': route,
     });
   }
 

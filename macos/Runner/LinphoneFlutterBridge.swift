@@ -669,7 +669,7 @@ private final class NativeLinphoneController: LinphoneController {
         let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue ?? 30))
         waitingPreviewPlayer?.stop()
         let player = try AVAudioPlayer(data: DesktopWaitingTonePolicy.wave(level: level))
-        player.numberOfLoops = 0
+        player.numberOfLoops = 9 // about 10 s of beeps
         waitingPreviewPlayer = player
         guard player.play() else {
           throw NSError(domain: "VoIPCloud", code: 1404,

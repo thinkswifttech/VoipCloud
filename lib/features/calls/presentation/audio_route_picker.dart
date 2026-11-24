@@ -75,6 +75,9 @@ class _AudioRoutePickerSheetState
   bool _volumeLoadFailed = false;
   bool _resettingVolumes = false;
   bool _previewingWaitingAlert = false;
+  String _previewRoute = 'earpiece';
+  bool _headsetConnected = false;
+  Timer? _headsetTimer;
   Future<void> _volumeWrites = Future<void>.value();
 
   bool get _showDeviceList =>
@@ -88,6 +91,14 @@ class _AudioRoutePickerSheetState
     if (widget.choosingDefaults || !(Platform.isAndroid || Platform.isIOS)) {
       unawaited(_loadVolumeLevels());
     }
+    if (widget.choosingDefaults && (Platform.isAndroid || Platform.isIOS)) {
+      // The Headset preview choice only exists while a headset is connected.
+      unawaited(_checkHeadset());
+      _headsetTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (_) => unawaited(_checkHeadset()),
+      );
+    }
     // Refresh while open so Bluetooth connect/disconnect appears live.
     if (_showDeviceList) {
       _refreshTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -99,9 +110,32 @@ class _AudioRoutePickerSheetState
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _headsetTimer?.cancel();
     _volumeCommitTimer?.cancel();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _checkHeadset() async {
+    try {
+      final routes = await ref.read(sipServiceProvider).getAudioRoutes();
+      final connected = routes.any(
+        (route) =>
+            route.available &&
+            route.direction == AudioDeviceDirection.output &&
+            (route.route == AudioOutputRoute.bluetooth ||
+                route.route == AudioOutputRoute.wired),
+      );
+      if (!mounted || connected == _headsetConnected) return;
+      setState(() {
+        _headsetConnected = connected;
+        if (!connected && _previewRoute == 'headset') {
+          _previewRoute = 'earpiece';
+        }
+      });
+    } catch (_) {
+      // Keep the last known state; the choice only affects the preview.
+    }
   }
 
   Future<void> _loadVolumeLevels() async {
@@ -359,6 +393,32 @@ class _AudioRoutePickerSheetState
                     ),
                 ],
                 if (widget.choosingDefaults && _volumeLevels != null) ...[
+                  if (Platform.isAndroid || Platform.isIOS)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                      child: SegmentedButton<String>(
+                        segments: [
+                          ButtonSegment(
+                            value: 'earpiece',
+                            label: Text('Earpiece'),
+                          ),
+                          ButtonSegment(
+                            value: 'speaker',
+                            label: Text('Speaker'),
+                          ),
+                          if (_headsetConnected)
+                            const ButtonSegment(
+                              value: 'headset',
+                              label: Text('Headset'),
+                            ),
+                        ],
+                        selected: {_previewRoute},
+                        onSelectionChanged: _previewingWaitingAlert
+                            ? null
+                            : (value) =>
+                                  setState(() => _previewRoute = value.first),
+                      ),
+                    ),
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                     child: OutlinedButton.icon(
@@ -377,7 +437,7 @@ class _AudioRoutePickerSheetState
                     child: Text(
                       liveCall != null
                           ? 'Finish all calls to preview the alert.'
-                          : 'One short beep at the selected level. Device volume and audio output also affect loudness.',
+                          : 'Plays a beep for about 10 seconds so you can hold the phone to your ear (Earpiece) or on the Speaker; a connected Bluetooth or wired headset adds a Headset choice. Device volume and audio output also affect loudness.',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ),
@@ -529,8 +589,8 @@ class _AudioRoutePickerSheetState
       await _volumeWrites;
       final service = ref.read(sipServiceProvider);
       await service.setAudioVolume(AudioVolumeKind.callWaiting, level);
-      await service.previewCallWaitingAlert(level);
-      await Future<void>.delayed(const Duration(seconds: 1));
+      await service.previewCallWaitingAlert(level, route: _previewRoute);
+      await Future<void>.delayed(const Duration(seconds: 10));
     } catch (_) {
       if (mounted) {
         widget.messenger.showSnackBar(

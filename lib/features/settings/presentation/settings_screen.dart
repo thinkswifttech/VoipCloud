@@ -4,6 +4,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/app_version_provider.dart';
 import '../../../core/config/app_config.dart';
@@ -643,6 +644,16 @@ class _AboutSectionState extends ConsumerState<_AboutSection> {
           ),
           const Divider(height: 28),
         ],
+        AppInfoTile(
+          icon: AppIcons.externalLink,
+          title: 'Privacy policy',
+          subtitle: 'thinkswift.com/privacy',
+          onTap: () => launchUrl(
+            Uri.parse('https://thinkswift.com/privacy/'),
+            mode: LaunchMode.externalApplication,
+          ),
+        ),
+        const Divider(height: 28),
         const LiblinphoneAttributionTile(),
       ],
     );

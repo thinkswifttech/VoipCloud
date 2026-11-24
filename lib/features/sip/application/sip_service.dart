@@ -118,7 +118,7 @@ abstract class SipService {
   Future<void> playAudioTestSound();
 
   /// Plays one call-waiting beep at the selected level, only while idle.
-  Future<void> previewCallWaitingAlert(int level);
+  Future<void> previewCallWaitingAlert(int level, {String route = 'speaker'});
 
   /// Starts a temporary desktop microphone meter without retaining audio.
   Future<void> startAudioInputTest();

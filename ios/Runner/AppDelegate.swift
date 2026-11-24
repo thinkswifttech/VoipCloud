@@ -3902,12 +3902,38 @@ private final class NativeLinphoneController: LinphoneController {
         let args = call.arguments as? [String: Any] ?? [:]
         let level = min(100, max(0, (args["level"] as? NSNumber)?.intValue ?? 30))
         waitingPreviewPlayer?.stop()
+        // The silent switch mutes the default audio category. Use a call-style
+        // category so the preview is audible, and put the session back afterwards.
+        let session = AVAudioSession.sharedInstance()
+        let previousCategory = session.category
+        let previousMode = session.mode
+        let previousOptions = session.categoryOptions
+        // playAndRecord ignores the silent switch too, and by default plays
+        // through the earpiece; defaultToSpeaker moves it to the loudspeaker.
+        // 'headset' allows Bluetooth (as calls do); 'earpiece' and 'speaker'
+        // leave Bluetooth out so the preview stays on the phone. A wired
+        // headset always wins for 'earpiece' (iOS cannot force the receiver).
+        let route = (args["route"] as? String) ?? "speaker"
+        try session.setCategory(
+          .playAndRecord, mode: .default,
+          options: route == "headset" ? [.allowBluetooth]
+            : route == "speaker" ? [.defaultToSpeaker] : [])
+        try session.setActive(true)
+        if route == "speaker" { try? session.overrideOutputAudioPort(.speaker) }
         let player = try AVAudioPlayer(data: IOSCallKitTonePolicy.waitingToneWave(level: level))
-        player.numberOfLoops = 0
+        // One loop is 1 s (beep + silence): about 10 s gives time to lift the phone to the ear.
+        player.numberOfLoops = 9
         waitingPreviewPlayer = player
         guard player.play() else {
           throw NSError(domain: "SoftphoneLinphone", code: 1404,
             userInfo: [NSLocalizedDescriptionKey: "Unable to play the alert preview."])
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10.3) { [weak self] in
+          guard let self, self.waitingPreviewPlayer === player else { return }
+          player.stop()
+          self.waitingPreviewPlayer = nil
+          try? session.setActive(false, options: .notifyOthersOnDeactivation)
+          try? session.setCategory(previousCategory, mode: previousMode, options: previousOptions)
         }
         result(nil)
       case "setAudioVolume":
